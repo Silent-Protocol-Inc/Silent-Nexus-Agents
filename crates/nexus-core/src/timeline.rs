@@ -282,6 +282,15 @@ pub struct ArtifactReference {
     pub content_type: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimelineSearchHit {
+    pub event_id: String,
+    pub session_id: SessionId,
+    pub sequence: u64,
+    pub summary: String,
+    pub rank: f64,
+}
+
 /// Typed redacted payload carried by one timeline event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "data")]
@@ -604,43 +613,54 @@ impl TimelineStore {
     }
 
     pub fn append(&self, mut event: TimelineEvent) -> Result<TimelineEvent> {
-        self.store.with(|conn| {
-            let sequence: i64 = conn.query_row(
-                "SELECT COALESCE(MAX(sequence), 0) + 1
+        self.store.with_retry(|conn| {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let result: Result<()> = (|| {
+                let sequence: i64 = conn.query_row(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1
                  FROM timeline_events WHERE session_id = ?1",
-                [event.session_id.as_str()],
-                |row| row.get(0),
-            )?;
-            event.sequence = sequence.max(1) as u64;
-            let payload = serde_json::to_string(&event.kind)?;
-            let artifacts = serde_json::to_string(&event.artifact_refs)?;
-            conn.execute(
-                "INSERT INTO timeline_events
+                    [event.session_id.as_str()],
+                    |row| row.get(0),
+                )?;
+                event.sequence = sequence.max(1) as u64;
+                let payload = serde_json::to_string(&event.kind)?;
+                let artifacts = serde_json::to_string(&event.artifact_refs)?;
+                conn.execute(
+                    "INSERT INTO timeline_events
                  (id, session_id, turn_id, trace_id, span_id, parent_span_id,
                   sequence, at, event_type, phase, status, duration_ms, summary,
                   payload, artifact_refs, risk, source)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
-                params![
-                    event.id,
-                    event.session_id.as_str(),
-                    event.turn_id.as_str(),
-                    event.trace_id.as_str(),
-                    event.span_id.as_str(),
-                    event.parent_span_id.as_ref().map(SpanId::as_str),
-                    sequence,
-                    event.timestamp,
-                    event.kind.type_label(),
-                    event.phase.as_str(),
-                    event.status.as_str(),
-                    event.duration_ms.map(|value| value as i64),
-                    event.summary,
-                    payload,
-                    artifacts,
-                    event.risk,
-                    event.source.as_str(),
-                ],
-            )?;
-            Ok(event)
+                    params![
+                        event.id,
+                        event.session_id.as_str(),
+                        event.turn_id.as_str(),
+                        event.trace_id.as_str(),
+                        event.span_id.as_str(),
+                        event.parent_span_id.as_ref().map(SpanId::as_str),
+                        sequence,
+                        event.timestamp,
+                        event.kind.type_label(),
+                        event.phase.as_str(),
+                        event.status.as_str(),
+                        event.duration_ms.map(|value| value as i64),
+                        event.summary,
+                        payload,
+                        artifacts,
+                        event.risk,
+                        event.source.as_str(),
+                    ],
+                )?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => conn.execute_batch("COMMIT")?,
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+            Ok(event.clone())
         })
     }
 
@@ -683,26 +703,24 @@ impl TimelineStore {
         if !self.has_native_events(session_id)? {
             return Ok(0);
         }
-        let mut events = self.all(session_id, TranscriptFilter::All)?;
-        let mut changed = 0;
-        for event in events
-            .iter_mut()
-            .filter(|event| event.status == TimelineStatus::Running)
-        {
-            event.phase = LifecyclePhase::Cancelled;
-            event.status = TimelineStatus::Cancelled;
-            event.summary = format!("{} · {}", event.summary, reason);
-            match &mut event.kind {
-                TimelineKind::AssistantMessage { streaming, .. } => *streaming = false,
-                TimelineKind::ToolExecution { exit_status, .. } => {
-                    *exit_status = Some("cancelled".into());
-                }
-                _ => {}
-            }
-            self.update(event)?;
-            changed += 1;
-        }
-        Ok(changed)
+        self.store.with_retry(|connection| {
+            let changed = connection.execute(
+                "UPDATE timeline_events
+                 SET phase='cancelled',
+                     status='cancelled',
+                     summary=summary || ' · ' || ?2,
+                     payload=CASE
+                       WHEN event_type='assistant_message'
+                         THEN json_set(payload, '$.data.streaming', json('false'))
+                       WHEN event_type='tool_execution'
+                         THEN json_set(payload, '$.data.exit_status', 'cancelled')
+                       ELSE payload
+                     END
+                 WHERE session_id=?1 AND status='running'",
+                params![session_id, reason],
+            )?;
+            Ok(changed)
+        })
     }
 
     pub fn get(&self, id: &str) -> Result<TimelineEvent> {
@@ -744,43 +762,63 @@ impl TimelineStore {
             let start = projected.len().saturating_sub(limit.max(1));
             return Ok(projected.split_off(start));
         }
-        let fetch_limit = limit.max(1).saturating_mul(8).max(64);
-        let mut events = self.store.with(|conn| {
-            let mut out = Vec::new();
-            if let Some(before) = before_sequence {
-                let mut stmt = conn.prepare(
-                    "SELECT id, session_id, turn_id, trace_id, span_id, parent_span_id,
-                            sequence, at, phase, status, duration_ms, summary, payload,
-                            artifact_refs, risk, source
-                     FROM timeline_events
-                     WHERE session_id=?1 AND sequence < ?2
-                     ORDER BY sequence DESC LIMIT ?3",
-                )?;
-                let rows = stmt.query_map(
-                    params![session_id, before as i64, fetch_limit as i64],
-                    row_to_event,
-                )?;
-                for row in rows {
-                    out.push(row?);
+        let wanted = limit.max(1);
+        let fetch_limit = wanted.saturating_mul(4).clamp(64, 4_096);
+        let mut cursor = before_sequence;
+        let mut events = Vec::with_capacity(wanted);
+        while events.len() < wanted {
+            let batch = self.store.with(|conn| {
+                let mut out = Vec::new();
+                if let Some(before) = cursor {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, session_id, turn_id, trace_id, span_id, parent_span_id,
+                                sequence, at, phase, status, duration_ms, summary, payload,
+                                artifact_refs, risk, source
+                         FROM timeline_events
+                         WHERE session_id=?1 AND sequence < ?2
+                         ORDER BY sequence DESC LIMIT ?3",
+                    )?;
+                    let rows = stmt.query_map(
+                        params![session_id, before as i64, fetch_limit as i64],
+                        row_to_event,
+                    )?;
+                    for row in rows {
+                        out.push(row?);
+                    }
+                } else {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, session_id, turn_id, trace_id, span_id, parent_span_id,
+                                sequence, at, phase, status, duration_ms, summary, payload,
+                                artifact_refs, risk, source
+                         FROM timeline_events
+                         WHERE session_id=?1
+                         ORDER BY sequence DESC LIMIT ?2",
+                    )?;
+                    let rows =
+                        stmt.query_map(params![session_id, fetch_limit as i64], row_to_event)?;
+                    for row in rows {
+                        out.push(row?);
+                    }
                 }
-            } else {
-                let mut stmt = conn.prepare(
-                    "SELECT id, session_id, turn_id, trace_id, span_id, parent_span_id,
-                            sequence, at, phase, status, duration_ms, summary, payload,
-                            artifact_refs, risk, source
-                     FROM timeline_events
-                     WHERE session_id=?1
-                     ORDER BY sequence DESC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![session_id, fetch_limit as i64], row_to_event)?;
-                for row in rows {
-                    out.push(row?);
+                Ok(out)
+            })?;
+            if batch.is_empty() {
+                break;
+            }
+            cursor = batch.last().map(|event| event.sequence);
+            let batch_len = batch.len();
+            for event in batch {
+                if filter.matches(&event) {
+                    events.push(event);
+                    if events.len() == wanted {
+                        break;
+                    }
                 }
             }
-            Ok(out)
-        })?;
-        events.retain(|event| filter.matches(event));
-        events.truncate(limit.max(1));
+            if batch_len < fetch_limit {
+                break;
+            }
+        }
         events.reverse();
         Ok(events)
     }
@@ -846,15 +884,131 @@ impl TimelineStore {
         query: &str,
         filter: TranscriptFilter,
     ) -> Result<Vec<TimelineEvent>> {
-        let query = query.trim().to_ascii_lowercase();
-        if query.is_empty() {
+        let hits = self.search_hits(session_id, query, filter, 500)?;
+        hits.into_iter()
+            .map(|hit| self.get(&hit.event_id))
+            .collect()
+    }
+
+    pub fn search_hits(
+        &self,
+        session_id: &str,
+        query: &str,
+        filter: TranscriptFilter,
+        limit: usize,
+    ) -> Result<Vec<TimelineSearchHit>> {
+        let needle = query.trim().to_ascii_lowercase();
+        let query = fts_query(query);
+        if query.is_empty() || needle.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(self
-            .all(session_id, filter)?
-            .into_iter()
-            .filter(|event| event.searchable_text().contains(&query))
-            .collect())
+        if !self.has_native_events(session_id)? {
+            return Ok(self
+                .project_legacy(session_id)?
+                .into_iter()
+                .filter(|event| filter.matches(event) && event.searchable_text().contains(&needle))
+                .take(limit.clamp(1, 500))
+                .map(|event| TimelineSearchHit {
+                    event_id: event.id,
+                    session_id: event.session_id,
+                    sequence: event.sequence,
+                    summary: event.summary,
+                    rank: 0.0,
+                })
+                .collect());
+        }
+        let wanted = limit.clamp(1, 500);
+        let mut hits = Vec::with_capacity(wanted);
+        let mut offset = 0usize;
+        const CHUNK: usize = 512;
+        while hits.len() < wanted {
+            let candidates = self.store.with(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT t.id,t.session_id,t.sequence,t.summary,bm25(timeline_fts)
+                     FROM timeline_fts
+                     JOIN timeline_events AS t ON t.rowid=timeline_fts.rowid
+                     WHERE t.session_id=?1 AND timeline_fts MATCH ?2
+                     ORDER BY bm25(timeline_fts), t.sequence DESC
+                     LIMIT ?3 OFFSET ?4",
+                )?;
+                let rows = statement.query_map(
+                    params![session_id, query, CHUNK as i64, offset as i64],
+                    |row| {
+                        Ok(TimelineSearchHit {
+                            event_id: row.get(0)?,
+                            session_id: SessionId::from(row.get::<_, String>(1)?),
+                            sequence: row.get::<_, i64>(2)?.max(0) as u64,
+                            summary: row.get(3)?,
+                            rank: row.get(4)?,
+                        })
+                    },
+                )?;
+                let mut candidates = Vec::new();
+                for row in rows {
+                    candidates.push(row?);
+                }
+                Ok(candidates)
+            })?;
+            if candidates.is_empty() {
+                break;
+            }
+            let count = candidates.len();
+            for hit in candidates {
+                if filter.matches(&self.get(&hit.event_id)?) {
+                    hits.push(hit);
+                    if hits.len() == wanted {
+                        break;
+                    }
+                }
+            }
+            offset += count;
+            if count < CHUNK {
+                break;
+            }
+        }
+        Ok(hits)
+    }
+
+    pub fn page_around(
+        &self,
+        session_id: &str,
+        sequence: u64,
+        radius: usize,
+        filter: TranscriptFilter,
+    ) -> Result<Vec<TimelineEvent>> {
+        if !self.has_native_events(session_id)? {
+            let mut events = self.project_legacy(session_id)?;
+            events.retain(|event| {
+                filter.matches(event)
+                    && event.sequence >= sequence.saturating_sub(radius as u64)
+                    && event.sequence <= sequence.saturating_add(radius as u64)
+            });
+            return Ok(events);
+        }
+        let lower = sequence.saturating_sub(radius as u64);
+        let upper = sequence.saturating_add(radius as u64);
+        self.store.with(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, session_id, turn_id, trace_id, span_id, parent_span_id,
+                        sequence, at, phase, status, duration_ms, summary, payload,
+                        artifact_refs, risk, source
+                 FROM timeline_events
+                 WHERE session_id=?1 AND sequence BETWEEN ?2 AND ?3
+                 ORDER BY sequence",
+            )?;
+            let rows = statement.query_map(
+                params![session_id, lower as i64, upper as i64],
+                row_to_event,
+            )?;
+            let mut events = Vec::new();
+            for row in rows {
+                let event = row?;
+                if filter.matches(&event) {
+                    events.push(event);
+                }
+            }
+            Ok(events)
+        })
     }
 
     pub fn latest_sequence(&self, session_id: &str) -> Result<u64> {
@@ -1317,6 +1471,15 @@ impl TimelineStore {
     }
 }
 
+fn fts_query(query: &str) -> String {
+    query
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimelineEvent> {
     let payload: String = row.get(12)?;
     let artifacts: String = row.get(13)?;
@@ -1611,6 +1774,128 @@ mod tests {
             .expect("oldest");
         assert_eq!(oldest.len() + middle.len() + latest.len(), 250);
         assert_eq!(oldest.first().map(|event| event.sequence), Some(1));
+    }
+
+    #[test]
+    fn filtered_paging_scans_until_the_requested_match_count() {
+        let (_store, session, timeline) = seeded();
+        for index in 1..=500 {
+            let kind = if index % 50 == 0 {
+                TimelineKind::Error {
+                    class: "test".into(),
+                    message: format!("error {index}"),
+                    retryable: false,
+                }
+            } else {
+                TimelineKind::Notice {
+                    text: format!("event {index}"),
+                    severity: "info".into(),
+                }
+            };
+            timeline
+                .append(event(&session, kind, &format!("event {index}")))
+                .expect("append");
+        }
+
+        let errors = timeline
+            .page(session.as_str(), None, 5, TranscriptFilter::Errors)
+            .expect("filtered page");
+        assert_eq!(errors.len(), 5);
+        assert_eq!(
+            errors
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![300, 350, 400, 450, 500]
+        );
+    }
+
+    #[test]
+    fn hundred_thousand_event_timeline_meets_release_host_query_budgets() {
+        use std::time::{Duration, Instant};
+
+        let (store, session, timeline) = seeded();
+        store
+            .with(|connection| {
+                connection.execute_batch("BEGIN IMMEDIATE")?;
+                let insertion = (|| -> Result<()> {
+                    let mut statement = connection.prepare(
+                        "INSERT INTO timeline_events
+                         (id,session_id,turn_id,trace_id,span_id,sequence,at,event_type,
+                          phase,status,summary,payload,artifact_refs,source)
+                         VALUES (?1,?2,'turn','trace','span',?3,?4,'notice',
+                                 'completed','completed',?5,?6,'[]','native')",
+                    )?;
+                    for index in 1..=100_000u64 {
+                        let text = if index == 99_999 {
+                            "release needle 99999".to_string()
+                        } else {
+                            format!("timeline event {index}")
+                        };
+                        let payload = serde_json::to_string(&TimelineKind::Notice {
+                            text: text.clone(),
+                            severity: "info".into(),
+                        })?;
+                        statement.execute(params![
+                            format!("event_{index}"),
+                            session.as_str(),
+                            index as i64,
+                            crate::now_rfc3339(),
+                            text,
+                            payload,
+                        ])?;
+                    }
+                    Ok(())
+                })();
+                match insertion {
+                    Ok(()) => connection.execute_batch("COMMIT")?,
+                    Err(error) => {
+                        let _ = connection.execute_batch("ROLLBACK");
+                        return Err(error);
+                    }
+                }
+                Ok(())
+            })
+            .expect("bulk insert");
+
+        let latest_started = Instant::now();
+        let latest = timeline
+            .page(session.as_str(), None, 100, TranscriptFilter::All)
+            .expect("latest page");
+        let latest_elapsed = latest_started.elapsed();
+        assert_eq!(latest.len(), 100);
+        assert!(
+            latest_elapsed < Duration::from_millis(50),
+            "latest page took {latest_elapsed:?}"
+        );
+
+        let search_started = Instant::now();
+        let hits = timeline
+            .search_hits(
+                session.as_str(),
+                "release needle 99999",
+                TranscriptFilter::All,
+                10,
+            )
+            .expect("indexed search");
+        let search_elapsed = search_started.elapsed();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].sequence, 99_999);
+        assert!(
+            search_elapsed < Duration::from_millis(100),
+            "indexed search took {search_elapsed:?}"
+        );
+
+        let surrounding = timeline
+            .page_around(session.as_str(), hits[0].sequence, 2, TranscriptFilter::All)
+            .expect("surrounding page");
+        assert_eq!(
+            surrounding
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![99_997, 99_998, 99_999, 100_000]
+        );
     }
 
     #[test]

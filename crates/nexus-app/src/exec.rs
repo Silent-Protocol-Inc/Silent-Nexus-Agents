@@ -90,6 +90,7 @@ pub enum ConfirmedAction {
     CommitFiles {
         paths: Vec<String>,
         message: String,
+        allow_hooks: bool,
     },
     ImportConnector {
         id: String,
@@ -170,10 +171,19 @@ impl ConfirmedAction {
             ConfirmedAction::DeleteBranch(name) => {
                 format!("Delete merged local branch `{name}`? Unmerged branches are refused.")
             }
-            ConfirmedAction::CommitFiles { paths, message } => {
+            ConfirmedAction::CommitFiles {
+                paths,
+                message,
+                allow_hooks,
+            } => {
                 format!(
-                    "Stage {} selected file(s) and commit with message `{message}`?",
-                    paths.len()
+                    "Stage {} selected file(s) and commit with message `{message}`?{}",
+                    paths.len(),
+                    if *allow_hooks {
+                        " Repository hooks are explicitly enabled and may execute local code."
+                    } else {
+                        " Repository hooks remain disabled."
+                    }
                 )
             }
             ConfirmedAction::ImportConnector { id, preview } => {
@@ -908,7 +918,11 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                     .map(|path| (*path).to_string())
                     .collect::<Vec<_>>();
                 crate::gitx::commit_preview(&app.workspace, &paths, 128 * 1024)?;
-                Effect::Confirm(ConfirmedAction::CommitFiles { paths, message })
+                Effect::Confirm(ConfirmedAction::CommitFiles {
+                    paths,
+                    message,
+                    allow_hooks: false,
+                })
             } else {
                 usage(def)
             }
@@ -1108,9 +1122,16 @@ pub fn apply_confirmed(app: &App, action: &ConfirmedAction) -> Result<Report> {
         ConfirmedAction::DeleteBranch(name) => {
             Ok(Report::untitled().ok(crate::gitx::delete_branch(&app.workspace, name)?))
         }
-        ConfirmedAction::CommitFiles { paths, message } => {
-            Ok(Report::untitled().ok(crate::gitx::commit(&app.workspace, paths, message)?))
-        }
+        ConfirmedAction::CommitFiles {
+            paths,
+            message,
+            allow_hooks,
+        } => Ok(Report::untitled().ok(crate::gitx::commit(
+            &app.workspace,
+            paths,
+            message,
+            *allow_hooks,
+        )?)),
         ConfirmedAction::ImportConnector { id, preview: _ } => {
             Ok(Report::untitled().ok(crate::connectors::import(app, id)?))
         }

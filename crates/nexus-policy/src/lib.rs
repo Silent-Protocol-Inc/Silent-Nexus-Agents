@@ -26,10 +26,24 @@ pub struct ActionRequest {
     pub paths: Vec<String>,
     /// Normalized command line (terminal tools).
     pub command: Option<String>,
+    /// Structured analysis for terminal commands. Raw shell and unprovable
+    /// argv are explicitly one-time-only.
+    pub command_analysis: Option<commands::CommandAnalysis>,
     /// Network destination host (web/network tools).
     pub destination: Option<String>,
     /// One-line human summary shown in approval prompts.
     pub summary: String,
+}
+
+impl ActionRequest {
+    pub fn session_grant_allowed(&self) -> bool {
+        self.command.is_some()
+            && self
+                .command_analysis
+                .as_ref()
+                .is_some_and(commands::CommandAnalysis::session_grant_allowed)
+            && self.risk < RiskLevel::Destructive
+    }
 }
 
 /// Result of a policy evaluation.
@@ -113,12 +127,12 @@ impl PolicyEngine {
     /// Grant token for an action: command actions key on the exact normalized
     /// argv, while non-command actions key on the tool name.
     pub fn grant_token(action: &ActionRequest) -> String {
-        match &action.command {
-            Some(cmd) => match commands::normalized(cmd) {
-                Some(command) => format!("cmd:{command}"),
-                None => format!("tool:{}", action.tool),
-            },
-            None => format!("tool:{}", action.tool),
+        match (&action.command, &action.command_analysis) {
+            (Some(_), Some(analysis)) if analysis.session_grant_allowed() => {
+                let command = serde_json::to_string(&analysis.commands).unwrap_or_default();
+                format!("cmd:{command}")
+            }
+            _ => format!("once-only:{}", action.tool),
         }
     }
 
@@ -133,7 +147,14 @@ impl PolicyEngine {
             );
         }
         if let Some(cmd) = &action.command {
-            if let Some(reason) = commands::hard_denied(cmd, &self.config.denied_commands) {
+            let denied = action
+                .command_analysis
+                .as_ref()
+                .and_then(|analysis| {
+                    commands::hard_denied_analysis(analysis, &self.config.denied_commands)
+                })
+                .or_else(|| commands::hard_denied(cmd, &self.config.denied_commands));
+            if let Some(reason) = denied {
                 return PolicyOutcome::new(Decision::Deny, "builtin", reason);
             }
         }
@@ -144,8 +165,11 @@ impl PolicyEngine {
         }
 
         // 3. Explicitly allowed command prefixes from project/user config.
-        if let Some(cmd) = &action.command {
-            if commands::prefix_allowed(cmd, &self.config.allowed_commands) {
+        if action.command.is_some() {
+            let allowed = action.command_analysis.as_ref().is_some_and(|analysis| {
+                commands::prefix_allowed_analysis(analysis, &self.config.allowed_commands)
+            });
+            if allowed {
                 // Destructive risk still needs an ask even when allowlisted.
                 if action.risk >= RiskLevel::Destructive {
                     return PolicyOutcome::new(
@@ -164,7 +188,7 @@ impl PolicyEngine {
 
         // 4. Session grants from earlier `allow_session` approvals.
         if let Ok(grants) = self.session_grants.read() {
-            if grants.contains(&Self::grant_token(action)) && action.risk < RiskLevel::Destructive {
+            if grants.contains(&Self::grant_token(action)) && action.session_grant_allowed() {
                 return PolicyOutcome::new(
                     Decision::AllowSession,
                     "session_grant",
@@ -291,6 +315,7 @@ mod tests {
             risk,
             paths: vec![],
             command: None,
+            command_analysis: None,
             destination: None,
             summary: String::new(),
         }
@@ -328,6 +353,7 @@ mod tests {
         let e = PolicyEngine::new(cfg);
         let mut a = action("terminal.run", RiskLevel::Write);
         a.command = Some("sudo rm -rf /".into());
+        a.command_analysis = Some(commands::analyze_shell("sudo rm -rf /"));
         assert_eq!(e.evaluate(&a).decision, Decision::Deny);
     }
 
@@ -336,13 +362,16 @@ mod tests {
         let e = engine();
         let mut a = action("terminal.run", RiskLevel::Write);
         a.command = Some("cargo check".into());
+        a.command_analysis = Some(commands::analyze_argv("cargo", &["check".into()]));
         assert_eq!(e.evaluate(&a).decision, Decision::Ask);
         e.grant_session(&PolicyEngine::grant_token(&a));
         assert_eq!(e.evaluate(&a).decision, Decision::AllowSession);
         // A different command, even for the same program, is not covered.
         a.command = Some("cargo publish".into());
+        a.command_analysis = Some(commands::analyze_argv("cargo", &["publish".into()]));
         assert_eq!(e.evaluate(&a).decision, Decision::Ask);
         a.command = Some("npm install".into());
+        a.command_analysis = Some(commands::analyze_argv("npm", &["install".into()]));
         assert_eq!(e.evaluate(&a).decision, Decision::Ask);
     }
 
@@ -384,6 +413,10 @@ mod tests {
         let e = PolicyEngine::new(cfg);
         let mut a = action("terminal.run", RiskLevel::Write);
         a.command = Some("cargo check --all".into());
+        a.command_analysis = Some(commands::analyze_argv(
+            "cargo",
+            &["check".into(), "--all".into()],
+        ));
         assert_eq!(e.evaluate(&a).decision, Decision::Allow);
     }
 }

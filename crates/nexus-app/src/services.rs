@@ -130,15 +130,12 @@ fn init_git_at(workspace: &std::path::Path) -> Result<Report> {
                 .into(),
         ));
     }
-    let output = std::process::Command::new("git")
-        .args(["init", "--initial-branch=main"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|error| NexusError::Other(format!("launching git init: {error}")))?;
-    if !output.status.success() {
+    let output =
+        nexus_core::git::GitRunner::new(workspace).run(&["init", "--initial-branch=main"])?;
+    if !output.success {
         return Err(NexusError::Other(format!(
             "git init failed: {}",
-            nexus_core::sanitize::sanitize_terminal(String::from_utf8_lossy(&output.stderr).trim())
+            output.stderr
         )));
     }
     Ok(Report::untitled().ok(format!(
@@ -160,7 +157,7 @@ pub fn init_write(app: &App, overwrite_confirmed: bool) -> Result<Report> {
             plan.target.display()
         )));
     }
-    std::fs::write(&plan.target, STARTER_AGENTS_MD)?;
+    nexus_core::atomic::atomic_write(&plan.target, STARTER_AGENTS_MD.as_bytes(), 0o644)?;
     Ok(Report::untitled().ok(format!(
         "wrote canonical starter instructions → {}",
         plan.target.display()
@@ -1476,22 +1473,27 @@ pub fn export_timeline(
     } else {
         "jsonl"
     };
-    let relative = requested_path
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(format!(
-                ".nexus/state/exports/{session_id}-{}.{}",
-                nexus_core::now_ms(),
-                extension
-            ))
-        });
-    let path = app.guard.resolve_for_write(&relative)?;
+    let path = match requested_path {
+        Some(requested) => app.guard.resolve_for_write(requested)?,
+        None => app.paths.state_dir.join("exports").join(format!(
+            "{session_id}-{}.{}",
+            nexus_core::now_ms(),
+            extension
+        )),
+    };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        if path.starts_with(&app.paths.state_dir) {
+            nexus_core::permissions::repair_private_tree(parent)?;
+        } else {
+            std::fs::create_dir_all(parent)?;
+        }
     }
-    let temporary = path.with_extension(format!("{extension}.tmp"));
-    std::fs::write(&temporary, content.as_bytes())?;
-    std::fs::rename(&temporary, &path)?;
+    let mode = if path.starts_with(&app.paths.state_dir) {
+        0o600
+    } else {
+        0o644
+    };
+    nexus_core::atomic::atomic_write(&path, content.as_bytes(), mode)?;
     Ok(Report::new("transcript export")
         .field("format", extension)
         .field("events", content.lines().count().to_string())
@@ -2397,9 +2399,9 @@ pub fn build_session_summary(app: &App, session_id: &str) -> Result<SummaryArtif
     );
 
     let dir = app.paths.state_dir.join("summaries");
-    std::fs::create_dir_all(&dir)?;
+    nexus_core::permissions::repair_private_tree(&dir)?;
     let path = dir.join(format!("{session_id}.md"));
-    std::fs::write(&path, &content)?;
+    nexus_core::atomic::atomic_write_private(&path, content.as_bytes())?;
     sessions.set_summary(session_id, &content)?;
     Ok(SummaryArtifact {
         session_id: session_id.to_string(),
@@ -2451,11 +2453,16 @@ pub fn test_command(app: &App, args: &[String]) -> Result<Vec<String>> {
 /// Run the test command in the sandbox and report honestly.
 pub async fn run_test(app: &App, args: &[String]) -> Result<Report> {
     let cmd = test_command(app, args)?;
+    let analysis = nexus_policy::commands::analyze_argv(&cmd[0], &cmd[1..]);
+    if let Some(reason) = analysis.hard_denial.as_ref() {
+        return Err(NexusError::PolicyDenied(reason.clone()));
+    }
     let net = match app.config.sandbox.network.as_str() {
         "off" | "none" => nexus_sandbox::NetworkMode::Off,
         "full" => nexus_sandbox::NetworkMode::Full,
         _ => nexus_sandbox::NetworkMode::Restricted,
     };
+    let sensitive_path_masks = app.guard.sensitive_paths_for_masking()?;
     let spec = nexus_sandbox::ExecSpec {
         program: cmd[0].clone(),
         args: cmd[1..].to_vec(),
@@ -2463,7 +2470,21 @@ pub async fn run_test(app: &App, args: &[String]) -> Result<Report> {
         cwd: app.workspace.clone(),
         env: Default::default(),
         env_allowlist: app.config.sandbox.env_allowlist.clone(),
-        network: net,
+        network: if analysis.requires_network {
+            net
+        } else {
+            nexus_sandbox::NetworkMode::Off
+        },
+        approved_network: net,
+        filesystem_access: if analysis.risk <= nexus_core::RiskLevel::Network {
+            nexus_sandbox::FilesystemAccess::ReadOnly
+        } else {
+            nexus_sandbox::FilesystemAccess::WorkspaceWrite
+        },
+        sensitive_path_masks,
+        // `snx test` and `snx sandbox test` are direct typed operator actions,
+        // not unattended model-proposed terminal execution.
+        unsafe_host_approved: true,
         timeout_secs: app.config.sandbox.timeout_secs,
         cpu_limit_secs: app.config.sandbox.cpu_limit_secs,
         memory_limit_mb: app.config.sandbox.memory_limit_mb,
@@ -2850,6 +2871,10 @@ pub fn about_report() -> Report {
         .field("product", nexus_core::brand::PRODUCT)
         .field("company", nexus_core::brand::COMPANY)
         .field("version", nexus_core::brand::VERSION)
+        .field("build target", nexus_core::brand::BUILD_TARGET)
+        .field("build profile", nexus_core::brand::BUILD_PROFILE)
+        .field("build commit", nexus_core::brand::BUILD_COMMIT)
+        .field("source epoch", nexus_core::brand::BUILD_EPOCH)
         .field("tagline", nexus_core::brand::TAGLINE)
         .field("cli", nexus_core::brand::CLI)
 }
@@ -3095,14 +3120,9 @@ pub async fn run_setup(app: &App) -> Result<Report> {
         }
     }
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
+        nexus_core::permissions::repair_private_tree(parent)?;
     }
-    std::fs::write(&target, &toml)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600));
-    }
+    nexus_core::atomic::atomic_write_private(&target, toml.as_bytes())?;
     r = r.ok(format!("wrote global config → {}", target.display()));
     if models.is_empty() && !codex_available {
         r = r

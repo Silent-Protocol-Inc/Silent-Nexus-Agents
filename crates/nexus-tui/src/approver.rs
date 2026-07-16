@@ -30,6 +30,10 @@ impl TuiApprover {
 
 #[async_trait::async_trait]
 impl ApprovalHandler for TuiApprover {
+    fn interactive(&self) -> bool {
+        true
+    }
+
     async fn request_approval(
         &self,
         action: &ActionRequest,

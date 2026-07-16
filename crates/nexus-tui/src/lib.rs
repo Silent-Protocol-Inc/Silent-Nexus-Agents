@@ -624,10 +624,21 @@ fn handle_key(
             }
             return;
         }
-        let persistent_allowed = st.pending.as_ref().is_some_and(|req| {
-            req.action.command.is_some() && req.action.risk < nexus_core::RiskLevel::Destructive
+        let persistent_allowed = st
+            .pending
+            .as_ref()
+            .is_some_and(|req| req.sandbox_active && req.action.session_grant_allowed());
+        let edit_allowed = st.pending.as_ref().is_some_and(|req| {
+            !req.action
+                .command_analysis
+                .as_ref()
+                .is_some_and(|analysis| analysis.one_time_only)
         });
-        let option_count = if persistent_allowed { 4 } else { 3 };
+        let option_count = match (persistent_allowed, edit_allowed) {
+            (true, true) => 4,
+            (false, true) => 3,
+            (_, false) => 2,
+        };
         let decision = match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 st.approval_selected = st.approval_selected.saturating_sub(1);
@@ -643,7 +654,7 @@ fn handle_key(
             KeyCode::Char('s') | KeyCode::Char('S') if persistent_allowed => {
                 Some(ApprovalDecision::ApproveForSession)
             }
-            KeyCode::Char('e') | KeyCode::Char('E') => {
+            KeyCode::Char('e') | KeyCode::Char('E') if edit_allowed => {
                 begin_approval_edit(st);
                 None
             }
@@ -652,10 +663,11 @@ fn handle_key(
                 (_, 0) => Some(ApprovalDecision::Approve),
                 (true, 1) => Some(ApprovalDecision::ApproveForSession),
                 (true, 2) | (false, 1) => Some(ApprovalDecision::Deny),
-                _ => {
+                _ if edit_allowed => {
                     begin_approval_edit(st);
                     None
                 }
+                _ => Some(ApprovalDecision::Deny),
             },
             _ => None,
         };
@@ -697,8 +709,7 @@ fn handle_key(
             KeyCode::Enter => {
                 let query = st.search_edit.take().unwrap_or_default();
                 st.search_query = (!query.trim().is_empty()).then(|| query.trim().to_string());
-                st.refresh_search_matches();
-                select_search_match(st, false);
+                refresh_durable_search(st, app, session.as_ref());
                 if let Some(view) = st.session_view_state() {
                     let _ = app.timeline().save_view_state(&view);
                 }
@@ -760,11 +771,11 @@ fn handle_key(
                 return;
             }
             KeyCode::Char('n') => {
-                select_search_match(st, false);
+                select_search_match(st, false, app, session.as_ref());
                 return;
             }
             KeyCode::Char('N') => {
-                select_search_match(st, true);
+                select_search_match(st, true, app, session.as_ref());
                 return;
             }
             KeyCode::Char('y') => {
@@ -824,7 +835,7 @@ fn handle_key(
         KeyCode::Left => st.input.left(),
         KeyCode::Right => st.input.right(),
         KeyCode::Home if st.focus != Focus::Input => {
-            load_complete_timeline(st, app, session.as_ref());
+            load_older_timeline(st, app, session.as_ref());
             st.follow = false;
             st.scroll = 0;
         }
@@ -996,24 +1007,6 @@ fn load_older_timeline(st: &mut State, app: &Arc<App>, session: Option<&SessionI
     st.prepend_events(events);
 }
 
-fn load_complete_timeline(st: &mut State, app: &Arc<App>, session: Option<&SessionId>) {
-    let Some(session) = session else {
-        return;
-    };
-    match app.timeline().all(
-        session.as_str(),
-        nexus_core::timeline::TranscriptFilter::All,
-    ) {
-        Ok(events) => {
-            st.timeline = events;
-            st.earliest_sequence = st.timeline.first().map(|event| event.sequence);
-            st.has_older_events = false;
-            st.refresh_search_matches();
-        }
-        Err(error) => st.toast(format!("history load: {error}"), Sev::Err),
-    }
-}
-
 fn select_previous_event(st: &mut State) {
     let start = st.selected_event.unwrap_or(st.timeline.len());
     if let Some(index) = (0..start).rev().find(|index| {
@@ -1044,7 +1037,42 @@ fn select_next_event(st: &mut State) {
     }
 }
 
-fn select_search_match(st: &mut State, previous: bool) {
+fn refresh_durable_search(st: &mut State, app: &Arc<App>, session: Option<&SessionId>) {
+    let Some(query) = st.search_query.as_deref() else {
+        st.durable_search = false;
+        st.refresh_search_matches();
+        return;
+    };
+    let Some(session) = session else {
+        st.durable_search = false;
+        st.refresh_search_matches();
+        return;
+    };
+    match app
+        .timeline()
+        .search_hits(session.as_str(), query, st.transcript_filter, 500)
+    {
+        Ok(hits) => {
+            st.search_matches = hits.into_iter().map(|hit| hit.event_id).collect();
+            st.search_match_index = 0;
+            st.durable_search = true;
+            st.selected_event = None;
+            if st.search_matches.is_empty() {
+                st.toast("no durable transcript matches", Sev::Info);
+            } else {
+                select_search_match(st, false, app, Some(session));
+            }
+        }
+        Err(error) => st.toast(format!("timeline search: {error}"), Sev::Err),
+    }
+}
+
+fn select_search_match(
+    st: &mut State,
+    previous: bool,
+    app: &Arc<App>,
+    session: Option<&SessionId>,
+) {
     if st.search_matches.is_empty() {
         return;
     }
@@ -1057,8 +1085,24 @@ fn select_search_match(st: &mut State, previous: bool) {
     } else if st.selected_event.is_some() {
         st.search_match_index = (st.search_match_index + 1) % st.search_matches.len();
     }
-    let id = &st.search_matches[st.search_match_index];
-    st.selected_event = st.timeline.iter().position(|event| &event.id == id);
+    let id = st.search_matches[st.search_match_index].clone();
+    st.selected_event = st.timeline.iter().position(|event| event.id == id);
+    if st.selected_event.is_none() {
+        if let (Some(session), Ok(event)) = (session, app.timeline().get(&id)) {
+            if let Ok(events) = app.timeline().page_around(
+                session.as_str(),
+                event.sequence,
+                50,
+                nexus_core::timeline::TranscriptFilter::All,
+            ) {
+                st.timeline = events;
+                st.earliest_sequence = st.timeline.first().map(|event| event.sequence);
+                st.has_older_events = st.timeline.first().is_some_and(|event| event.sequence > 1);
+                st.selected_event = st.timeline.iter().position(|event| event.id == id);
+                st.wrap_layout_cache.clear();
+            }
+        }
+    }
     st.focus = Focus::Timeline;
     focus_selected_event(st);
 }
@@ -1644,9 +1688,13 @@ fn handle_effect(
         }
         Effect::SetTranscriptFilter(filter) => {
             st.transcript_filter = filter;
-            st.refresh_search_matches();
-            st.selected_event = st.timeline.iter().rposition(|event| filter.matches(event));
-            st.follow = true;
+            if st.search_query.is_some() {
+                refresh_durable_search(st, app, session.as_ref());
+            } else {
+                st.refresh_search_matches();
+                st.selected_event = st.timeline.iter().rposition(|event| filter.matches(event));
+                st.follow = true;
+            }
             st.toast(format!("timeline filter → {}", filter.as_str()), Sev::Ok);
             if let Some(view) = st.session_view_state() {
                 let _ = app.timeline().save_view_state(&view);
@@ -1687,6 +1735,9 @@ fn attach_session(st: &mut State, id: &str, app: &Arc<App>, session: &mut Option
                 (Ok(view), Ok(events)) => {
                     st.has_older_events = events.first().is_some_and(|event| event.sequence > 1);
                     st.load_session_timeline(events, view);
+                    if st.search_query.is_some() {
+                        refresh_durable_search(st, app, Some(&SessionId::from(id.to_string())));
+                    }
                     if let Some(sequence) = st.timeline.last().map(|event| event.sequence) {
                         let _ = timeline.mark_read(id, sequence);
                     }
@@ -2102,6 +2153,7 @@ fn handle_action(
                         UiAction::Confirmed(nexus_app::ConfirmedAction::CommitFiles {
                             paths,
                             message,
+                            allow_hooks: false,
                         }),
                     )));
                 }

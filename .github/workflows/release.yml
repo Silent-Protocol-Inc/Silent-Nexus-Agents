@@ -1,0 +1,46 @@
+name: Release artifact
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  linux-x86-64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal
+
+      - name: Select pinned toolchain
+        run: rustup override set 1.97.0
+
+      - name: Build deterministic Linux package
+        run: scripts/package-release.sh
+
+      - name: Validate packaged release
+        run: scripts/validate-release.sh dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: silent-nexus-1.0.0-linux-x86-64
+          path: |
+            dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30

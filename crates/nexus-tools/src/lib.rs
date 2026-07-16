@@ -32,6 +32,7 @@ use nexus_sandbox::SandboxManager;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Functional grouping used for lazy tool discovery and routing.
@@ -97,6 +98,22 @@ pub struct ToolContext {
     pub config: Arc<Config>,
     pub store: nexus_core::store::Store,
     pub session: Option<SessionId>,
+    pub authorization: ExecutionAuthorization,
+}
+
+#[derive(Clone, Default)]
+pub struct ExecutionAuthorization {
+    unsafe_host_once: Arc<AtomicBool>,
+}
+
+impl ExecutionAuthorization {
+    pub fn authorize_unsafe_host_once(&self) {
+        self.unsafe_host_once.store(true, Ordering::Release);
+    }
+
+    pub fn consume_unsafe_host_once(&self) -> bool {
+        self.unsafe_host_once.swap(false, Ordering::AcqRel)
+    }
 }
 
 /// Sanitized, truncated result surfaced to the model and UI.
@@ -306,6 +323,8 @@ pub(crate) mod test_support {
         let store = Store::open_in_memory().expect("store");
         let artifacts =
             ArtifactStore::new(&dir.join(".nexus/state"), store.clone()).expect("artifacts");
+        let authorization = ExecutionAuthorization::default();
+        authorization.authorize_unsafe_host_once();
         ToolContext {
             workspace: Arc::new(WorkspaceGuard::new(dir, &[]).expect("guard")),
             sandbox: Arc::new(SandboxManager::with_backend(Box::new(
@@ -316,6 +335,7 @@ pub(crate) mod test_support {
             config: Arc::new(Config::default()),
             store,
             session: None,
+            authorization,
         }
     }
 }

@@ -167,6 +167,7 @@ impl Tool for WebTool {
                 .map(|p| vec![p.to_string()])
                 .unwrap_or_default(),
             command: None,
+            command_analysis: None,
             destination,
             summary,
         })
@@ -330,10 +331,7 @@ impl Tool for WebTool {
                 }
                 let bytes = read_capped_body(response, web.max_fetch_bytes).await?;
                 let hash = hex::encode(sha2::Sha256::digest(&bytes));
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&dest, &bytes)?;
+                nexus_core::atomic::atomic_write(&dest, &bytes, 0o644)?;
                 let body = format!(
                     "downloaded {} → {} ({} bytes, sha256 {}…)",
                     validated.url,

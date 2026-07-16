@@ -11,8 +11,10 @@ adversarial. Read this before granting write or command capabilities.
    the model asserts nothing that isn't checked.
 3. **Narrow tools over shell.** Prefer typed, schema-validated tools to raw
    command execution.
-4. **Explicit approval.** Side-effecting actions ask unless you configured them
-   otherwise; destructive/external actions can never be auto-allowed.
+4. **Explicit approval.** Side-effecting actions ask unless safely configured;
+   destructive/external actions cannot be auto-allowed. Raw shell, interpreters,
+   wrappers, unproved commands, and approval-only host terminal execution are
+   always one-time attended approvals.
 5. **Local-first.** No data leaves your machine unless a tool you approved sends
    it. No telemetry.
 6. **Honest limitations over fake capabilities.** Isolation levels, health, and
@@ -27,9 +29,10 @@ logging. See [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Operator responsibilities
 
-- **Choose a real sandbox for untrusted code.** The restricted-process backend
-  is a guardrail, not containment. Use the container backend for hostile or
-  model-generated code. Check `snx sandbox status`.
+- **Choose a real sandbox for untrusted code.** The process backend is an
+  approval-only host guardrail, not containment. Use the pinned container
+  backend for automatic or hostile/model-generated terminal execution. Check
+  `snx sandbox status`.
 - **Keep secrets in environment variables**, referenced by `api_key_env`.
   Never inline keys in config.
 - **Read approval prompts.** They state the tool, risk, exact command/paths, and
@@ -38,6 +41,11 @@ logging. See [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Reporting a vulnerability
 
-Report suspected vulnerabilities privately to the maintainers rather than via a
-public issue. Include a reproduction and the affected version (`snx --version`).
+Report suspected vulnerabilities through the repository's
+[private vulnerability reporting channel](https://github.com/silent-protocol/silent-nexus/security/advisories/new).
+Include a reproduction, impact, and the affected version (`snx --version`).
 Please do not open public issues for undisclosed vulnerabilities.
+
+Supported security line: `1.x`. The most recent `1.x` release receives security
+fixes. Experimental platforms may be asked to reproduce on the certified Linux
+x86-64 target.

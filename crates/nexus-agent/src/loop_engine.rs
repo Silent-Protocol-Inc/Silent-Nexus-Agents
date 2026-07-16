@@ -63,6 +63,12 @@ pub enum ApprovalDecision {
 /// supply an auto-deny or policy-driven handler.
 #[async_trait::async_trait]
 pub trait ApprovalHandler: Send + Sync {
+    /// True only for an attended operator prompt. Auto-approval, background
+    /// workers, and piped/non-interactive runs must return false.
+    fn interactive(&self) -> bool {
+        false
+    }
+
     async fn request_approval(
         &self,
         action: &ActionRequest,
@@ -1630,6 +1636,7 @@ impl AgentLoop {
             risk: nexus_core::RiskLevel::Write,
             paths: Vec::new(),
             command: None,
+            command_analysis: None,
             destination: None,
             summary,
         };
@@ -1645,8 +1652,7 @@ impl AgentLoop {
                 "budget": stage.budget,
             })).collect::<Vec<_>>(),
         });
-        let sandbox_active =
-            self.runtime.tool_ctx.sandbox.backend().name() != "process-unrestricted";
+        let sandbox_active = self.runtime.tool_ctx.sandbox.strong_isolation();
         let decision = approver
             .request_approval(
                 &action,
@@ -1848,24 +1854,44 @@ impl AgentLoop {
 
         // Policy evaluation.
         let outcome = self.runtime.policy.evaluate(&action_req);
+        let needs_terminal_isolation = action_requires_terminal_isolation(&action_req);
+        let weak_host_terminal =
+            needs_terminal_isolation && !self.runtime.tool_ctx.sandbox.strong_isolation();
+        let one_time_only = action_req
+            .command_analysis
+            .as_ref()
+            .is_some_and(|analysis| analysis.one_time_only);
+        let forced_one_time = weak_host_terminal || one_time_only;
+        let mut effective_decision = outcome.decision;
+        let mut effective_reason = outcome.reason.clone();
+        if outcome.decision != Decision::Deny && forced_one_time {
+            effective_decision = Decision::Ask;
+            effective_reason = if weak_host_terminal {
+                "host-process fallback is approval-only; this terminal action requires a prominent one-time unsafe-host approval".into()
+            } else {
+                "raw shell, interpreter, wrapper, or unprovable command requires one-time approval"
+                    .into()
+            };
+        }
         self.emit(LoopEvent::PolicyDecision {
             tool: call.name.clone(),
-            decision: outcome.decision.to_string(),
+            decision: effective_decision.to_string(),
             layer: outcome.layer.clone(),
-            reason: outcome.reason.clone(),
+            reason: effective_reason.clone(),
         });
         self.runtime.audit.emit(
             trace,
             Some(session_id),
             AuditKind::PolicyDecision {
                 tool: call.name.clone(),
-                decision: outcome.decision.to_string(),
+                decision: effective_decision.to_string(),
                 layer: outcome.layer.clone(),
-                reason: outcome.reason.clone(),
+                reason: effective_reason.clone(),
             },
         );
 
-        match outcome.decision {
+        let mut unsafe_host_authorized = false;
+        match effective_decision {
             Decision::Deny => {
                 return Err(NexusError::PolicyDenied(format!(
                     "`{}` denied ({})",
@@ -1873,6 +1899,11 @@ impl AgentLoop {
                 )));
             }
             Decision::Ask => {
+                if forced_one_time && !approver.interactive() {
+                    return Err(NexusError::PolicyDenied(
+                        "unattended/background execution cannot approve one-time raw-shell or unsafe-host terminal actions".into(),
+                    ));
+                }
                 self.emit(LoopEvent::ApprovalRequested {
                     tool: call.name.clone(),
                     summary: action_req.summary.clone(),
@@ -1885,10 +1916,9 @@ impl AgentLoop {
                         summary: action_req.summary.clone(),
                     },
                 );
-                let sandbox_active =
-                    self.runtime.tool_ctx.sandbox.backend().name() != "process-unrestricted";
+                let sandbox_active = self.runtime.tool_ctx.sandbox.strong_isolation();
                 let decision = approver
-                    .request_approval(&action_req, &args, &outcome.reason, sandbox_active)
+                    .request_approval(&action_req, &args, &effective_reason, sandbox_active)
                     .await;
                 let (approved, edited) = match decision {
                     ApprovalDecision::Deny => {
@@ -1906,14 +1936,14 @@ impl AgentLoop {
                             call.name
                         )));
                     }
-                    ApprovalDecision::Approve => (true, false),
+                    ApprovalDecision::Approve => {
+                        unsafe_host_authorized = weak_host_terminal;
+                        (true, false)
+                    }
                     ApprovalDecision::ApproveForSession => {
-                        if action_req.command.is_none()
-                            || action_req.risk >= nexus_core::RiskLevel::Destructive
-                        {
+                        if forced_one_time || !action_req.session_grant_allowed() {
                             return Err(NexusError::ApprovalRequired(
-                                "session grants are limited to non-destructive normalized commands"
-                                    .into(),
+                                "session grants are limited to proved, structured, non-destructive argv under strong isolation".into(),
                             ));
                         }
                         let grant = nexus_policy::PolicyEngine::grant_token(&action_req);
@@ -1924,6 +1954,11 @@ impl AgentLoop {
                         (true, false)
                     }
                     ApprovalDecision::ApproveEdited(new_args) => {
+                        if one_time_only {
+                            return Err(NexusError::ApprovalRequired(
+                                "raw shell/interpreter actions cannot use auto-edit approval; choose a typed argv tool and approve that action separately".into(),
+                            ));
+                        }
                         // Re-validate and re-run policy for the edited action.
                         // "Propose safer" can never be used to smuggle in a
                         // higher-risk or hard-denied replacement.
@@ -1937,6 +1972,15 @@ impl AgentLoop {
                             )));
                         }
                         let revised_outcome = self.runtime.policy.evaluate(&revised);
+                        if revised
+                            .command_analysis
+                            .as_ref()
+                            .is_some_and(|analysis| analysis.one_time_only)
+                        {
+                            return Err(NexusError::PolicyDenied(
+                                "edited action became raw or unprovable".into(),
+                            ));
+                        }
                         self.emit(LoopEvent::PolicyDecision {
                             tool: call.name.clone(),
                             decision: revised_outcome.decision.to_string(),
@@ -1951,6 +1995,7 @@ impl AgentLoop {
                         }
                         args = new_args;
                         action_req = revised;
+                        unsafe_host_authorized = weak_host_terminal;
                         (true, true)
                     }
                 };
@@ -1978,11 +2023,27 @@ impl AgentLoop {
         }
 
         // Execute.
+        if unsafe_host_authorized {
+            self.runtime
+                .tool_ctx
+                .authorization
+                .authorize_unsafe_host_once();
+        }
         self.emit(LoopEvent::ToolExecutionStarted {
             tool: call.name.clone(),
         });
         let started = Instant::now();
         let result = tool.execute(&self.runtime.tool_ctx, args.clone()).await;
+        if unsafe_host_authorized {
+            // Tool execution normally consumes the one-shot token while
+            // constructing its ExecSpec. Clear it defensively if validation
+            // failed before that point so a later action cannot inherit it.
+            let _ = self
+                .runtime
+                .tool_ctx
+                .authorization
+                .consume_unsafe_host_once();
+        }
         let duration = started.elapsed().as_millis() as i64;
 
         let (exit_status, output, ok) = match &result {
@@ -2411,6 +2472,10 @@ impl AgentLoop {
             output_tokens,
         })
     }
+}
+
+fn action_requires_terminal_isolation(action: &ActionRequest) -> bool {
+    action.tool.starts_with("terminal.") || action.tool == "repo.check"
 }
 
 fn build_tool_specs(tools: &[Arc<dyn Tool>], native: bool) -> Vec<ToolSpec> {

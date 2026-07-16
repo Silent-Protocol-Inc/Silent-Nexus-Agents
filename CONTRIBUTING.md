@@ -17,10 +17,10 @@ bar is: **the model must never be able to bypass a safety boundary.**
 ## Development
 
 ```sh
-cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
-cargo build --release
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
 All four must pass. The workspace denies clippy warnings (including
@@ -44,3 +44,8 @@ Implement `ModelProvider` in `nexus-models` and wire it into
 
 Keep changes focused. Update the relevant `docs/*.md` when behavior changes, and
 add or extend tests for every behavioral change.
+
+Never edit a shipped migration. Add a new numbered migration, migration
+checksum coverage, upgrade tests from every previous level, and documentation.
+Security and release changes must also pass `scripts/release-check.sh` from a
+clean committed tree.

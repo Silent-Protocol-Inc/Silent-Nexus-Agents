@@ -1,9 +1,11 @@
 /target/
-/.nexus/
+.nexus/
 /dist/
 /release/
 /coverage/
 /tests/fixtures/tmp/
+__pycache__/
+*.py[cod]
 
 *.log
 *.profraw
@@ -18,9 +20,17 @@ lcov.info
 .npmrc
 .pypirc
 credentials.json
-credentials.*
+credentials.toml
+credentials.yaml
+credentials.yml
+credentials.ini
+credentials.env
+credentials.txt
+auth.json
 *.pem
 *.key
+*.p12
+*.pfx
 id_rsa
 id_ed25519
 

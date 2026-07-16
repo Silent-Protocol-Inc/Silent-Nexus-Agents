@@ -1,4 +1,4 @@
-//! Restricted local-process backend.
+//! Approval-only host-process backend.
 //!
 //! Real controls applied (all verifiable in tests):
 //! * scrubbed, allowlisted environment — no inherited secrets;
@@ -14,12 +14,14 @@
 //! container backend's job. Filesystem protection here comes from the
 //! workspace guard at the tool layer plus OS permissions.
 
-use crate::{ExecOutcome, ExecSpec, IsolationReport, NetworkMode, OutputChunk, SandboxBackend};
+use crate::{
+    ExecOutcome, ExecSpec, FilesystemAccess, IsolationReport, IsolationStrength, NetworkMode,
+    OutputChunk, SandboxBackend,
+};
 use nexus_core::{NexusError, Result};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
 pub struct ProcessBackend {
@@ -68,9 +70,17 @@ fn probe_netns_support() -> bool {
 impl SandboxBackend for ProcessBackend {
     fn name(&self) -> &'static str {
         if self.unrestricted {
-            "process-unrestricted"
+            "host-unrestricted"
         } else {
-            "process-restricted"
+            "approval-only-host"
+        }
+    }
+
+    fn strength(&self) -> IsolationStrength {
+        if self.unrestricted {
+            IsolationStrength::None
+        } else {
+            IsolationStrength::ApprovalOnlyHost
         }
     }
 
@@ -78,8 +88,10 @@ impl SandboxBackend for ProcessBackend {
         if self.unrestricted {
             return IsolationReport {
                 backend: self.name().into(),
+                strength: IsolationStrength::None,
                 level: "path-validation-only".into(),
                 filesystem: "no isolation; workspace-boundary checks at tool layer only".into(),
+                filesystem_access: FilesystemAccess::WorkspaceWrite,
                 network: "unrestricted".into(),
                 resources: "timeout only".into(),
                 caveats: vec![
@@ -104,8 +116,10 @@ impl SandboxBackend for ProcessBackend {
         };
         IsolationReport {
             backend: self.name().into(),
-            level: "process-restricted".into(),
+            strength: IsolationStrength::ApprovalOnlyHost,
+            level: "approval-only-host".into(),
             filesystem: "host filesystem visible; writes confined by workspace guard and OS permissions (not a read-only view)".into(),
+            filesystem_access: FilesystemAccess::WorkspaceWrite,
             network: network_desc,
             resources: "rlimits: CPU seconds, address space, process count; wall-clock timeout; process-group kill".into(),
             caveats: vec![
@@ -118,7 +132,7 @@ impl SandboxBackend for ProcessBackend {
         let netns = probe_netns_support();
         self.netns_supported.store(netns, Ordering::Relaxed);
         Ok(format!(
-            "restricted process backend ready (network namespaces: {})",
+            "approval-only host backend ready (network namespaces: {})",
             if netns { "supported" } else { "unavailable" }
         ))
     }
@@ -128,6 +142,11 @@ impl SandboxBackend for ProcessBackend {
         spec: ExecSpec,
         live: Option<mpsc::UnboundedSender<OutputChunk>>,
     ) -> Result<ExecOutcome> {
+        if !spec.unsafe_host_approved {
+            return Err(NexusError::ApprovalRequired(
+                "host-process execution requires a fresh unsafe-host approval".into(),
+            ));
+        }
         let start = Instant::now();
         let mut command = if spec.shell {
             let mut c = tokio::process::Command::new("/bin/sh");
@@ -153,7 +172,7 @@ impl SandboxBackend for ProcessBackend {
 
         let restricted = !self.unrestricted;
         let want_netns = restricted
-            && spec.network == NetworkMode::Off
+            && spec.effective_network() == NetworkMode::Off
             && self.netns_supported.load(Ordering::Relaxed);
         let cpu = spec.cpu_limit_secs;
         let mem_bytes = spec.memory_limit_mb.saturating_mul(1024 * 1024);
@@ -227,40 +246,67 @@ impl SandboxBackend for ProcessBackend {
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let cap = spec.output_hard_cap.max(4096);
+        let budget = crate::output::OutputBudget::new(spec.output_hard_cap);
         let live_out = live.clone();
-        let stdout_task = tokio::spawn(read_capped(stdout, cap, live_out, false));
-        let stderr_task = tokio::spawn(read_capped(stderr, cap, live, true));
+        let stdout_task = tokio::spawn(crate::output::read_stream(
+            stdout,
+            budget.clone(),
+            live_out,
+            false,
+        ));
+        let stderr_task = tokio::spawn(crate::output::read_stream(
+            stderr,
+            budget.clone(),
+            live,
+            true,
+        ));
 
         let timeout = Duration::from_secs(spec.timeout_secs.max(1));
-        let (timed_out, status) = match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(Ok(status)) => (false, Some(status)),
-            Ok(Err(e)) => {
-                return Err(NexusError::Sandbox(format!("wait failed: {e}")));
+        enum Completion {
+            Status(std::process::ExitStatus),
+            Timeout,
+            OutputCap,
+        }
+        let completion = {
+            let wait = child.wait();
+            tokio::pin!(wait);
+            tokio::select! {
+                status = &mut wait => Completion::Status(
+                    status.map_err(|error| NexusError::Sandbox(format!("wait failed: {error}")))?
+                ),
+                _ = tokio::time::sleep(timeout) => Completion::Timeout,
+                _ = budget.wait_capped() => Completion::OutputCap,
             }
-            Err(_) => {
+        };
+        let (timed_out, status) = match completion {
+            Completion::Status(status) => (false, Some(status)),
+            Completion::Timeout => {
                 kill_process_group(child_pid);
                 let _ = child.kill().await;
+                let _ = child.wait().await;
                 (true, None)
+            }
+            Completion::OutputCap => {
+                kill_process_group(child_pid);
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                (false, None)
             }
         };
 
-        let (stdout_text, stdout_capped) = stdout_task
+        let stdout_text = stdout_task
             .await
             .map_err(|e| NexusError::Sandbox(format!("stdout task: {e}")))?;
-        let (stderr_text, stderr_capped) = stderr_task
+        let stderr_text = stderr_task
             .await
             .map_err(|e| NexusError::Sandbox(format!("stderr task: {e}")))?;
-        let output_capped = stdout_capped || stderr_capped;
-        if output_capped {
-            kill_process_group(child_pid);
-        }
+        let output_capped = budget.is_capped();
         // Ensure no orphaned process group survives.
         if timed_out || output_capped {
             kill_process_group(child_pid);
         }
 
-        let isolation = self.isolation(spec.network);
+        let isolation = self.isolation(spec.effective_network());
         Ok(ExecOutcome {
             exit_code: status.and_then(|s| s.code()),
             stdout: stdout_text,
@@ -272,47 +318,6 @@ impl SandboxBackend for ProcessBackend {
             isolation: isolation.level,
         })
     }
-}
-
-/// Read a child stream up to `cap` bytes, forwarding chunks to `live`.
-async fn read_capped<R>(
-    reader: Option<R>,
-    cap: usize,
-    live: Option<mpsc::UnboundedSender<OutputChunk>>,
-    is_stderr: bool,
-) -> (String, bool)
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let Some(mut reader) = reader else {
-        return (String::new(), false);
-    };
-    let mut collected: Vec<u8> = Vec::new();
-    let mut buf = [0u8; 8192];
-    let mut capped = false;
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                let take = n.min(cap.saturating_sub(collected.len()));
-                collected.extend_from_slice(&buf[..take]);
-                if let Some(tx) = &live {
-                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let _ = tx.send(if is_stderr {
-                        OutputChunk::Stderr(text)
-                    } else {
-                        OutputChunk::Stdout(text)
-                    });
-                }
-                if collected.len() >= cap {
-                    capped = true;
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    (String::from_utf8_lossy(&collected).to_string(), capped)
 }
 
 fn kill_process_group(pid: Option<u32>) {
@@ -343,6 +348,10 @@ mod tests {
             env: BTreeMap::new(),
             env_allowlist: vec!["PATH".into()],
             network: NetworkMode::Restricted,
+            approved_network: NetworkMode::Restricted,
+            filesystem_access: FilesystemAccess::WorkspaceWrite,
+            sensitive_path_masks: Vec::new(),
+            unsafe_host_approved: true,
             timeout_secs: 10,
             cpu_limit_secs: 10,
             memory_limit_mb: 512,
@@ -382,9 +391,55 @@ mod tests {
         // controlled by the test, not by model input.
         s.output_hard_cap = 10_000;
         s.timeout_secs = 15;
+        let start = Instant::now();
         let out = backend.execute(s, None).await.expect("exec");
         assert!(out.output_capped);
-        assert!(out.stdout.len() <= 10_000);
+        assert!(out.stdout.len() + out.stderr.len() <= 10_000);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_cap_kills_the_entire_process_group() {
+        let directory = tempfile::tempdir().expect("directory");
+        let pid_file = directory.path().join("child.pid");
+        let script = format!(
+            "sleep 30 & child=$!; printf '%s' \"$child\" > '{}'; yes flood",
+            pid_file.display()
+        );
+        let backend = ProcessBackend::new(false);
+        let mut command = spec("/bin/sh", &["-c", &script]);
+        command.output_hard_cap = 8_192;
+        command.timeout_secs = 30;
+        let started = Instant::now();
+        let outcome = backend.execute(command, None).await.expect("execute");
+        assert!(outcome.output_capped);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let child_pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("pid file")
+            .parse()
+            .expect("pid");
+        for _ in 0..20 {
+            #[allow(unsafe_code)]
+            let alive = unsafe { libc::kill(child_pid, 0) == 0 };
+            if !alive {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("child process {child_pid} survived the output-cap kill");
+    }
+
+    #[tokio::test]
+    async fn host_execution_requires_one_time_approval_state() {
+        let backend = ProcessBackend::new(false);
+        let mut command = spec("echo", &["blocked"]);
+        command.unsafe_host_approved = false;
+        assert!(matches!(
+            backend.execute(command, None).await,
+            Err(NexusError::ApprovalRequired(_))
+        ));
     }
 
     #[tokio::test]

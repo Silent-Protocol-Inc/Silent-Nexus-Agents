@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+publish = false
 description = "Silent Nexus shared application service layer: one command registry and one set of services powering both the snx CLI and the TUI."
 
 [dependencies]

@@ -326,12 +326,7 @@ pub fn import_existing() -> Result<CodexProfileInfo> {
     let home = ensure_isolated_home()?;
     let dest = home.join("auth.json");
     let body = std::fs::read_to_string(&source)?;
-    std::fs::write(&dest, body)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600))?;
-    }
+    nexus_core::atomic::atomic_write_private(&dest, body.as_bytes())?;
     verify_isolated()
 }
 
@@ -577,7 +572,10 @@ pub async fn list_plan_models() -> Result<Vec<PlanModel>> {
     }
     if let Some(path) = plan_models_cache_path() {
         if let Ok(body) = serde_json::to_string_pretty(&models) {
-            let _ = std::fs::write(path, body); // cache only; failure is non-fatal
+            if let Some(parent) = path.parent() {
+                let _ = nexus_core::permissions::repair_private_tree(parent);
+            }
+            let _ = nexus_core::atomic::atomic_write_private(&path, body.as_bytes());
         }
     }
     Ok(models)

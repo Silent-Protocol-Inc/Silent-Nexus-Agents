@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a narrowly scoped capability or operator improvement.
+title: "[feature] "
+labels: [enhancement, triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operator problem
+      description: Describe the problem and why existing commands are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include CLI/config/storage compatibility implications.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety impact
+      description: Explain effects on policy, approval, isolation, secrets, and auditability.
+    validations:
+      required: true

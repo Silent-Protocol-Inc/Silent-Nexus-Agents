@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Current config schema version. Bump when making breaking changes and add a
-/// migration arm in [`migrate_value`].
+/// migration arm in the private `migrate_value` implementation.
 pub const CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -239,7 +239,7 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             backend: "auto".into(),
-            container_image: "debian:bookworm-slim".into(),
+            container_image: "debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818".into(),
             cpu_limit_secs: 120,
             memory_limit_mb: 1024,
             timeout_secs: 120,
@@ -247,13 +247,8 @@ impl Default for SandboxConfig {
             network: "off".into(),
             env_allowlist: vec![
                 "PATH".into(),
-                "HOME".into(),
                 "LANG".into(),
                 "TERM".into(),
-                "USER".into(),
-                "SHELL".into(),
-                "CARGO_HOME".into(),
-                "RUSTUP_HOME".into(),
             ],
         }
     }
@@ -499,9 +494,9 @@ impl Config {
                 .map_err(|e| NexusError::Config(format!("serializing managed models: {e}")))?,
         );
         if let Some(parent) = paths.managed_models_file.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::permissions::repair_private_tree(parent)?;
         }
-        std::fs::write(&paths.managed_models_file, text)?;
+        crate::atomic::atomic_write_private(&paths.managed_models_file, text.as_bytes())?;
         Ok(())
     }
 
@@ -553,9 +548,9 @@ impl Config {
                 .map_err(|e| NexusError::Config(format!("serializing overrides: {e}")))?,
         );
         if let Some(parent) = paths.managed_overrides_file.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::permissions::repair_private_tree(parent)?;
         }
-        std::fs::write(&paths.managed_overrides_file, text)?;
+        crate::atomic::atomic_write_private(&paths.managed_overrides_file, text.as_bytes())?;
         Ok(())
     }
 
@@ -664,6 +659,22 @@ impl Config {
         if !["auto", "process", "container", "none"].contains(&self.sandbox.backend.as_str()) {
             return Err(NexusError::Config(
                 "sandbox.backend must be auto|process|container|none".into(),
+            ));
+        }
+        let pinned_image = self
+            .sandbox
+            .container_image
+            .split_once("@sha256:")
+            .is_some_and(|(name, digest)| {
+                !name.trim().is_empty()
+                    && digest.len() == 64
+                    && digest
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit())
+            });
+        if !pinned_image {
+            return Err(NexusError::Config(
+                "sandbox.container_image must be pinned as name@sha256:<64 hex characters>".into(),
             ));
         }
         for (key, s) in &self.mcp {
@@ -793,6 +804,13 @@ mod tests {
         let mut c = Config::default();
         c.policy.destructive = "allow".into();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn container_image_must_be_digest_pinned() {
+        let mut config = Config::default();
+        config.sandbox.container_image = "debian:bookworm-slim".into();
+        assert!(config.validate().is_err());
     }
 
     #[test]

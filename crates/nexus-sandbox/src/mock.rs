@@ -1,7 +1,10 @@
 //! Deterministic mock backend for tests: records specs, returns scripted
 //! outcomes, and never touches the host.
 
-use crate::{ExecOutcome, ExecSpec, IsolationReport, NetworkMode, OutputChunk, SandboxBackend};
+use crate::{
+    ExecOutcome, ExecSpec, FilesystemAccess, IsolationReport, IsolationStrength, NetworkMode,
+    OutputChunk, SandboxBackend,
+};
 use nexus_core::Result;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -53,11 +56,17 @@ impl SandboxBackend for MockBackend {
         "mock"
     }
 
+    fn strength(&self) -> IsolationStrength {
+        IsolationStrength::Mock
+    }
+
     fn isolation(&self, _network: NetworkMode) -> IsolationReport {
         IsolationReport {
             backend: "mock".into(),
+            strength: IsolationStrength::Mock,
             level: "mock".into(),
             filesystem: "none (test double)".into(),
+            filesystem_access: FilesystemAccess::NoWorkspace,
             network: "none (test double)".into(),
             resources: "none (test double)".into(),
             caveats: vec!["test backend; never use outside tests".into()],

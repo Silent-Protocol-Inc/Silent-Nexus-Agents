@@ -4,6 +4,67 @@ All notable changes to NEXUS are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 Semantic Versioning.
 
+## [1.0.0] — 2026-07-17
+
+First production-certified Silent Nexus release for
+`x86_64-unknown-linux-gnu`.
+
+### Added
+
+- Structured command analysis across shell chains, wrappers, interpreters, and
+  substitutions, with hard denials for privilege escalation and generic
+  terminal Git mutation bypasses.
+- Explicit isolation strength and filesystem-access metadata. Container actions
+  run as the invoking UID/GID with per-action read-only/write mounts,
+  sensitive-path masks, network-off defaults, dropped capabilities, resource
+  limits, and a digest-pinned image.
+- Append-only `0005_production_hardening` migration with migration checksums,
+  timeline FTS, status indexes, and backward-compatible FTS backfill.
+- `snx maintenance check`, `backup`, and `optimize`, plus `snx doctor --deep`.
+- Atomic private writes, permission repair, zeroized secret buffers, verified
+  artifact reads, bounded/sanitized Git subprocesses, SQLite busy handling, and
+  one shared stdout/stderr kill budget.
+- Deterministic Linux release packaging with man page, shell completions, SPDX
+  SBOM, internal/external SHA-256 manifests, CI/security/release workflows, and
+  user/system installer modes.
+
+### Changed
+
+- Version and embedded release metadata are now `1.0.0`; the pinned Rust/MSRV
+  is `1.97.0`, locked builds are required, and internal crates are
+  non-publishable.
+- Automatic model terminal execution requires strong container isolation.
+  Host-process fallback is prominently reported as approval-only and is denied
+  for unattended/background work.
+- Generic model filesystem access now excludes `.nexus`, `.git`, common
+  credential paths, private keys, and credential stores while preserving
+  documented public examples such as `.env.example`.
+- Transcript filtering pages until the requested match count is reached, while
+  durable search uses SQLite FTS and loads the matching event's surrounding
+  page. TUI rendering caches wrapped layouts and renders the visible range.
+
+### Security
+
+- Raw shell, interpreters, wrappers, substitutions, unrecognized commands, and
+  unsafe host execution cannot receive session grants or auto-edit approval.
+- Generic terminal `git commit`, `git push`, `git remote`, Git aliases,
+  unrecognized Git subcommands, and privilege escalation are hard denied.
+- Output-cap breaches terminate process groups or containers immediately,
+  independent of command timeout.
+- State/auth/log trees are repaired to private permissions; symlink and
+  artifact-tampering attacks are rejected.
+- Sensitive-path discovery, filesystem listings, and model-facing Git
+  status/diff fail closed so denied credential paths cannot leak through
+  metadata or repository output.
+
+### Compatibility
+
+- Config remains version `1`; migrations are append-only; existing timeline and
+  redacted JSONL export fields remain compatible throughout 1.x except where a
+  necessary security break is documented.
+- Silent Nexus 1.0 does not automatically delete transcripts, tasks, plans,
+  goals, memories, or artifacts.
+
 ## [0.2.0] — 2026-07-17
 
 Cyberdeck transcript and agent-harness upgrade.

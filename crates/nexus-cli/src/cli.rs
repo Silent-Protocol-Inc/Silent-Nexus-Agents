@@ -165,7 +165,11 @@ pub enum Command {
     Init,
 
     /// Environment and readiness diagnostics.
-    Doctor,
+    Doctor(DoctorArgs),
+
+    /// Explicit database, state, artifact, and backup maintenance.
+    #[command(subcommand)]
+    Maintenance(MaintenanceCmd),
 
     /// Generate a shell completion script.
     Completion { shell: clap_complete::Shell },
@@ -271,6 +275,10 @@ pub struct CommitArgs {
     /// Skip the final confirmation after the diff preview.
     #[arg(long)]
     pub yes: bool,
+
+    /// Explicitly allow repository hooks during this typed commit.
+    #[arg(long)]
+    pub allow_hooks: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -573,6 +581,27 @@ pub struct SetupArgs {
     pub force: bool,
 }
 
+#[derive(clap::Args, Debug, Default)]
+pub struct DoctorArgs {
+    /// Include state integrity, permissions, release metadata, isolation, and
+    /// binary-integrity checks.
+    #[arg(long)]
+    pub deep: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MaintenanceCmd {
+    /// Check database integrity, permissions, WAL state, storage, and artifacts.
+    Check,
+    /// Create an atomic SQLite and artifact snapshot at a new directory.
+    Backup { directory: String },
+    /// Run PRAGMA optimize and a WAL checkpoint; optionally VACUUM.
+    Optimize {
+        #[arg(long)]
+        vacuum: bool,
+    },
+}
+
 #[derive(clap::Args, Debug)]
 pub struct AuditArgs {
     /// Filter by audit event kind.
@@ -649,6 +678,20 @@ mod tests {
         assert!(matches!(
             Cli::try_parse_from(["snx", "init"]).expect("init").command,
             Some(Command::Init)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["snx", "doctor", "--deep"])
+                .expect("doctor")
+                .command,
+            Some(Command::Doctor(DoctorArgs { deep: true }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["snx", "maintenance", "optimize", "--vacuum"])
+                .expect("maintenance")
+                .command,
+            Some(Command::Maintenance(MaintenanceCmd::Optimize {
+                vacuum: true
+            }))
         ));
         assert!(matches!(
             Cli::try_parse_from(["snx", "resume", "session_1"])

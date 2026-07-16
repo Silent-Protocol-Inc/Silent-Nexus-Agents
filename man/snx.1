@@ -1,0 +1,105 @@
+.TH SNX 1 "2026-07-17" "Silent Nexus 1.0.0" "User Commands"
+.SH NAME
+snx \- local-first agentic CLI with controlled execution
+.SH SYNOPSIS
+.B snx
+[\fIOPTIONS\fR] [\fICOMMAND\fR]
+.br
+.B snx run
+[\fB--agent\fR \fIROLE\fR] \fIOBJECTIVE\fR
+.br
+.B snx maintenance
+\fBcheck\fR|\fBbackup\fR|\fBoptimize\fR
+.SH DESCRIPTION
+Silent Nexus treats the model as an untrusted planner. The Rust harness
+validates tool schemas, capabilities, workspace paths, policy, approvals,
+sandbox metadata, output limits, secret redaction, and audit records before
+and after execution.
+.PP
+The certified 1.0.0 platform is x86_64 GNU/Linux. Other platforms are
+experimental until independently tested.
+.SH COMMON COMMANDS
+.TP
+.B snx
+Launch the interactive terminal interface.
+.TP
+.B snx setup
+Discover local model servers and create a starter configuration.
+.TP
+.B snx run \(dqOBJECTIVE\(dq
+Run one non-interactive objective.
+.TP
+.B snx doctor --deep
+Check configuration, state integrity, permissions, WAL, artifacts, release
+metadata, isolation posture, and current-binary integrity.
+.TP
+.B snx maintenance check
+Check SQLite integrity, permissions, WAL state, storage size, migration
+checksums, and artifact hashes without deleting data.
+.TP
+.B snx maintenance backup DIRECTORY
+Create an atomic SQLite and artifact snapshot with a SHA-256 manifest. The
+destination must not already exist.
+.TP
+.B snx maintenance optimize [--vacuum]
+Run PRAGMA optimize and checkpoint the WAL. VACUUM is optional and is refused
+while foreground or background work is active.
+.TP
+.B snx sandbox status
+Report the actual isolation backend and its limitations.
+.TP
+.B snx completion SHELL
+Generate completions for bash, zsh, fish, elvish, or PowerShell.
+.SH GLOBAL OPTIONS
+.TP
+.B --json
+Emit machine-readable output where supported.
+.TP
+.B --no-color
+Disable color. The NO_COLOR environment variable is also honored.
+.TP
+.B --inline
+Run the TUI without the alternate screen.
+.TP
+.B -v, --verbose
+Increase log verbosity.
+.SH ISOLATION
+Container execution is strong isolation for the 1.0 contract: commands run as
+the invoking UID/GID with a read-only root filesystem, per-action workspace
+access, private-path masks, network disabled by default, dropped capabilities,
+and resource limits.
+.PP
+The process backend is an approval-only host guardrail, not containment. Every
+model-proposed terminal action requires a prominent one-time attended approval,
+and background or unattended terminal execution is denied.
+.SH FILES
+.TP
+.I .nexus/config.toml
+Workspace configuration.
+.TP
+.I .nexus/state/nexus.db
+Workspace SQLite database.
+.TP
+.I .nexus/state/artifacts/
+Content-addressed durable artifacts.
+.TP
+.I ~/.config/silent-nexus/config.toml
+User configuration on Linux, subject to XDG_CONFIG_HOME.
+.TP
+.I ~/.config/silent-nexus/auth/
+Private provider credential profiles.
+.SH SECURITY
+Generic model filesystem tools cannot access .nexus, .git, common credential
+paths, private keys, or credential stores. Generic terminal privilege
+escalation and Git commit, push, remote, alias, or unrecognized operations are
+denied. Use audited typed workflows.
+.PP
+Report vulnerabilities privately through:
+.UR https://github.com/silent-protocol/silent-nexus/security/advisories/new
+.UE
+.SH SEE ALSO
+.BR git (1),
+.BR docker (1),
+.BR podman (1)
+.PP
+Full documentation is in the Silent Nexus README and docs directory.

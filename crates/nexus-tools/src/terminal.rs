@@ -17,7 +17,7 @@ use crate::{
 };
 use nexus_core::{NexusError, Result, RiskLevel};
 use nexus_policy::{commands, ActionRequest};
-use nexus_sandbox::{ExecSpec, NetworkMode};
+use nexus_sandbox::{ExecSpec, FilesystemAccess, NetworkMode};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -92,31 +92,47 @@ fn build_spec(
     program: String,
     args: Vec<String>,
     argv: &Value,
-) -> ExecSpec {
+    analysis: &commands::CommandAnalysis,
+) -> Result<ExecSpec> {
     let sandbox_cfg = &ctx.config.sandbox;
     let timeout = argv
         .get("timeout_secs")
         .and_then(Value::as_u64)
         .unwrap_or(sandbox_cfg.timeout_secs)
         .clamp(1, 600);
-    ExecSpec {
+    let configured_network = match sandbox_cfg.network.as_str() {
+        "full" => NetworkMode::Full,
+        "restricted" => NetworkMode::Restricted,
+        _ => NetworkMode::Off,
+    };
+    let sensitive_path_masks = ctx.workspace.sensitive_paths_for_masking()?;
+    Ok(ExecSpec {
         program,
         args,
         shell,
         cwd: ctx.workspace.root().to_path_buf(),
         env: BTreeMap::new(),
         env_allowlist: sandbox_cfg.env_allowlist.clone(),
-        network: match sandbox_cfg.network.as_str() {
-            "full" => NetworkMode::Full,
-            "restricted" => NetworkMode::Restricted,
-            _ => NetworkMode::Off,
+        network: if analysis.requires_network {
+            configured_network
+        } else {
+            NetworkMode::Off
         },
+        approved_network: configured_network,
+        filesystem_access: if analysis.risk <= RiskLevel::Network {
+            FilesystemAccess::ReadOnly
+        } else {
+            FilesystemAccess::WorkspaceWrite
+        },
+        sensitive_path_masks,
+        unsafe_host_approved: ctx.sandbox.strong_isolation()
+            || ctx.authorization.consume_unsafe_host_once(),
         timeout_secs: timeout,
         cpu_limit_secs: sandbox_cfg.cpu_limit_secs,
         memory_limit_mb: sandbox_cfg.memory_limit_mb,
-        output_hard_cap: sandbox_cfg.max_output_bytes.max(64_000) * 4,
+        output_hard_cap: sandbox_cfg.max_output_bytes.max(1),
         stdin: argv.get("stdin").and_then(Value::as_str).map(String::from),
-    }
+    })
 }
 
 async fn run_spec(ctx: &ToolContext, meta: &ToolMeta, spec: ExecSpec) -> Result<ToolOutput> {
@@ -180,12 +196,14 @@ impl Tool for RunProgram {
             .chain(argv.iter().cloned())
             .collect::<Vec<_>>()
             .join(" ");
-        let risk = commands::classify_risk(&command_line);
+        let analysis = commands::analyze_argv(program, &argv);
+        let risk = analysis.risk;
         Ok(ActionRequest {
             tool: self.meta.name.clone(),
             risk,
             paths: vec![],
             command: Some(command_line.clone()),
+            command_analysis: Some(analysis),
             destination: None,
             summary: format!("run: {command_line}"),
         })
@@ -210,7 +228,8 @@ impl Tool for RunProgram {
                     .collect()
             })
             .unwrap_or_default();
-        let spec = build_spec(ctx, false, program, argv, &args);
+        let analysis = commands::analyze_argv(&program, &argv);
+        let spec = build_spec(ctx, false, program, argv, &args, &analysis)?;
         run_spec(ctx, &self.meta, spec).await
     }
 }
@@ -227,17 +246,14 @@ impl Tool for RunShell {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let mut risk = commands::classify_risk(&command);
-        // Shell metacharacters can chain arbitrary commands: escalate plain
-        // reads/writes so they cannot ride an allowlist.
-        if commands::has_shell_metacharacters(&command) && risk < RiskLevel::Write {
-            risk = RiskLevel::Write;
-        }
+        let analysis = commands::analyze_shell(&command);
+        let risk = analysis.risk;
         Ok(ActionRequest {
             tool: self.meta.name.clone(),
             risk,
             paths: vec![],
             command: Some(command.clone()),
+            command_analysis: Some(analysis),
             destination: None,
             summary: format!("shell: {command}"),
         })
@@ -252,7 +268,8 @@ impl Tool for RunShell {
                 message: "missing command".into(),
             })?
             .to_string();
-        let spec = build_spec(ctx, true, command, vec![], &args);
+        let analysis = commands::analyze_shell(&command);
+        let spec = build_spec(ctx, true, command, vec![], &args, &analysis)?;
         run_spec(ctx, &self.meta, spec).await
     }
 }
@@ -308,5 +325,43 @@ mod tests {
         assert!(out.content.contains("out"));
         assert!(out.content.contains("err"));
         assert!(out.content.contains("exit 3"));
+    }
+
+    #[test]
+    fn execution_uses_the_configured_shared_output_budget() {
+        let directory = tempfile::tempdir().expect("directory");
+        let ctx = context(directory.path());
+        let arguments = json!({});
+        let analysis = commands::analyze_argv("echo", &["ok".into()]);
+        let spec = build_spec(
+            &ctx,
+            false,
+            "echo".into(),
+            vec!["ok".into()],
+            &arguments,
+            &analysis,
+        )
+        .expect("spec");
+        assert_eq!(spec.output_hard_cap, ctx.config.sandbox.max_output_bytes);
+    }
+
+    #[tokio::test]
+    async fn terminal_execution_fails_closed_when_sensitive_masking_fails() {
+        let directory = tempfile::tempdir().expect("directory");
+        let ctx = context(directory.path());
+        std::fs::remove_dir_all(directory.path()).expect("remove workspace");
+        let mut registry = ToolRegistry::new();
+        register(&mut registry);
+        let error = registry
+            .get("terminal.run_program")
+            .expect("tool")
+            .execute(&ctx, json!({"program": "echo", "args": ["blocked"]}))
+            .await
+            .expect_err("mask discovery failure must block execution");
+        assert!(
+            error.to_string().contains("No such file")
+                || error.to_string().contains("not found")
+                || error.to_string().contains("cannot find")
+        );
     }
 }

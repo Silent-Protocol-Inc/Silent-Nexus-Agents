@@ -19,19 +19,24 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "MIT",
+    "MIT-0",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "MPL-2.0",
     "CDLA-Permissive-2.0",
 ]
 
 [bans]
-multiple-versions = "warn"
+# Duplicate transitive versions are reviewed with `cargo tree -d` during the
+# release check. They are not an independent security finding.
+multiple-versions = "allow"
 wildcards = "deny"
+# Internal workspace crates are private path dependencies. Registry dependencies
+# must still use bounded version requirements.
+allow-wildcard-paths = true
 # Crates we deliberately avoid; see docs/dependencies.md for rationale.
 deny = [
     { crate = "openssl", reason = "rustls only; avoids system OpenSSL linkage" },

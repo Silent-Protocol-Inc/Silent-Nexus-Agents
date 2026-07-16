@@ -92,18 +92,20 @@ allowed_commands = ["cargo check", "cargo test", "cargo fmt"]
 denied_paths     = [".ssh", ".aws/credentials", ".env"]
 
 # ---------------------------------------------------------------------------
-# Sandbox. "auto" prefers a container and falls back to a restricted process.
+# Sandbox. "auto" prefers a local pinned container image and otherwise uses an
+# approval-only host-process guardrail. Silent Nexus never pulls images
+# automatically.
 # ---------------------------------------------------------------------------
 
 [sandbox]
 backend = "auto"                 # container | process | none | auto
-container_image = "docker.io/library/debian:stable-slim"
+container_image = "debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818"
 cpu_limit_secs = 30
 memory_limit_mb = 1024
 timeout_secs = 60
 max_output_bytes = 1048576
 network = "off"                  # off | restricted | full
-env_allowlist = ["PATH", "HOME", "LANG"]
+env_allowlist = ["PATH", "LANG", "TERM"]
 
 [web]
 enabled = true

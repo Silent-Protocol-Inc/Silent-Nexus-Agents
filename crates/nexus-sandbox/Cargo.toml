@@ -3,7 +3,10 @@ name = "nexus-sandbox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Sandboxed execution backends: restricted process, container, mock"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Sandboxed execution backends: strong container, approval-only host, mock"
 
 [dependencies]
 nexus-core.workspace = true

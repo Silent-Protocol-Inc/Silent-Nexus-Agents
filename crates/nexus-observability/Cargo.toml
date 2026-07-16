@@ -3,6 +3,9 @@ name = "nexus-observability"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 description = "Structured logging, tracing, and audit persistence for Silent Nexus"
 
 [dependencies]

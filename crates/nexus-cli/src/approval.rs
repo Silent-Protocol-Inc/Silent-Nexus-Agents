@@ -23,6 +23,10 @@ impl InteractiveApprover {
 
 #[async_trait::async_trait]
 impl ApprovalHandler for InteractiveApprover {
+    fn interactive(&self) -> bool {
+        true
+    }
+
     async fn request_approval(
         &self,
         action: &ActionRequest,
@@ -54,16 +58,20 @@ impl ApprovalHandler for InteractiveApprover {
         ui.field("sandbox", &iso);
 
         // Read a decision. EOF / non-tty => deny (safe default).
-        let persistent_allowed =
-            action.command.is_some() && action.risk < nexus_core::RiskLevel::Destructive;
+        let persistent_allowed = sandbox_active && action.session_grant_allowed();
+        let edit_allowed = !action
+            .command_analysis
+            .as_ref()
+            .is_some_and(|analysis| analysis.one_time_only);
         print!(
-            "  {} [o]nce{} / [e]dit safer / [N]o: ",
+            "  {} [o]nce{}{} / [N]o: ",
             ui.violet("decision"),
             if persistent_allowed {
                 " / [s]ession"
             } else {
                 ""
-            }
+            },
+            if edit_allowed { " / [e]dit safer" } else { "" }
         );
         let _ = std::io::stdout().flush();
         let mut line = String::new();
@@ -75,7 +83,7 @@ impl ApprovalHandler for InteractiveApprover {
         match line.trim().to_lowercase().as_str() {
             "y" | "yes" | "o" | "once" => ApprovalDecision::Approve,
             "s" | "session" if persistent_allowed => ApprovalDecision::ApproveForSession,
-            "e" | "edit" | "alternative" => {
+            "e" | "edit" | "alternative" if edit_allowed => {
                 println!(
                     "  {}",
                     ui.dim("enter replacement tool arguments as one JSON object:")

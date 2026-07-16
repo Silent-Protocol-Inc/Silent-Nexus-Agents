@@ -53,6 +53,15 @@ pub struct TimelineEventUpdate {
     pub artifacts: Vec<nexus_core::timeline::ArtifactReference>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct WrapLayoutCacheEntry {
+    pub signature: u64,
+    pub width: usize,
+    pub detail: TranscriptDetail,
+    pub expanded: bool,
+    pub rows: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Input,
@@ -93,6 +102,7 @@ pub struct State {
     pub search_edit: Option<String>,
     pub search_matches: Vec<String>,
     pub search_match_index: usize,
+    pub durable_search: bool,
     pub input: InputEditor,
     pub overlays: Vec<Overlay>,
     pub mode: Mode,
@@ -106,6 +116,7 @@ pub struct State {
     pub viewport_rows: usize,
     pub prepend_anchor_rows: Option<usize>,
     pub event_row_offsets: std::collections::BTreeMap<String, usize>,
+    pub(crate) wrap_layout_cache: std::collections::HashMap<String, WrapLayoutCacheEntry>,
     pub focus: Focus,
     pub context_drawer: bool,
     pub agent_drawer: bool,
@@ -165,6 +176,7 @@ impl State {
             search_edit: None,
             search_matches: Vec::new(),
             search_match_index: 0,
+            durable_search: false,
             input: InputEditor::with_history(history),
             overlays: Vec::new(),
             mode: Mode::Idle,
@@ -178,6 +190,7 @@ impl State {
             viewport_rows: 0,
             prepend_anchor_rows: None,
             event_row_offsets: std::collections::BTreeMap::new(),
+            wrap_layout_cache: std::collections::HashMap::new(),
             focus: Focus::Input,
             context_drawer: false,
             agent_drawer: false,
@@ -329,6 +342,7 @@ impl State {
         self.detail_level = view.detail_level;
         self.collapsed_cards = view.collapsed_cards;
         self.search_query = view.search_query;
+        self.durable_search = false;
         self.earliest_sequence = self.timeline.first().map(|event| event.sequence);
         self.last_background_sequence = self
             .timeline
@@ -343,6 +357,7 @@ impl State {
         self.scroll = 0;
         self.follow = true;
         self.new_events = 0;
+        self.wrap_layout_cache.clear();
         self.refresh_search_matches();
     }
 
@@ -376,8 +391,12 @@ impl State {
         else {
             self.search_matches.clear();
             self.search_match_index = 0;
+            self.durable_search = false;
             return;
         };
+        if self.durable_search {
+            return;
+        }
         self.search_matches = self
             .timeline
             .iter()

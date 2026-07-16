@@ -18,6 +18,10 @@ pub const TAGLINE: &str = "LOCAL INTELLIGENCE. CONTROLLED EXECUTION.";
 pub const TAGLINE_FIRST: &str = "LOCAL INTELLIGENCE.";
 pub const TAGLINE_SECOND: &str = "CONTROLLED EXECUTION.";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const BUILD_TARGET: &str = env!("SNX_BUILD_TARGET");
+pub const BUILD_PROFILE: &str = env!("SNX_BUILD_PROFILE");
+pub const BUILD_COMMIT: &str = env!("SNX_BUILD_COMMIT");
+pub const BUILD_EPOCH: &str = env!("SNX_BUILD_EPOCH");
 
 const FULL_MIN_WIDTH: u16 = 42;
 const FULL_MIN_HEIGHT: u16 = 18;

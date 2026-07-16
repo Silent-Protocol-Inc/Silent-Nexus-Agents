@@ -51,6 +51,42 @@ impl ApprovalHandler for AutoDeny {
     }
 }
 
+struct InteractiveApprove;
+#[async_trait::async_trait]
+impl ApprovalHandler for InteractiveApprove {
+    fn interactive(&self) -> bool {
+        true
+    }
+
+    async fn request_approval(
+        &self,
+        _action: &nexus_policy::ActionRequest,
+        _arguments: &serde_json::Value,
+        _reason: &str,
+        _sandbox: bool,
+    ) -> ApprovalDecision {
+        ApprovalDecision::Approve
+    }
+}
+
+struct InteractiveSessionApprove;
+#[async_trait::async_trait]
+impl ApprovalHandler for InteractiveSessionApprove {
+    fn interactive(&self) -> bool {
+        true
+    }
+
+    async fn request_approval(
+        &self,
+        _action: &nexus_policy::ActionRequest,
+        _arguments: &serde_json::Value,
+        _reason: &str,
+        _sandbox: bool,
+    ) -> ApprovalDecision {
+        ApprovalDecision::ApproveForSession
+    }
+}
+
 fn runtime_with(script: Vec<MockScript>, dir: &std::path::Path) -> (AgentRuntime, SessionId) {
     runtime_with_provider(Arc::new(MockProvider::new(script)), dir)
 }
@@ -83,6 +119,7 @@ fn runtime_with_provider(
         config: config.clone(),
         store: store.clone(),
         session: None,
+        authorization: nexus_tools::ExecutionAuthorization::default(),
     };
     let sessions = SessionStore::new(store.clone());
     let session_id = sessions
@@ -129,6 +166,70 @@ async fn valid_tool_call_then_finish() {
     assert_eq!(outcome.stopped_reason, "finished");
     assert!(outcome.final_message.contains("world"));
     assert_eq!(outcome.tool_calls, 1);
+}
+
+#[tokio::test]
+async fn unattended_approval_cannot_run_host_terminal_actions() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (runtime, session) = runtime_with(
+        vec![
+            MockScript::ToolCall {
+                name: "terminal.run_program".into(),
+                arguments: json!({"program":"touch","args":["unattended-marker"]}).to_string(),
+            },
+            MockScript::Text("host action stayed denied".into()),
+        ],
+        dir.path(),
+    );
+    AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .run(&session, "create a marker", Arc::new(AutoApprove))
+        .await
+        .expect("loop recovers");
+    assert!(!dir.path().join("unattended-marker").exists());
+}
+
+#[tokio::test]
+async fn attended_one_time_approval_can_run_one_host_terminal_action() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (runtime, session) = runtime_with(
+        vec![
+            MockScript::ToolCall {
+                name: "terminal.run_program".into(),
+                arguments: json!({"program":"touch","args":["attended-marker"]}).to_string(),
+            },
+            MockScript::Text("host action completed".into()),
+        ],
+        dir.path(),
+    );
+    AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .run(&session, "create a marker", Arc::new(InteractiveApprove))
+        .await
+        .expect("run");
+    assert!(dir.path().join("attended-marker").exists());
+}
+
+#[tokio::test]
+async fn host_terminal_action_cannot_receive_a_session_grant() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (runtime, session) = runtime_with(
+        vec![
+            MockScript::ToolCall {
+                name: "terminal.run_program".into(),
+                arguments: json!({"program":"touch","args":["session-marker"]}).to_string(),
+            },
+            MockScript::Text("session grant refused".into()),
+        ],
+        dir.path(),
+    );
+    AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .run(
+            &session,
+            "create a marker",
+            Arc::new(InteractiveSessionApprove),
+        )
+        .await
+        .expect("loop recovers");
+    assert!(!dir.path().join("session-marker").exists());
 }
 
 #[tokio::test]

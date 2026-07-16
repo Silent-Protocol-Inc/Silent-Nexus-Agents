@@ -53,6 +53,11 @@ impl App {
         let workspace = std::env::current_dir()
             .map_err(|e| nexus_core::NexusError::Other(format!("cannot read current dir: {e}")))?;
         let workspace = workspace.canonicalize().unwrap_or(workspace);
+        let bootstrap_paths = ConfigPaths::discover(&workspace)?;
+        nexus_core::permissions::repair_private_tree(&bootstrap_paths.project_dir)?;
+        nexus_core::permissions::repair_private_tree(&bootstrap_paths.global_dir)?;
+        nexus_core::permissions::repair_private_tree(&bootstrap_paths.auth_dir)?;
+        nexus_core::permissions::repair_private_tree(&bootstrap_paths.state_dir)?;
         let (mut config, paths) = Config::load(&workspace)?;
         let credentials = CredentialStore::new(&paths.auth_dir);
         let ui_state = UiStateFile::load(&paths.ui_state_file)?;
@@ -104,7 +109,7 @@ impl App {
         let config = Arc::new(config);
 
         // State directory holds the database and artifacts for this workspace.
-        std::fs::create_dir_all(&paths.state_dir)?;
+        nexus_core::permissions::repair_private_tree(&paths.state_dir)?;
         let store = Store::open(&paths.state_dir.join("nexus.db"))?;
 
         // Redactor learns every secret value the process can see so none of
@@ -177,6 +182,7 @@ impl App {
             config: self.config.clone(),
             store: self.store.clone(),
             session,
+            authorization: nexus_tools::ExecutionAuthorization::default(),
         }
     }
 
@@ -216,6 +222,7 @@ impl App {
                 config: runtime_config,
                 store: self.store.clone(),
                 session,
+                authorization: nexus_tools::ExecutionAuthorization::default(),
             },
             audit,
             sessions,

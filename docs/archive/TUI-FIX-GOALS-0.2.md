@@ -1,4 +1,9 @@
-# TUI FIX GOALS — Silent Nexus interactive harness repair
+# Historical 0.2 TUI fix goals
+
+> Archived after completion. This document describes the pre-1.0 TUI repair
+> effort and is not an active release plan.
+
+## Original specification
 
 > Task spec stored 2026-07-16. Refer to this document during all build/fix work
 > on this effort. Task: FIX SILENT NEXUS TUI, INTERACTIVE COMMANDS, LOGIN,

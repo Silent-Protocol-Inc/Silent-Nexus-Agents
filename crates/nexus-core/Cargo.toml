@@ -3,6 +3,9 @@ name = "nexus-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 description = "Core types, configuration, storage, and safety primitives for Silent Nexus"
 
 [dependencies]
@@ -23,6 +26,8 @@ tracing.workspace = true
 tokio.workspace = true
 globset.workspace = true
 unicode-width.workspace = true
+zeroize.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

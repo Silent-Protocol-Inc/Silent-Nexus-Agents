@@ -1,4 +1,4 @@
-# NEXUS
+# Silent Nexus 1.0
 
 ```
   ▚  N  E  X  U  S
@@ -24,7 +24,7 @@ does not depend on the model's competence or good faith.
   secret redaction, and audit logging all live in Rust, outside the model's
   reach. A jailbroken or malicious model still cannot escape them.
 - **Honest sandboxing.** NEXUS tells you the *actual* isolation level in
-  effect — `container`, `process-restricted`, or `path-validation-only` — and
+  effect — `container`, `approval-only-host`, or `path-validation-only` — and
   never claims strong isolation it isn't providing.
 - **Evidence-based goals.** A `/goal` only completes when every acceptance
   criterion has recorded, tool-sourced evidence — never because the model said
@@ -58,22 +58,40 @@ does not depend on the model's competence or good faith.
 
 ## Install
 
-Requires Rust stable (1.97+).
+The certified 1.0.0 target is `x86_64-unknown-linux-gnu`. Rust development and
+source builds use the pinned `1.97.0` toolchain and the committed lockfile.
+Other operating systems and architectures remain experimental until they have
+independent release evidence.
+
+From source:
 
 ```sh
-git clone <repo> silent-nexus && cd silent-nexus
-cargo build --release
-./target/release/snx doctor
+git clone https://github.com/silent-protocol/silent-nexus.git
+cd silent-nexus
+scripts/install.sh --user
+snx doctor --deep
 ```
 
-Or use the helper:
+System installation:
 
 ```sh
-scripts/install.sh          # builds release and copies snx to ~/.local/bin
+cargo build --release --locked -p nexus-cli
+sudo scripts/install.sh --system --binary target/release/snx
 ```
 
-NEXUS does **not** download models. Point it at a local server you run
-yourself (see below).
+The installer also installs the man page and Bash, Zsh, and Fish completions.
+Use `--prefix PATH` for a custom prefix, `--dry-run` to inspect changes, or
+`--uninstall` to remove program files without deleting configuration or
+workspace data.
+
+For a packaged release, verify the adjacent `SHA256SUMS`, extract the archive,
+run its internal `sha256sum -c SHA256SUMS`, and install the included `snx`.
+Archives contain the license, README, man page, completions, SPDX SBOM, and an
+internal SHA-256 manifest.
+
+NEXUS does **not** download models or container images automatically. Point it
+at a model server you operate, and explicitly pull the pinned sandbox image
+before selecting container execution.
 
 ## Quick start
 
@@ -123,7 +141,10 @@ snx run "summarize the architecture of this repo" --agent researcher
 | `snx auth …` | Consent-gated Codex/Claude CLI auth and stored provider credentials |
 | `snx config show\|path\|schema` | Configuration inspection |
 | `snx audit` | Recent audit events |
-| `snx doctor` | Environment and readiness diagnostics |
+| `snx doctor [--deep]` | Diagnostics; deep mode adds integrity, permissions, isolation, release, and binary checks |
+| `snx maintenance check` | Database, WAL, permission, migration, storage, and artifact integrity |
+| `snx maintenance backup <directory>` | Atomic SQLite/artifact snapshot with a hash manifest |
+| `snx maintenance optimize [--vacuum]` | Safe optimization/checkpoint; refuses active work |
 | `snx completion <shell>` | Shell completion script |
 
 `--json` gives machine-readable output on most commands; `--no-color` (and
@@ -155,7 +176,8 @@ nexus-core         safety primitives: workspace guard, redaction, sanitize,
 nexus-policy       layered policy + approval engine (allow/ask/deny)
 nexus-models       model providers (llama.cpp/Ollama/Codex/Claude Plan/
                    Anthropic/OpenAI-compatible/mock), routing and streaming
-nexus-sandbox      execution backends: container, restricted-process, mock,
+nexus-sandbox      execution backends: strong container, approval-only host,
+                   mock,
                    each reporting honest isolation
 nexus-tools        typed tools (fs, repo, terminal+PTY, web, diagnostics)
 nexus-agent        controlled streaming loop, plans/stages, custom agents,
@@ -180,9 +202,46 @@ Nexus does and does not defend against.
 NEXUS prefers **security over autonomy** and **honest limitations over
 fake capabilities**. Read [`SECURITY.md`](SECURITY.md) and
 [`docs/sandbox-security.md`](docs/sandbox-security.md) before granting it write
-or command capabilities. In particular: the restricted-process backend is
-*not* a container and does not hide host paths or the kernel attack surface —
-`snx sandbox status` always tells you what you actually have.
+or command capabilities. The process backend is approval-only host execution,
+not containment: every model-proposed terminal action needs a prominent
+one-time attended approval, and unattended/background terminal execution is
+denied. Automatic terminal execution requires the strong container backend.
+
+Generic model filesystem tools cannot access `.nexus`, `.git`, common
+credential paths, private keys, or credential stores. Generic terminal
+privilege escalation and Git commit/push/remote/alias operations are denied;
+local commits remain available through the audited typed workflow.
+
+## Upgrades, rollback, and data
+
+Before upgrading, run:
+
+```sh
+snx maintenance check
+snx maintenance backup "$HOME/snx-backup-$(date +%Y%m%d)"
+```
+
+Install the new binary atomically, then run `snx doctor --deep`. To roll back,
+restore the prior verified binary. Database migrations are append-only; a
+binary older than the migrated state may not understand newer schema, so a
+full rollback uses the backup made before upgrade.
+
+Workspace data lives under `<workspace>/.nexus/state`; user configuration and
+auth profiles use the platform configuration directory (on Linux,
+`~/.config/silent-nexus`, subject to `XDG_CONFIG_HOME`). Silent Nexus 1.0 never
+automatically deletes transcripts, goals, plans, tasks, memories, or artifacts.
+
+## Documentation
+
+- [`docs/configuration.md`](docs/configuration.md) — precedence and config groups
+- [`docs/cli-reference.md`](docs/cli-reference.md) — public CLI surface
+- [`docs/operator-guide.md`](docs/operator-guide.md) — safe daily operation
+- [`docs/data-management.md`](docs/data-management.md) — state, backup, restore, retention
+- [`docs/compatibility.md`](docs/compatibility.md) — the 1.x compatibility contract
+- [`docs/upgrade-0.2-to-1.0.md`](docs/upgrade-0.2-to-1.0.md) — migration checklist
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — diagnostic playbook
+- [`docs/release-process.md`](docs/release-process.md) — reproducible release gates
+- [`docs/support.md`](docs/support.md) and [`docs/governance.md`](docs/governance.md)
 
 ## License
 

@@ -296,6 +296,7 @@ impl Tool for FsTool {
             risk: self.meta.risk,
             paths,
             command: None,
+            command_analysis: None,
             destination: None,
             summary,
         })
@@ -337,17 +338,20 @@ fn execute_sync(
                 if path == root {
                     continue;
                 }
+                let Ok(real) = guard.resolve_existing(path) else {
+                    continue;
+                };
                 let ft = entry.file_type();
                 let kind = if ft.map(|t| t.is_dir()).unwrap_or(false) {
                     "dir "
                 } else {
                     "file"
                 };
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let size = std::fs::metadata(&real).map(|m| m.len()).unwrap_or(0);
                 lines.push(format!(
                     "{kind} {:>9}  {}",
                     size,
-                    guard.display_relative(path)
+                    guard.display_relative(&real)
                 ));
             }
             lines.sort();
@@ -461,7 +465,10 @@ fn execute_sync(
                 .git_ignore(true)
                 .build();
             for entry in walker.flatten() {
-                let rel_path = guard.display_relative(entry.path());
+                let Ok(real) = guard.resolve_existing(entry.path()) else {
+                    continue;
+                };
+                let rel_path = guard.display_relative(&real);
                 if matcher.is_match(&rel_path) {
                     found.push(rel_path);
                 }
@@ -532,10 +539,7 @@ fn execute_sync(
                     ),
                 });
             }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, content)?;
+            nexus_core::atomic::atomic_write(&path, content.as_bytes(), file_mode(&path))?;
             Ok((
                 format!(
                     "wrote {} ({} bytes)",
@@ -583,7 +587,7 @@ fn execute_sync(
             } else {
                 content.replacen(old_text, new_text, 1)
             };
-            std::fs::write(&path, &updated)?;
+            nexus_core::atomic::atomic_write(&path, updated.as_bytes(), file_mode(&path))?;
             Ok((
                 format!(
                     "patched {} ({} replacement{})",
@@ -600,10 +604,12 @@ fn execute_sync(
         }
         FsOp::Move => {
             let from = guard.resolve_existing(arg_str(args, "from")?)?;
-            let to = guard.resolve_for_write(arg_str(args, "to")?)?;
+            let destination = arg_str(args, "to")?;
+            let to = guard.resolve_for_write(destination)?;
             if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)?;
+                nexus_core::atomic::ensure_directory_tree(parent, 0o755)?;
             }
+            let to = guard.resolve_for_write(destination)?;
             std::fs::rename(&from, &to)?;
             Ok((
                 format!(
@@ -623,10 +629,9 @@ fn execute_sync(
                     message: "directory copy not supported; copy files individually".into(),
                 });
             }
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let bytes = std::fs::copy(&from, &to)?;
+            let content = std::fs::read(&from)?;
+            nexus_core::atomic::atomic_write(&to, &content, file_mode(&from))?;
+            let bytes = content.len() as u64;
             Ok((
                 format!(
                     "copied {} → {} ({bytes} bytes)",
@@ -669,12 +674,27 @@ fn execute_sync(
         }
         FsOp::Mkdir => {
             let path = guard.resolve_for_write(arg_str(args, "path")?)?;
-            std::fs::create_dir_all(&path)?;
+            nexus_core::atomic::ensure_directory_tree(&path, 0o755)?;
             Ok((
                 format!("created directory {}", guard.display_relative(&path)),
                 Value::Null,
             ))
         }
+    }
+}
+
+fn file_mode(path: &std::path::Path) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+            .unwrap_or(0o644)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0o644
     }
 }
 
@@ -821,6 +841,47 @@ mod tests {
             .await
             .expect("find");
         assert!(out.content.contains("src/needle.rs"));
+    }
+
+    #[tokio::test]
+    async fn listing_and_discovery_hide_denied_paths() {
+        let directory = tempfile::tempdir().expect("directory");
+        let ctx = context(directory.path());
+        std::fs::create_dir_all(directory.path().join(".git")).expect("git");
+        std::fs::write(directory.path().join(".git/config"), "secret").expect("git config");
+        std::fs::write(directory.path().join(".nexus/state/private"), "secret").expect("state");
+        std::fs::write(directory.path().join(".env"), "TOKEN=secret").expect("env");
+        std::fs::write(directory.path().join(".env.example"), "TOKEN=").expect("example");
+        std::fs::write(directory.path().join("visible.txt"), "visible").expect("visible");
+        let registry = registry();
+
+        let listed = run(
+            &ctx,
+            &registry,
+            "fs.list_dir",
+            json!({"path": ".", "depth": 3}),
+        )
+        .await
+        .expect("list");
+        assert!(listed.content.contains("visible.txt"));
+        assert!(listed.content.contains(".env.example"));
+        assert!(!listed.content.contains(".env\n"));
+        assert!(!listed.content.contains(".git"));
+        assert!(!listed.content.contains(".nexus"));
+
+        let found = run(
+            &ctx,
+            &registry,
+            "fs.find_files",
+            json!({"glob": "**/*", "path": "."}),
+        )
+        .await
+        .expect("find");
+        assert!(found.content.contains("visible.txt"));
+        assert!(found.content.contains(".env.example"));
+        assert!(!found.content.lines().any(|line| line == ".env"));
+        assert!(!found.content.contains(".git"));
+        assert!(!found.content.contains(".nexus"));
     }
 
     #[tokio::test]

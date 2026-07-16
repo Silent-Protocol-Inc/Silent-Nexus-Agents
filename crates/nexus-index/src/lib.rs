@@ -3,9 +3,9 @@
 //! Builds a persisted, incrementally-updatable index of the workspace: file
 //! tree, language detection, and symbols. Symbol extraction uses fast,
 //! dependency-light regex heuristics per language (documented as approximate).
-//! A tree-sitter backend can be added behind the same [`SymbolExtractor`]
-//! trait later without changing callers — see docs/dependencies.md for why we
-//! start heuristic. The index never loads whole files into model context; it
+//! A tree-sitter backend can replace the private extraction implementation
+//! later without changing [`Indexer`] callers — see docs/dependencies.md for
+//! why we start heuristic. The index never loads whole files into model context; it
 //! answers "where is symbol X" and "what's in this file" with pointers.
 
 use nexus_core::store::Store;

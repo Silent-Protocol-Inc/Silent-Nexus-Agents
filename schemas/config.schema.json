@@ -20,6 +20,14 @@
           "description": "Disable animations (also honors reduced-motion preferences).",
           "type": "boolean"
         },
+        "test_command": {
+          "default": null,
+          "description": "Command run by `/test` and `snx test` (e.g. `cargo test`). Unset means the test command is honestly reported as not configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "theme": {
           "default": "nexus-dark",
           "description": "UI theme name (`nexus-dark`, `no-color`).",
@@ -170,6 +178,14 @@
             "null"
           ]
         },
+        "api_key_ref": {
+          "default": null,
+          "description": "Name of a credential-store entry holding the API key (managed by `snx auth` / the `/login` flow). The secret lives in the restricted credential store, never in this file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "auth": {
           "default": null,
           "description": "Credential source when not using `api_key_env`. Currently `codex` reuses the OpenAI Codex CLI's OAuth session (`~/.codex/auth.json`), so the device/browser login is performed by the trusted `codex` CLI and Silent Nexus consumes the resulting token. `None`/empty = use `api_key_env`.",
@@ -212,8 +228,16 @@
         },
         "provider": {
           "default": "llamacpp",
-          "description": "Provider kind: `llamacpp`, `ollama`, `openai_compatible`, `custom_http`, `mock`.",
+          "description": "Provider kind: `llamacpp`, `ollama`, `openai_compatible`, `claude-plan`, `anthropic`, `custom_http`, or `mock`.",
           "type": "string"
+        },
+        "reasoning_effort": {
+          "default": null,
+          "description": "Reasoning effort for models that honor it (`low`, `medium`, `high`, …). Used by the `codex` provider; ignored elsewhere.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "role": {
           "default": "executor",
@@ -235,6 +259,11 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "tls_verify": {
+          "default": true,
+          "description": "Verify TLS certificates for remote endpoints. Disabling this is an explicit advanced setting and never the default.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -359,7 +388,7 @@
           "type": "string"
         },
         "container_image": {
-          "default": "debian:bookworm-slim",
+          "default": "debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
           "description": "Container image used by the container backend.",
           "type": "string"
         },
@@ -373,13 +402,8 @@
         "env_allowlist": {
           "default": [
             "PATH",
-            "HOME",
             "LANG",
-            "TERM",
-            "USER",
-            "SHELL",
-            "CARGO_HOME",
-            "RUSTUP_HOME"
+            "TERM"
           ],
           "description": "Environment variables forwarded into sandboxed processes.",
           "items": {
@@ -486,6 +510,7 @@
         "default_agent": "orchestrator",
         "no_color": false,
         "reduced_motion": false,
+        "test_command": null,
         "theme": "nexus-dark"
       }
     },
@@ -580,17 +605,12 @@
       ],
       "default": {
         "backend": "auto",
-        "container_image": "debian:bookworm-slim",
+        "container_image": "debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
         "cpu_limit_secs": 120,
         "env_allowlist": [
           "PATH",
-          "HOME",
           "LANG",
-          "TERM",
-          "USER",
-          "SHELL",
-          "CARGO_HOME",
-          "RUSTUP_HOME"
+          "TERM"
         ],
         "max_output_bytes": 200000,
         "memory_limit_mb": 1024,

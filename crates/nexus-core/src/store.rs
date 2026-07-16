@@ -9,9 +9,11 @@
 //! async callers wrap calls in `spawn_blocking` via [`Store::with`].
 
 use crate::error::{NexusError, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Embedded migrations, applied in array order. Never reorder or edit an
 /// entry that has shipped — append a new file instead.
@@ -32,7 +34,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0004_orchestration_timeline",
         include_str!("../../../migrations/0004_orchestration_timeline.sql"),
     ),
+    (
+        "0005_production_hardening",
+        include_str!("../../../migrations/0005_production_hardening.sql"),
+    ),
 ];
+pub const MIGRATION_COUNT: usize = MIGRATIONS.len();
 
 #[derive(Clone)]
 pub struct Store {
@@ -51,26 +58,17 @@ impl Store {
     /// migrations.
     pub fn open(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::permissions::repair_private_tree(parent)?;
         }
         let conn = Connection::open(db_path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        configure_connection(&conn, true)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             path: db_path.to_path_buf(),
         };
         store.migrate()?;
-        // Restrict database file permissions: it may hold conversation data.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(db_path) {
-                let mut perms = meta.permissions();
-                perms.set_mode(0o600);
-                let _ = std::fs::set_permissions(db_path, perms);
-            }
+        if let Some(parent) = db_path.parent() {
+            crate::permissions::repair_private_tree(parent)?;
         }
         Ok(store)
     }
@@ -78,7 +76,7 @@ impl Store {
     /// In-memory store for tests.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        configure_connection(&conn, false)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             path: PathBuf::from(":memory:"),
@@ -113,6 +111,23 @@ impl Store {
             .map_err(|e| NexusError::other(format!("storage task join: {e}")))?
     }
 
+    /// Retry a short SQLite operation when another NEXUS process owns the
+    /// write lock. The connection busy timeout remains the primary guard;
+    /// this bounded retry handles foreground/worker races around transactions.
+    pub fn with_retry<T>(&self, mut operation: impl FnMut(&Connection) -> Result<T>) -> Result<T> {
+        let mut attempts = 0u32;
+        loop {
+            let result = self.with(&mut operation);
+            match result {
+                Err(error) if is_busy_error(&error) && attempts < 4 => {
+                    attempts += 1;
+                    std::thread::sleep(Duration::from_millis(25 * (1 << attempts)));
+                }
+                other => return other,
+            }
+        }
+    }
+
     fn migrate(&self) -> Result<()> {
         self.with(|conn| {
             conn.execute_batch(
@@ -121,6 +136,7 @@ impl Store {
                     applied_at TEXT NOT NULL
                 );",
             )?;
+            verify_known_checksums(conn, false)?;
             for (name, sql) in MIGRATIONS {
                 let applied: bool = conn
                     .prepare("SELECT 1 FROM schema_migrations WHERE name = ?1")?
@@ -135,6 +151,9 @@ impl Store {
                         "INSERT INTO schema_migrations (name, applied_at) VALUES (?1, ?2)",
                         rusqlite::params![name, crate::now_rfc3339()],
                     )?;
+                    verify_known_checksums(conn, true).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?;
                     conn.execute_batch("COMMIT")?;
                     Ok(())
                 })();
@@ -144,7 +163,19 @@ impl Store {
                 }
                 tracing::info!(migration = name, "applied schema migration");
             }
+            verify_known_checksums(conn, false)?;
             Ok(())
+        })
+    }
+
+    pub fn checkpoint_wal(&self, truncate: bool) -> Result<(i64, i64)> {
+        self.with_retry(|connection| {
+            let mode = if truncate { "TRUNCATE" } else { "PASSIVE" };
+            let sql = format!("PRAGMA wal_checkpoint({mode})");
+            let (_, log_frames, checkpointed): (i64, i64, i64) =
+                connection
+                    .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            Ok((log_frames, checkpointed))
         })
     }
 
@@ -173,6 +204,78 @@ impl Store {
     }
 }
 
+fn configure_connection(connection: &Connection, disk: bool) -> Result<()> {
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.pragma_update(None, "wal_autocheckpoint", 1_000)?;
+    connection.pragma_update(None, "journal_size_limit", 64 * 1024 * 1024)?;
+    if disk {
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+    }
+    Ok(())
+}
+
+fn verify_known_checksums(connection: &Connection, backfill: bool) -> Result<()> {
+    let checksum_table: bool = connection
+        .prepare(
+            "SELECT 1 FROM sqlite_master
+             WHERE type='table' AND name='migration_checksums'",
+        )?
+        .exists([])?;
+    if !checksum_table {
+        return Ok(());
+    }
+    for (name, sql) in MIGRATIONS {
+        let applied = connection
+            .prepare("SELECT 1 FROM schema_migrations WHERE name=?1")?
+            .exists([name])?;
+        if !applied {
+            continue;
+        }
+        let expected = hex::encode(Sha256::digest(sql.as_bytes()));
+        let stored = connection
+            .query_row(
+                "SELECT sha256 FROM migration_checksums WHERE name=?1",
+                [name],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match stored {
+            Some(stored) if stored != expected => {
+                return Err(NexusError::Migration(format!(
+                    "{name}: checksum mismatch; database history may have been tampered with"
+                )));
+            }
+            Some(_) => {}
+            None if backfill => {
+                connection.execute(
+                    "INSERT INTO migration_checksums(name,sha256,verified_at)
+                     VALUES (?1,?2,?3)",
+                    rusqlite::params![name, expected, crate::now_rfc3339()],
+                )?;
+            }
+            None => {
+                return Err(NexusError::Migration(format!(
+                    "{name}: checksum record is missing; database history may have been tampered with"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_busy_error(error: &NexusError) -> bool {
+    matches!(
+        error,
+        NexusError::Storage(rusqlite::Error::SqliteFailure(inner, _))
+            if matches!(
+                inner.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +289,17 @@ mod tests {
             .with(|c| Ok(c.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))?))
             .expect("query");
         assert_eq!(count as usize, MIGRATIONS.len());
+        let checksum_count: i64 =
+            store
+                .with(|connection| {
+                    Ok(connection.query_row(
+                        "SELECT COUNT(*) FROM migration_checksums",
+                        [],
+                        |row| row.get(0),
+                    )?)
+                })
+                .expect("checksums");
+        assert_eq!(checksum_count as usize, MIGRATIONS.len());
     }
 
     #[test]
@@ -281,6 +395,63 @@ mod tests {
     }
 
     #[test]
+    fn production_migration_backfills_existing_timeline_rows_into_fts() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("level-0004.db");
+        {
+            let connection = Connection::open(&path).expect("old database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE schema_migrations (
+                        name TEXT PRIMARY KEY,
+                        applied_at TEXT NOT NULL
+                     );",
+                )
+                .expect("migration table");
+            for (name, sql) in MIGRATIONS.iter().take(4) {
+                connection.execute_batch(sql).expect("apply migration");
+                connection
+                    .execute(
+                        "INSERT INTO schema_migrations(name,applied_at) VALUES (?1,?2)",
+                        rusqlite::params![name, crate::now_rfc3339()],
+                    )
+                    .expect("record migration");
+            }
+            connection
+                .execute(
+                    "INSERT INTO sessions(id,workspace,created_at,updated_at)
+                     VALUES ('session_old','/tmp',?1,?1)",
+                    [crate::now_rfc3339()],
+                )
+                .expect("session");
+            connection
+                .execute(
+                    "INSERT INTO timeline_events
+                     (id,session_id,turn_id,trace_id,span_id,sequence,at,event_type,
+                      phase,status,summary,payload)
+                     VALUES ('event_old','session_old','turn','trace','span',1,?1,
+                             'notice','completed','completed','legacy searchable phrase',
+                             '{\"kind\":\"notice\",\"data\":{\"text\":\"legacy searchable phrase\",\"severity\":\"info\"}}')",
+                    [crate::now_rfc3339()],
+                )
+                .expect("timeline");
+        }
+
+        let store = Store::open(&path).expect("upgrade");
+        let count: i64 = store
+            .with(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM timeline_fts
+                     WHERE timeline_fts MATCH 'legacy AND searchable'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .expect("fts");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn kv_meta_roundtrip() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.meta_get("k").expect("get"), None);
@@ -325,6 +496,8 @@ mod tests {
             "plan_edges",
             "plan_approvals",
             "session_interruptions",
+            "migration_checksums",
+            "timeline_fts",
         ] {
             let ok: bool = store
                 .with(|c| {
@@ -336,5 +509,85 @@ mod tests {
                 .expect("query");
             assert!(ok, "table {table} missing");
         }
+    }
+
+    #[test]
+    fn migration_checksum_mismatch_blocks_open() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("state.db");
+        let store = Store::open(&path).expect("open");
+        store
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE migration_checksums SET sha256='tampered'
+                     WHERE name='0001_initial'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("tamper");
+        drop(store);
+        let error = Store::open(&path).expect_err("must reject");
+        assert!(error.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn missing_migration_checksum_blocks_open() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("state.db");
+        let store = Store::open(&path).expect("open");
+        store
+            .with(|connection| {
+                connection.execute(
+                    "DELETE FROM migration_checksums WHERE name='0002_interactive_agent'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("delete checksum");
+        drop(store);
+        let error = Store::open(&path).expect_err("must reject");
+        assert!(error.to_string().contains("checksum record is missing"));
+    }
+
+    #[test]
+    fn concurrent_connections_retry_short_writes() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("state.db");
+        let first = Store::open(&path).expect("first");
+        let second = Store::open(&path).expect("second");
+        let thread = std::thread::spawn(move || {
+            for index in 0..100 {
+                second
+                    .with_retry(|connection| {
+                        connection.execute(
+                            "INSERT INTO kv_meta(key,value) VALUES (?1,?2)
+                             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            rusqlite::params![format!("worker-{index}"), "ok"],
+                        )?;
+                        Ok(())
+                    })
+                    .expect("worker write");
+            }
+        });
+        for index in 0..100 {
+            first
+                .with_retry(|connection| {
+                    connection.execute(
+                        "INSERT INTO kv_meta(key,value) VALUES (?1,?2)
+                         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        rusqlite::params![format!("foreground-{index}"), "ok"],
+                    )?;
+                    Ok(())
+                })
+                .expect("foreground write");
+        }
+        thread.join().expect("thread");
+        let count: i64 = first
+            .with(|connection| {
+                Ok(connection.query_row("SELECT COUNT(*) FROM kv_meta", [], |row| row.get(0))?)
+            })
+            .expect("count");
+        assert_eq!(count, 200);
     }
 }

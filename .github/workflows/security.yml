@@ -1,0 +1,56 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal
+
+      - name: Select pinned toolchain
+        run: rustup override set 1.97.0
+
+      - name: Fetch locked project dependencies
+        run: cargo fetch --locked
+
+      - name: Install audit tools
+        run: |
+          cargo install --locked --no-default-features cargo-audit@0.22.2
+          cargo install --locked cargo-deny@0.20.2
+
+      - name: Audit Rust advisories
+        run: cargo audit
+
+      - name: Review licenses, bans, and sources
+        run: cargo deny check
+
+      - name: Scan tracked source for credential patterns
+        run: scripts/secret-scan.sh
+
+      - name: Generate and validate SPDX SBOM
+        env:
+          SOURCE_DATE_EPOCH: "0"
+          SNX_BUILD_COMMIT: ci
+        run: |
+          scripts/generate-spdx.py target/silent-nexus.spdx.json
+          scripts/validate-spdx.py target/silent-nexus.spdx.json

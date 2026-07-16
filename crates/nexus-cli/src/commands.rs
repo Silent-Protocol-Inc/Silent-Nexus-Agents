@@ -538,6 +538,7 @@ pub async fn commit(app: &App, args: CommitArgs) -> Result<()> {
     let action = nexus_app::ConfirmedAction::CommitFiles {
         paths: args.files,
         message: args.message,
+        allow_hooks: args.allow_hooks,
     };
     if confirm(&ui, &action.prompt(), args.yes)? {
         ui.render_report(&nexus_app::apply_confirmed(app, &action)?);
@@ -1561,6 +1562,16 @@ pub async fn setup(args: SetupArgs, no_color: bool) -> Result<()> {
     let workspace = std::env::current_dir()?;
     let paths =
         nexus_core::config::ConfigPaths::discover(&workspace).map_err(|e| anyhow!("{e}"))?;
+    for private_root in [
+        &paths.project_dir,
+        &paths.state_dir,
+        &paths.global_dir,
+        &paths.auth_dir,
+    ] {
+        if private_root.exists() {
+            nexus_core::permissions::repair_private_tree(private_root)?;
+        }
+    }
     let target = if args.project {
         paths.project_file.clone()
     } else {
@@ -1699,14 +1710,9 @@ pub async fn setup(args: SetupArgs, no_color: bool) -> Result<()> {
     }
 
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
+        nexus_core::permissions::repair_private_tree(parent)?;
     }
-    std::fs::write(&target, &toml)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600));
-    }
+    nexus_core::atomic::atomic_write_private(&target, toml.as_bytes())?;
 
     println!();
     ui.ok(&format!("wrote {scope} config → {}", target.display()));
@@ -1797,7 +1803,7 @@ use nexus_app::services::build_config_toml;
 
 // -------------------------------------------------------------------- doctor
 
-pub async fn doctor(app: &App, json: bool) -> Result<()> {
+pub async fn doctor(app: &App, args: DoctorArgs, json: bool) -> Result<()> {
     let ui = ui(app);
     let mut checks: Vec<(String, bool, String)> = Vec::new();
 
@@ -1867,6 +1873,79 @@ pub async fn doctor(app: &App, json: bool) -> Result<()> {
         },
     ));
 
+    if args.deep {
+        let maintenance = nexus_core::maintenance::check(
+            &app.store,
+            &app.paths.state_dir,
+            &app.artifacts,
+            &[app.paths.state_dir.clone(), app.paths.global_dir.clone()],
+        )?;
+        checks.push((
+            "database integrity".into(),
+            maintenance.database_integrity.eq_ignore_ascii_case("ok"),
+            maintenance.database_integrity.clone(),
+        ));
+        checks.push((
+            "state permissions".into(),
+            maintenance.permission_issues.is_empty(),
+            if maintenance.permission_issues.is_empty() {
+                "private directories 0700 and files 0600".into()
+            } else {
+                format!(
+                    "{} permission issue(s)",
+                    maintenance.permission_issues.len()
+                )
+            },
+        ));
+        checks.push((
+            "artifact integrity".into(),
+            maintenance.artifact_issues.is_empty(),
+            format!(
+                "{} artifact(s), {} bytes, {} issue(s)",
+                maintenance.artifact_count,
+                maintenance.artifact_bytes,
+                maintenance.artifact_issues.len()
+            ),
+        ));
+        checks.push((
+            "migration checksums".into(),
+            maintenance.migration_checksums == nexus_core::store::MIGRATION_COUNT as u64,
+            format!("{} verified", maintenance.migration_checksums),
+        ));
+        checks.push((
+            "WAL".into(),
+            maintenance.journal_mode.eq_ignore_ascii_case("wal"),
+            format!(
+                "{}; {} / {} frames checkpointed",
+                maintenance.journal_mode,
+                maintenance.wal_checkpointed_frames,
+                maintenance.wal_log_frames
+            ),
+        ));
+        checks.push((
+            "release metadata".into(),
+            brand::VERSION == "1.0.0" && brand::BUILD_TARGET == "x86_64-unknown-linux-gnu",
+            format!(
+                "{} · {} · {} · commit {} · epoch {}",
+                brand::VERSION,
+                brand::BUILD_TARGET,
+                brand::BUILD_PROFILE,
+                brand::BUILD_COMMIT,
+                brand::BUILD_EPOCH
+            ),
+        ));
+        checks.push((
+            "automatic terminal isolation".into(),
+            app.sandbox.strong_isolation(),
+            if app.sandbox.strong_isolation() {
+                "strong container isolation available".into()
+            } else {
+                "approval-only host fallback; unattended terminal execution is denied".into()
+            },
+        ));
+        checks.push(binary_integrity_check()?);
+    }
+
     if json {
         let v: Vec<_> = checks
             .iter()
@@ -1885,6 +1964,133 @@ pub async fn doctor(app: &App, json: bool) -> Result<()> {
     }
     println!("\n  {} {}", ui.dim("brand"), ui.cyan(brand::MARK));
     Ok(())
+}
+
+pub async fn maintenance(app: &App, command: MaintenanceCmd, json: bool) -> Result<()> {
+    match command {
+        MaintenanceCmd::Check => {
+            let report = nexus_core::maintenance::check(
+                &app.store,
+                &app.paths.state_dir,
+                &app.artifacts,
+                &[app.paths.state_dir.clone(), app.paths.global_dir.clone()],
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                render_maintenance_report(&ui(app), &report);
+            }
+            if !report.ok {
+                return Err(anyhow!("maintenance check found integrity issues"));
+            }
+        }
+        MaintenanceCmd::Backup { directory } => {
+            let manifest = nexus_core::maintenance::backup(
+                &app.store,
+                &app.paths.state_dir,
+                std::path::Path::new(&directory),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+            } else {
+                let ui = ui(app);
+                ui.ok(&format!("backup created → {directory}"));
+                ui.field("files", &manifest.files.len().to_string());
+                ui.field("database", &manifest.database);
+                ui.field("created", &manifest.created_at);
+            }
+        }
+        MaintenanceCmd::Optimize { vacuum } => {
+            nexus_core::maintenance::optimize(&app.store, vacuum)?;
+            let report = nexus_core::maintenance::check(
+                &app.store,
+                &app.paths.state_dir,
+                &app.artifacts,
+                &[app.paths.state_dir.clone(), app.paths.global_dir.clone()],
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                render_maintenance_report(&ui(app), &report);
+                ui(app).ok(if vacuum {
+                    "optimize, checkpoint, and vacuum completed"
+                } else {
+                    "optimize and checkpoint completed"
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_maintenance_report(ui: &Ui, report: &nexus_core::maintenance::MaintenanceReport) {
+    ui.header("maintenance");
+    ui.field("integrity", &report.database_integrity);
+    ui.field("journal", &report.journal_mode);
+    ui.field(
+        "WAL",
+        &format!(
+            "{} / {} frames checkpointed",
+            report.wal_checkpointed_frames, report.wal_log_frames
+        ),
+    );
+    ui.field("state bytes", &report.state_bytes.to_string());
+    ui.field(
+        "artifacts",
+        &format!(
+            "{} files / {} bytes / {} issue(s)",
+            report.artifact_count,
+            report.artifact_bytes,
+            report.artifact_issues.len()
+        ),
+    );
+    ui.field(
+        "permissions",
+        &format!("{} issue(s)", report.permission_issues.len()),
+    );
+    if report.ok {
+        ui.ok("state, database, permissions, WAL, and artifacts are consistent");
+    } else {
+        ui.warn("maintenance issues require attention");
+    }
+}
+
+fn binary_integrity_check() -> Result<(String, bool, String)> {
+    use sha2::Digest;
+    let executable = std::env::current_exe()?;
+    let canonical = executable.canonicalize()?;
+    let metadata = std::fs::symlink_metadata(&canonical)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok((
+            "binary integrity".into(),
+            false,
+            format!("{} is not a regular no-follow file", canonical.display()),
+        ));
+    }
+    let bytes = std::fs::read(&canonical)?;
+    let digest = hex::encode(sha2::Sha256::digest(&bytes));
+    #[cfg(unix)]
+    let ownership = {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        format!(
+            "mode {:o}, uid {}, gid {}",
+            metadata.permissions().mode() & 0o777,
+            metadata.uid(),
+            metadata.gid()
+        )
+    };
+    #[cfg(not(unix))]
+    let ownership = "platform ownership metadata unavailable".to_string();
+    Ok((
+        "binary integrity".into(),
+        true,
+        format!(
+            "{} · sha256 {} · {}",
+            canonical.display(),
+            digest,
+            ownership
+        ),
+    ))
 }
 
 #[cfg(test)]

@@ -19,6 +19,8 @@ is recorded so future contributors can weigh replacements.
 | `portable-pty` | Interactive terminal (PTY) tool. | Cross-platform PTY handling is intricate. |
 | `libc` | `setrlimit`/`getrlimit`, namespaces, `setsid` for the process sandbox. | Direct syscalls are exactly what a sandbox needs. |
 | `sha2` / `hex` | Content-addressed artifacts and file hashing. | Cryptographic primitives must come from a reviewed implementation. |
+| `zeroize` | Audited clearing of secret buffers on drop. | Compiler optimization can remove hand-written clearing. |
+| `shell-words` | Conservative argv parsing for command-policy analysis. | Shell quoting rules are easy to parse incorrectly. |
 | `directories` | Locating per-user config/state dirs across platforms. | Platform path conventions are fiddly and easy to get wrong. |
 | `tracing` (+ subscriber/appender) | Structured logging to files (never secrets, never stdout). | Structured, leveled, async-aware logging. |
 | `chrono` | RFC-3339 timestamps for audit and state. | Correct calendar/time handling. |
@@ -30,3 +32,8 @@ scaffolding, not shipped in the binary.
 
 Run `cargo tree` to inspect the full transitive graph and `cargo deny check`
 (config in `deny.toml`) to enforce the license/advisory/ban policy.
+The release check also records `cargo tree -d` for manual review. Multiple
+transitive versions are permitted because upstream crates often cannot share a
+semver line; all resolved versions remain covered by RustSec and source checks.
+Wildcard registry dependencies are denied. Private workspace path dependencies
+are the only wildcard exception.

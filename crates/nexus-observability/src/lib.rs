@@ -36,7 +36,7 @@ pub fn init_tracing(log_dir: Option<&Path>, verbose: bool) -> Result<LogGuard> {
 
     let mut file_guard = None;
     let file_layer = if let Some(dir) = log_dir {
-        std::fs::create_dir_all(dir)?;
+        nexus_core::permissions::repair_private_tree(dir)?;
         let appender = tracing_appender::rolling::daily(dir, "snx.jsonl");
         let (writer, guard) = tracing_appender::non_blocking(appender);
         file_guard = Some(guard);
@@ -49,6 +49,9 @@ pub fn init_tracing(log_dir: Option<&Path>, verbose: bool) -> Result<LogGuard> {
     } else {
         None
     };
+    if let Some(dir) = log_dir {
+        nexus_core::permissions::repair_private_tree(dir)?;
+    }
 
     let registry = tracing_subscriber::registry()
         .with(filter)

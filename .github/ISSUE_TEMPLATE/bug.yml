@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible non-security defect.
+title: "[bug] "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report vulnerabilities here. Use the private security channel.
+  - type: input
+    id: version
+    attributes:
+      label: Silent Nexus version
+      description: Include `snx --version` and the build metadata from `snx about`.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux x86-64 (certified)
+        - Other Linux (experimental)
+        - macOS (experimental)
+        - Windows (experimental)
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide minimal steps, expected behavior, and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include relevant output from `snx doctor --deep`; remove secrets.

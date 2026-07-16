@@ -3,7 +3,6 @@
 
 use nexus_core::{NexusError, Result};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchInfo {
@@ -19,20 +18,24 @@ pub struct FileState {
 }
 
 fn run_git(workspace: &Path, args: &[&str]) -> Option<(bool, String)> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(workspace)
-        .output()
+    run_git_with_hooks(workspace, args, false)
+}
+
+fn run_git_with_hooks(
+    workspace: &Path,
+    args: &[&str],
+    allow_hooks: bool,
+) -> Option<(bool, String)> {
+    let output = nexus_core::git::GitRunner::new(workspace)
+        .with_hooks(allow_hooks)
+        .run(args)
         .ok()?;
-    let text = if out.status.success() {
-        String::from_utf8_lossy(&out.stdout).to_string()
+    let text = if output.success {
+        output.stdout
     } else {
-        String::from_utf8_lossy(&out.stderr).to_string()
+        output.stderr
     };
-    Some((
-        out.status.success(),
-        nexus_core::sanitize::sanitize_terminal(text.trim_end()),
-    ))
+    Some((output.success, text))
 }
 
 /// Whether the workspace is inside a git repository.
@@ -79,33 +82,24 @@ pub fn modified_files(workspace: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Parsed index/worktree state from `git status --porcelain=v1 -z`.
+/// Parsed index/worktree state from bounded `git status --porcelain=v1`.
 pub fn file_states(workspace: &Path) -> Vec<FileState> {
-    let Ok(output) = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z"])
-        .current_dir(workspace)
-        .output()
-    else {
+    let Some((true, output)) = run_git(workspace, &["status", "--porcelain=v1"]) else {
         return Vec::new();
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let fields: Vec<&[u8]> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty())
-        .collect();
     let mut states = Vec::new();
-    let mut index = 0usize;
-    while index < fields.len() {
-        let field = fields[index];
-        if field.len() < 4 {
-            index += 1;
+    for line in output.lines() {
+        let bytes = line.as_bytes();
+        if bytes.len() < 4 {
             continue;
         }
-        let status = &field[..2];
-        let path = String::from_utf8_lossy(&field[3..]).to_string();
+        let status = &bytes[..2];
+        let path = line[3..]
+            .split_once(" -> ")
+            .map(|(_, destination)| destination)
+            .unwrap_or(&line[3..])
+            .trim_matches('"')
+            .to_string();
         if !path.is_empty() {
             states.push(FileState {
                 path,
@@ -113,8 +107,6 @@ pub fn file_states(workspace: &Path) -> Vec<FileState> {
                 worktree_status: status[1] as char,
             });
         }
-        let renamed_or_copied = status.contains(&b'R') || status.contains(&b'C');
-        index += if renamed_or_copied { 2 } else { 1 };
     }
     states
 }
@@ -335,20 +327,21 @@ pub fn commit_preview(workspace: &Path, paths: &[String], max_bytes: usize) -> R
                 "selected untracked path `{path}` is not a regular file"
             )));
         }
-        let output = Command::new("git")
-            .args(["diff", "--no-index", "--", "/dev/null", path])
-            .current_dir(workspace)
-            .output()
-            .map_err(|error| NexusError::Other(format!("git diff failed: {error}")))?;
+        let output = nexus_core::git::GitRunner::new(workspace).run(&[
+            "diff",
+            "--no-index",
+            "--",
+            "/dev/null",
+            path,
+        ])?;
         // `git diff --no-index` returns 1 when differences are present.
-        if !matches!(output.status.code(), Some(0 | 1)) {
+        if !matches!(output.code, Some(0 | 1)) {
             return Err(NexusError::Other(format!(
                 "git diff failed: {}",
-                nexus_core::sanitize::sanitize_terminal(&String::from_utf8_lossy(&output.stderr))
+                output.stderr
             )));
         }
-        let text =
-            nexus_core::sanitize::sanitize_terminal(&String::from_utf8_lossy(&output.stdout));
+        let text = output.stdout;
         if !text.trim().is_empty() {
             sections.push(text);
         }
@@ -363,14 +356,19 @@ pub fn commit_preview(workspace: &Path, paths: &[String], max_bytes: usize) -> R
     Ok(preview)
 }
 
-pub fn commit(workspace: &Path, paths: &[String], message: &str) -> Result<String> {
+pub fn commit(
+    workspace: &Path,
+    paths: &[String],
+    message: &str,
+    allow_hooks: bool,
+) -> Result<String> {
     if message.trim().is_empty() {
         return Err(NexusError::Config("commit message cannot be empty".into()));
     }
     stage(workspace, paths)?;
     let mut args = vec!["commit", "--only", "-m", message.trim(), "--"];
     args.extend(paths.iter().map(String::as_str));
-    let (ok, text) = run_git(workspace, &args)
+    let (ok, text) = run_git_with_hooks(workspace, &args, allow_hooks)
         .ok_or_else(|| NexusError::Other("git is not installed or not runnable".into()))?;
     if !ok {
         return Err(NexusError::Other(format!("git commit failed: {text}")));
@@ -505,6 +503,7 @@ pub fn revert_file(workspace: &Path, path: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("dir");
@@ -605,7 +604,7 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "selected\n").expect("write");
         std::fs::write(dir.path().join("other.txt"), "other\n").expect("write");
         stage(dir.path(), &["other.txt".into()]).expect("pre-stage unrelated");
-        commit(dir.path(), &["a.txt".into()], "selected only").expect("commit");
+        commit(dir.path(), &["a.txt".into()], "selected only", false).expect("commit");
 
         let names = run_git(
             dir.path(),

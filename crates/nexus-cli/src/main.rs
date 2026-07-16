@@ -8,7 +8,7 @@ mod commands;
 mod ui;
 
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Command};
+use cli::{Cli, Command, ConfigCmd};
 use nexus_app::App;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -17,10 +17,6 @@ use std::sync::Arc;
 async fn main() -> ExitCode {
     let args = Cli::parse();
     let color = !args.no_color && std::env::var_os("NO_COLOR").is_none();
-
-    // Structured logs go to the state dir; never to stdout (which carries
-    // command output and, in MCP serve mode, the JSON-RPC stream).
-    let _log_guard = init_logging(args.verbose);
 
     match dispatch(args).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -41,6 +37,9 @@ fn init_logging(verbose: bool) -> Option<nexus_observability::LogGuard> {
         .ok()
         .and_then(|w| nexus_core::config::ConfigPaths::discover(&w).ok())
         .map(|p| p.state_dir.join("logs"));
+    if let Some(directory) = dir.as_deref() {
+        let _ = nexus_core::permissions::repair_private_tree(directory);
+    }
     nexus_observability::init_tracing(dir.as_deref(), verbose).ok()
 }
 
@@ -57,10 +56,25 @@ async fn dispatch(args: Cli) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Schema inspection must remain available even when an existing config is
+    // invalid and must not create or repair workspace state.
+    if matches!(&args.command, Some(Command::Config(ConfigCmd::Schema))) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&nexus_core::config::Config::json_schema())?
+        );
+        return Ok(());
+    }
+
     // Brand/version output has no runtime or configuration dependency.
     if let Some(Command::About(a)) = args.command {
         return commands::about(a, no_color);
     }
+
+    // Structured logs go to the state dir; never to stdout (which carries
+    // command output and, in MCP serve mode, the JSON-RPC stream). Initialize
+    // only after the side-effect-free completion/schema/about paths.
+    let _log_guard = init_logging(args.verbose);
 
     // Onboarding runs before any config exists, so handle it before bootstrap.
     if let Some(Command::Setup(a)) = args.command {
@@ -139,7 +153,8 @@ async fn dispatch(args: Cli) -> anyhow::Result<()> {
         Command::Audit(a) => commands::audit(&app, a, json).await,
         Command::Logs => commands::logs(&app).await,
         Command::Init => commands::init(&app).await,
-        Command::Doctor => commands::doctor(&app, json).await,
+        Command::Doctor(args) => commands::doctor(&app, args, json).await,
+        Command::Maintenance(command) => commands::maintenance(&app, command, json).await,
         Command::Worker { idle_secs } => {
             nexus_app::worker::run(Arc::new(app), idle_secs).await?;
             Ok(())

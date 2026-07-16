@@ -3,6 +3,9 @@ name = "nexus-memory"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 description = "Persistent SQLite-backed memory with FTS retrieval and approval controls"
 
 [dependencies]

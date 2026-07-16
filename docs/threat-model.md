@@ -1,84 +1,94 @@
 # Threat model
 
-Silent Nexus is built for the case where **the model itself may be adversarial**
-— jailbroken, prompt-injected via web/MCP content, or simply wrong — and the
-operator is a legitimate user running it on their own machine against their own
-workspace. Safety is a property of the harness, not the model.
+Silent Nexus assumes the model, retrieved content, repository content, tool
+output, and provider responses may be malicious. The operator and local
+installation are trusted; the harness, not the model, enforces safety.
 
-## Assets
+## Protected assets
 
-- The operator's filesystem outside the workspace (SSH keys, cloud creds, dotfiles).
-- The workspace itself (integrity of code and data).
-- Secrets in environment variables and configuration.
-- The operator's network position (internal services, cloud metadata).
-- The operator's terminal (control-sequence injection).
-- Local compute (denial via runaway processes / output).
+- host files and credentials outside the workspace;
+- workspace code/data and Git history;
+- `.nexus` state, transcripts, plans, goals, tasks, artifacts, and logs;
+- provider tokens and credential profiles;
+- network position and cloud metadata;
+- terminal integrity and local compute;
+- release/source/database integrity.
 
-## Adversaries and defenses
+## Model action defenses
 
-### 1. A malicious or jailbroken model
-The model can emit any bytes. It cannot:
-- call an unknown tool (registry lookup fails closed);
-- pass invalid arguments (JSON Schema validation rejects them);
-- touch a path outside the workspace (`WorkspaceGuard` canonicalizes and checks
-  every path, including symlink-swap on write);
-- exceed its role's capabilities (role→category gate);
-- perform a destructive/external action without at least an approval prompt
-  (policy cannot be configured to auto-allow these);
-- escape output/time limits (sandbox-enforced);
-- exfiltrate a secret through tool output (redaction runs before display/persist).
+Unknown tools and malformed schemas fail closed. Role capabilities, workspace
+path validation, policy, approvals, isolation metadata, output/time limits,
+redaction, terminal sanitization, and audit records run outside the model.
 
-Verified by the adversarial scenarios in `nexus-agent/tests/loop_scenarios.rs`.
+Structured command analysis examines every shell chain/pipeline segment and
+concrete argv. Raw shell, interpreters, wrappers, substitutions, and unproved
+commands are destructive one-time approvals. Privilege escalation and generic
+terminal Git commit/push/remote/alias/unrecognized operations are hard denied.
 
-### 2. Prompt injection via web or MCP content
-Fetched web pages and MCP tool results are **data, never instructions**. Web
-content is wrapped in an explicit untrusted-content banner and never elevated to
-system/priority context. The context manager is forbidden from promoting
-retrieved content into the load-bearing safety segments.
+Session grants require proved, structured, non-destructive argv under strong
+container isolation. Automatic/background terminal execution is denied without
+that isolation.
 
-### 3. SSRF / DNS rebinding / metadata theft
-The web tools (`nexus-tools::net_guard`) block, by default: `file://` and other
-unsafe schemes, credential-bearing URLs, loopback (unless explicitly enabled),
-RFC-1918 and other private ranges, and cloud metadata endpoints
-(169.254.169.254 and friends). The destination host is resolved once and the
-connection is pinned to the vetted IP, defeating DNS-rebinding. Redirects are
-re-validated hop by hop.
+## Filesystem and state defenses
 
-### 4. Secret disclosure
-Sensitive environment variables are never forwarded into sandboxes and never
-logged. The `Redactor` masks PEM keys, bearer tokens, `sk-`/`AKIA`/`gh_`/`xox`
-patterns, and credential-bearing URLs, plus the values of any registered secret
-env vars, before text is shown or stored. Memory storage **refuses** content
-that redaction would alter.
+`WorkspaceGuard` canonicalizes paths, rejects escapes and symlink writes, and
+denies state/Git/credential paths to generic model tools. Containers mask
+detected sensitive paths. Private state uses repaired `0700`/`0600`
+permissions and no-follow same-directory atomic replacement.
 
-### 5. Terminal injection
-All model- and web-derived text passes through `sanitize_terminal`, which strips
-CSI/OSC/DCS sequences and drops carriage returns, so hostile output cannot
-rewrite your scrollback, retitle your window, or spoof a prompt.
+Artifact reads validate state-root confinement, regular/no-follow file type,
+size, and SHA-256. Migration source is embedded and checksummed; differing
+applied history blocks database open.
 
-### 6. Resource exhaustion
-The sandbox applies wall-clock timeouts, CPU/address-space/process-count rlimits
-(process backend), and a hard output cap that terminates the process group when
-exceeded.
+## Process and container defenses
 
-### 7. Persistence tampering
-The SQLite store is created 0600. Skills are declarative and validated to reject
-embedded payloads (`#!/`, `eval(`, `base64,`, …); agent-proposed skills are
-stored disabled and never auto-enabled. MCP servers are untrusted by default and
-require an explicit human action to register or trust.
+Strong containers run as the invoking UID/GID with per-action mounts,
+read-only rootfs, hidden sensitive paths, network-off defaults, dropped
+capabilities, resource limits, no daemon-side output logging, and immediate
+container kill.
 
-## Explicit non-goals / residual risk
+Host process execution is explicitly `approval_only_host`, not isolation.
+Every model-proposed action requires attended one-time approval; unattended and
+background execution is denied. Process groups are killed on timeout/output cap
+and the authorization token cannot carry to another invocation.
 
-- **The restricted-process backend is not a container.** It confines paths and
-  applies rlimits and (when available) a network namespace, but the host
-  filesystem and kernel attack surface remain visible. `snx sandbox status`
-  states this. For hostile code, use the container backend.
-- **`path-validation-only` (`sandbox.backend = "none"`) is not isolation.** It
-  runs commands as ordinary local processes with only workspace path checks.
-- **Silent Nexus does not defend against a compromised host or a malicious
-  operator.** It protects the operator from the model, not the machine from the
-  operator.
-- **A model with an approved command capability can still do damage within what
-  you approved.** Approval is a real decision; read the prompt.
-- **Token/lot estimates are approximate** (no per-model tokenizer); they
-  deliberately over-estimate to avoid context overflow.
+## Network and content defenses
+
+Web/MCP content is untrusted data and cannot become higher-priority
+instructions. Web tools reject unsafe schemes, credential URLs, private and
+metadata destinations, unapproved loopback, unsafe redirects, and DNS
+rebinding. Network mode never exceeds the concrete action's approved mode.
+
+## Secret and terminal defenses
+
+Secrets use redacted serialization/debug output and audited zeroization.
+Environment forwarding drops sensitive and interpreter/Git loader variables.
+Redaction occurs before persistence/display, and memory refuses content that
+would be redacted. Terminal sanitization strips CSI/OSC/DCS and carriage-return
+spoofing.
+
+## Resource exhaustion
+
+SQLite has busy timeouts, bounded retries, WAL checkpointing, and indexed
+status/search paths. Timeline search uses FTS and bounded results. Process and
+container output share one byte budget; crossing it kills execution immediately
+instead of waiting for timeout. TUI layout caches and visible-range rendering
+avoid repeatedly wrapping the full transcript.
+
+## Supply chain and release
+
+Rust/MSRV, lockfile, container image, CI actions, internal crate publication,
+license/source policy, advisory audit, secret scan, SPDX SBOM, deterministic
+archive, and SHA-256 manifests are release gates. Only Linux x86-64 is
+certified for 1.0.0.
+
+## Residual risk and non-goals
+
+- Containers share the host kernel.
+- Approval-only host execution can access host resources available to the user.
+- An operator can approve a damaging in-scope action.
+- Silent Nexus does not defend a compromised host or malicious operator.
+- `restricted` network mode relies on typed destination validation, not a
+  generic egress proxy.
+- No test suite proves the absence of unknown defects; production-ready means
+  every discovered/reproducible issue and declared gate is resolved.

@@ -7,6 +7,7 @@
 //! at the single point of use (an HTTP header, a child-process stdin).
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// A secret value with redacted formatting.
 #[derive(Clone, PartialEq, Eq)]
@@ -68,16 +69,10 @@ impl<'de> Deserialize<'de> for SecretString {
 
 impl Drop for SecretString {
     fn drop(&mut self) {
-        // Best-effort clear. Not a guarantee against copies made before drop,
-        // but removes the common case of a secret lingering in freed memory.
-        // In-place zeroing of the UTF-8 buffer with NUL bytes keeps the string
-        // valid UTF-8, so this is the one justified `unsafe` in the crate.
-        #[allow(unsafe_code)]
-        unsafe {
-            for b in self.0.as_bytes_mut() {
-                *b = 0;
-            }
-        }
+        // `zeroize` uses compiler fences and volatile writes so this clearing
+        // is not optimized away. It cannot erase copies made elsewhere, which
+        // is why credential values remain wrapped and short-lived.
+        self.0.zeroize();
     }
 }
 

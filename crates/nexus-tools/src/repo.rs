@@ -3,8 +3,9 @@
 //! Git runs as a controlled subprocess inside the sandbox — never through a
 //! shell, always with an argument vector. Read operations (status, diff, log)
 //! are `Read` risk. `repo.git_restore` (rollback of working-tree changes) is
-//! `Destructive`. Commit/push/publish are **not tools**: they only happen via
-//! `terminal.run` with explicit user approval, per policy.
+//! `Destructive`. Generic terminal commit/push/remote operations are hard
+//! denied; local commits use the audited typed workflow, and remote mutation
+//! is outside this tool surface.
 
 use crate::{
     finalize_output, object_schema, Tool, ToolCategory, ToolContext, ToolMeta, ToolOutput,
@@ -12,7 +13,7 @@ use crate::{
 };
 use nexus_core::{NexusError, Result, RiskLevel};
 use nexus_policy::ActionRequest;
-use nexus_sandbox::{ExecSpec, NetworkMode};
+use nexus_sandbox::{ExecSpec, FilesystemAccess, NetworkMode};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -169,22 +170,19 @@ pub fn register(registry: &mut ToolRegistry) {
 }
 
 async fn run_git(ctx: &ToolContext, args: &[&str]) -> Result<String> {
-    let spec = ExecSpec {
-        program: "git".into(),
-        args: args.iter().map(|s| s.to_string()).collect(),
-        shell: false,
-        cwd: ctx.workspace.root().to_path_buf(),
-        env: BTreeMap::new(),
-        env_allowlist: ctx.config.sandbox.env_allowlist.clone(),
-        network: NetworkMode::Off,
-        timeout_secs: 30,
-        cpu_limit_secs: 30,
-        memory_limit_mb: 512,
-        output_hard_cap: 512_000,
-        stdin: None,
-    };
-    let outcome = ctx.sandbox.execute(spec, None).await?;
-    if outcome.exit_code == Some(0) {
+    let root = ctx.workspace.root().to_path_buf();
+    let owned = args
+        .iter()
+        .map(|argument| argument.to_string())
+        .collect::<Vec<_>>();
+    let outcome = tokio::task::spawn_blocking(move || {
+        nexus_core::git::GitRunner::new(&root)
+            .with_output_cap(512_000)
+            .run_owned(&owned)
+    })
+    .await
+    .map_err(|error| NexusError::Other(format!("Git task join: {error}")))??;
+    if outcome.success {
         Ok(outcome.stdout)
     } else if outcome.stderr.contains("not a git repository") {
         Err(NexusError::ToolFailed {
@@ -197,11 +195,37 @@ async fn run_git(ctx: &ToolContext, args: &[&str]) -> Result<String> {
             message: format!(
                 "git {} failed (exit {:?}): {}",
                 args.first().unwrap_or(&""),
-                outcome.exit_code,
+                outcome.code,
                 outcome.stderr.trim()
             ),
         })
     }
+}
+
+fn model_safe_status(
+    guard: &nexus_core::workspace::WorkspaceGuard,
+    status: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut lines = Vec::new();
+    let mut paths = std::collections::BTreeSet::new();
+    for line in status.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let raw = &line[3..];
+        let candidates = raw
+            .split_once(" -> ")
+            .map(|(source, destination)| vec![source, destination])
+            .unwrap_or_else(|| vec![raw]);
+        if candidates.iter().any(|path| {
+            path.starts_with('"') || path.ends_with('"') || guard.resolve_for_write(path).is_err()
+        }) {
+            continue;
+        }
+        lines.push(line.to_string());
+        paths.extend(candidates.into_iter().map(str::to_string));
+    }
+    (lines, paths.into_iter().collect())
 }
 
 /// Detect the primary toolchain by manifest files.
@@ -320,6 +344,7 @@ impl Tool for RepoTool {
             risk: self.meta.risk,
             paths: path.map(|p| vec![p.to_string()]).unwrap_or_default(),
             command: None,
+            command_analysis: None,
             destination: None,
             summary,
         })
@@ -330,31 +355,47 @@ impl Tool for RepoTool {
             RepoOp::GitStatus => {
                 let branch = run_git(ctx, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
                 let status = run_git(ctx, &["status", "--porcelain=v1"]).await?;
-                let changed = status.lines().count();
+                let (status_lines, _) = model_safe_status(&ctx.workspace, &status);
+                let changed = status_lines.len();
                 (
                     format!(
                         "branch: {}\n{}",
                         branch.trim(),
-                        if status.is_empty() {
-                            "working tree clean".to_string()
+                        if status_lines.is_empty() {
+                            "no model-accessible changes".to_string()
                         } else {
-                            status
+                            status_lines.join("\n")
                         }
                     ),
                     json!({"changed_files": changed, "branch": branch.trim()}),
                 )
             }
             RepoOp::GitDiff => {
+                let path = args.get("path").and_then(Value::as_str);
+                let paths = if let Some(path) = path {
+                    ctx.workspace.resolve_for_write(path)?;
+                    vec![path.to_string()]
+                } else {
+                    let status = run_git(ctx, &["status", "--porcelain=v1"]).await?;
+                    let (_, mut paths) = model_safe_status(&ctx.workspace, &status);
+                    paths.truncate(200);
+                    paths
+                };
+                if paths.is_empty() {
+                    return finalize_output(
+                        ctx,
+                        &self.meta,
+                        "no model-accessible differences".into(),
+                        json!({"diff_lines": 0}),
+                    )
+                    .await;
+                }
                 let mut a: Vec<&str> = vec!["diff"];
                 if args.get("staged").and_then(Value::as_bool).unwrap_or(false) {
                     a.push("--cached");
                 }
-                let path_owned;
-                if let Some(p) = args.get("path").and_then(Value::as_str) {
-                    a.push("--");
-                    path_owned = p.to_string();
-                    a.push(&path_owned);
-                }
+                a.push("--");
+                a.extend(paths.iter().map(String::as_str));
                 let diff = run_git(ctx, &a).await?;
                 let lines = diff.lines().count();
                 (
@@ -422,11 +463,14 @@ impl Tool for RepoTool {
                         if p == root {
                             continue;
                         }
-                        let rel = guard.display_relative(p);
-                        if p.parent() == Some(root.as_path()) {
+                        let Ok(real) = guard.resolve_existing(p) else {
+                            continue;
+                        };
+                        let rel = guard.display_relative(&real);
+                        if real.parent() == Some(root.as_path()) {
                             tops.push(rel.clone());
                         }
-                        if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                        if let Some(ext) = real.extension().and_then(|e| e.to_str()) {
                             let lang = match ext {
                                 "rs" => "Rust",
                                 "ts" | "tsx" => "TypeScript",
@@ -443,7 +487,7 @@ impl Tool for RepoTool {
                             *langs.entry(lang).or_insert(0) += 1;
                         }
                         if matches!(
-                            p.file_name().and_then(|n| n.to_str()),
+                            real.file_name().and_then(|n| n.to_str()),
                             Some(
                                 "Cargo.toml"
                                     | "package.json"
@@ -542,6 +586,7 @@ impl Tool for RepoTool {
                 })?;
                 let (program, cmd_args) =
                     check_command(toolchain, kind, args.get("target").and_then(Value::as_str))?;
+                let sensitive_path_masks = ctx.workspace.sensitive_paths_for_masking()?;
                 let spec = ExecSpec {
                     program,
                     args: cmd_args,
@@ -550,10 +595,15 @@ impl Tool for RepoTool {
                     env: BTreeMap::new(),
                     env_allowlist: ctx.config.sandbox.env_allowlist.clone(),
                     network: NetworkMode::Off,
+                    approved_network: NetworkMode::Off,
+                    filesystem_access: FilesystemAccess::WorkspaceWrite,
+                    sensitive_path_masks,
+                    unsafe_host_approved: ctx.sandbox.strong_isolation()
+                        || ctx.authorization.consume_unsafe_host_once(),
                     timeout_secs: self.meta.timeout_secs,
                     cpu_limit_secs: self.meta.timeout_secs,
                     memory_limit_mb: ctx.config.sandbox.memory_limit_mb.max(2048),
-                    output_hard_cap: 1_000_000,
+                    output_hard_cap: ctx.config.sandbox.max_output_bytes.max(1),
                     stdin: None,
                 };
                 let outcome = ctx.sandbox.execute(spec, None).await?;
@@ -650,6 +700,49 @@ mod tests {
             .expect("diff");
         assert!(out.content.contains("-one"));
         assert!(out.content.contains("+two"));
+    }
+
+    #[tokio::test]
+    async fn git_status_and_diff_hide_denied_files() {
+        let directory = tempfile::tempdir().expect("directory");
+        git(directory.path(), &["init", "-q", "-b", "main"]).await;
+        std::fs::write(directory.path().join("visible.txt"), "one\n").expect("visible");
+        std::fs::write(directory.path().join(".env"), "TOKEN=old-secret\n").expect("env");
+        git(directory.path(), &["add", "."]).await;
+        git(directory.path(), &["commit", "-qm", "init"]).await;
+        std::fs::write(directory.path().join("visible.txt"), "two\n").expect("visible update");
+        std::fs::write(directory.path().join(".env"), "TOKEN=new-secret\n").expect("env update");
+
+        let ctx = context(directory.path());
+        let mut registry = ToolRegistry::new();
+        register(&mut registry);
+        let status = registry
+            .get("repo.git_status")
+            .expect("status tool")
+            .execute(&ctx, json!({}))
+            .await
+            .expect("status");
+        assert!(status.content.contains("visible.txt"));
+        assert!(!status.content.contains(".env"));
+
+        let diff = registry
+            .get("repo.git_diff")
+            .expect("diff tool")
+            .execute(&ctx, json!({}))
+            .await
+            .expect("diff");
+        assert!(diff.content.contains("-one"));
+        assert!(diff.content.contains("+two"));
+        assert!(!diff.content.contains("old-secret"));
+        assert!(!diff.content.contains("new-secret"));
+        assert!(!diff.content.contains(".env"));
+
+        assert!(registry
+            .get("repo.git_diff")
+            .expect("diff tool")
+            .execute(&ctx, json!({"path": ".env"}))
+            .await
+            .is_err());
     }
 
     #[tokio::test]

@@ -9,14 +9,18 @@
 //! * every state mutation is recorded through [`events::AuditEvent`].
 
 pub mod artifacts;
+pub mod atomic;
 pub mod brand;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod git;
 pub mod gpu;
 pub mod ids;
 pub mod instructions;
+pub mod maintenance;
 pub mod orchestration;
+pub mod permissions;
 pub mod redact;
 pub mod risk;
 pub mod sanitize;

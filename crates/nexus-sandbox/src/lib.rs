@@ -3,10 +3,10 @@
 //! Every backend reports an honest [`IsolationReport`]; the UI displays the
 //! *actual* isolation level, never an aspirational one. Backends:
 //!
-//! * [`process::ProcessBackend`] — restricted local process: scrubbed
+//! * [`process::ProcessBackend`] — approval-only host process: scrubbed
 //!   environment, resource limits (CPU, memory, processes), process-group
-//!   kill, working-directory confinement, and network disabled via Linux
-//!   user+network namespaces when the kernel permits (with honest fallback).
+//!   kill, working-directory validation, and optional Linux network namespace.
+//!   These are guardrails, not containment.
 //! * [`container::ContainerBackend`] — Docker/Podman container: read-only
 //!   base filesystem, workspace mount, tmpfs, no network by default.
 //! * [`mock::MockBackend`] — deterministic backend for tests.
@@ -16,6 +16,7 @@
 
 pub mod container;
 pub mod mock;
+mod output;
 pub mod process;
 
 use nexus_core::Result;
@@ -25,7 +26,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 /// Network access mode for a sandboxed execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkMode {
     Off,
@@ -33,6 +34,27 @@ pub enum NetworkMode {
     /// layer (web tools), not by the OS sandbox.
     Restricted,
     Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationStrength {
+    /// Ephemeral container with a constrained filesystem and network.
+    Strong,
+    /// Host process with guardrails; safety depends on one-time approval.
+    ApprovalOnlyHost,
+    /// Path validation only.
+    None,
+    /// Deterministic test double.
+    Mock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemAccess {
+    NoWorkspace,
+    ReadOnly,
+    WorkspaceWrite,
 }
 
 /// What to execute.
@@ -50,7 +72,16 @@ pub struct ExecSpec {
     pub env: BTreeMap<String, String>,
     /// Environment allowlist from config.
     pub env_allowlist: Vec<String>,
+    /// Requested network mode.
     pub network: NetworkMode,
+    /// Maximum network mode explicitly authorized for this execution.
+    pub approved_network: NetworkMode,
+    /// Workspace mount access granted to the execution.
+    pub filesystem_access: FilesystemAccess,
+    /// Workspace-relative paths hidden from model-run containers.
+    pub sensitive_path_masks: Vec<PathBuf>,
+    /// Required for every host-process execution originating from a model.
+    pub unsafe_host_approved: bool,
     pub timeout_secs: u64,
     pub cpu_limit_secs: u64,
     pub memory_limit_mb: u64,
@@ -69,6 +100,10 @@ impl ExecSpec {
             parts.extend(self.args.iter().cloned());
             parts.join(" ")
         }
+    }
+
+    pub fn effective_network(&self) -> NetworkMode {
+        self.network.min(self.approved_network)
     }
 }
 
@@ -99,9 +134,11 @@ pub struct ExecOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IsolationReport {
     pub backend: String,
-    /// Short label surfaced in the status bar, e.g. `process-restricted`.
+    pub strength: IsolationStrength,
+    /// Short label surfaced in the status bar, e.g. `approval-only-host`.
     pub level: String,
     pub filesystem: String,
+    pub filesystem_access: FilesystemAccess,
     pub network: String,
     pub resources: String,
     pub caveats: Vec<String>,
@@ -110,6 +147,8 @@ pub struct IsolationReport {
 #[async_trait::async_trait]
 pub trait SandboxBackend: Send + Sync {
     fn name(&self) -> &'static str;
+
+    fn strength(&self) -> IsolationStrength;
 
     /// Honest isolation description for the given network mode.
     fn isolation(&self, network: NetworkMode) -> IsolationReport;
@@ -134,7 +173,7 @@ pub struct SandboxManager {
 
 impl SandboxManager {
     /// Choose a backend according to config (`auto` prefers container, falls
-    /// back to restricted process). `none` is an explicit opt-out that still
+    /// back to approval-only host execution). `none` is an explicit opt-out that still
     /// records honest isolation (`path-validation-only`).
     pub async fn select(preference: &str, container_image: &str) -> Result<Self> {
         let mut notes = Vec::new();
@@ -158,7 +197,7 @@ impl SandboxManager {
                         }
                     }
                 }
-                notes.push("falling back to restricted-process backend".into());
+                notes.push("falling back to approval-only host backend".into());
                 Ok(Self {
                     backend: Box::new(process::ProcessBackend::new(false)),
                     selection_notes: notes,
@@ -192,6 +231,10 @@ impl SandboxManager {
         self.backend.as_ref()
     }
 
+    pub fn strong_isolation(&self) -> bool {
+        self.backend.strength() == IsolationStrength::Strong
+    }
+
     pub async fn execute(
         &self,
         spec: ExecSpec,
@@ -209,7 +252,8 @@ pub fn scrubbed_env(
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for key in allowlist {
-        if nexus_core::redact::Redactor::is_sensitive_env_key(key) {
+        if forbidden_environment_key(key) || nexus_core::redact::Redactor::is_sensitive_env_key(key)
+        {
             continue;
         }
         if let Ok(v) = std::env::var(key) {
@@ -217,11 +261,31 @@ pub fn scrubbed_env(
         }
     }
     for (k, v) in extra {
-        if !nexus_core::redact::Redactor::is_sensitive_env_key(k) {
+        if !forbidden_environment_key(k) && !nexus_core::redact::Redactor::is_sensitive_env_key(k) {
             env.insert(k.clone(), v.clone());
         }
     }
     env
+}
+
+fn forbidden_environment_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.starts_with("GIT_")
+        || upper.starts_with("LD_")
+        || upper.starts_with("DYLD_")
+        || matches!(
+            upper.as_str(),
+            "BASH_ENV"
+                | "ENV"
+                | "CDPATH"
+                | "PYTHONPATH"
+                | "PYTHONHOME"
+                | "RUBYOPT"
+                | "PERL5OPT"
+                | "NODE_OPTIONS"
+                | "RUSTC_WRAPPER"
+                | "RUSTC_WORKSPACE_WRAPPER"
+        )
 }
 
 #[cfg(test)]
@@ -247,8 +311,10 @@ mod tests {
         let mut extra = BTreeMap::new();
         extra.insert("MY_TOKEN".to_string(), "x".to_string());
         extra.insert("RUST_BACKTRACE".to_string(), "1".to_string());
+        extra.insert("GIT_CONFIG_COUNT".to_string(), "1".to_string());
         let env = scrubbed_env(&[], &extra);
         assert!(!env.contains_key("MY_TOKEN"));
+        assert!(!env.contains_key("GIT_CONFIG_COUNT"));
         assert!(env.contains_key("RUST_BACKTRACE"));
     }
 }

@@ -319,38 +319,27 @@ fn ensure_writer_worktree(app: &App, task: &BackgroundTask) -> Result<PathBuf> {
             )));
         }
     } else {
-        let branch_exists = std::process::Command::new("git")
-            .args([
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{branch}"),
-            ])
-            .current_dir(&repo_root)
-            .status()
-            .map(|status| status.success())
+        let reference = format!("refs/heads/{branch}");
+        let branch_exists = nexus_core::git::GitRunner::new(&repo_root)
+            .run(&["show-ref", "--verify", "--quiet", &reference])
+            .map(|output| output.success)
             .unwrap_or(false);
-        let mut command = std::process::Command::new("git");
-        command.arg("worktree").arg("add");
+        let mut arguments = vec!["worktree".to_string(), "add".to_string()];
         if !branch_exists {
-            command.arg("-b").arg(&branch);
+            arguments.push("-b".into());
+            arguments.push(branch.clone());
         }
-        command.arg(&worktree);
+        arguments.push(worktree.display().to_string());
         if branch_exists {
-            command.arg(&branch);
+            arguments.push(branch.clone());
         } else {
-            command.arg("HEAD");
+            arguments.push("HEAD".into());
         }
-        let output = command
-            .current_dir(&repo_root)
-            .output()
-            .map_err(|error| NexusError::Other(format!("git worktree add: {error}")))?;
-        if !output.status.success() {
+        let output = nexus_core::git::GitRunner::new(&repo_root).run_owned(&arguments)?;
+        if !output.success {
             return Err(NexusError::Other(format!(
                 "git worktree add failed: {}",
-                nexus_core::sanitize::sanitize_terminal(
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )
+                output.stderr
             )));
         }
     }
@@ -396,19 +385,15 @@ fn writer_worktree_paths(workspace: &Path, task_id: &str) -> Result<(PathBuf, Pa
 }
 
 fn git_output(workspace: &Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(workspace)
-        .output()
-        .map_err(|error| NexusError::Other(format!("git {}: {error}", args.join(" "))))?;
-    if !output.status.success() {
+    let output = nexus_core::git::GitRunner::new(workspace).run(args)?;
+    if !output.success {
         return Err(NexusError::Other(format!(
             "git {} failed: {}",
             args.join(" "),
-            nexus_core::sanitize::sanitize_terminal(String::from_utf8_lossy(&output.stderr).trim())
+            output.stderr
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output.stdout.trim().to_string())
 }
 
 fn append_task_event(
@@ -508,8 +493,16 @@ impl ApprovalHandler for BackgroundApprover {
         action: &ActionRequest,
         _arguments: &Value,
         _reason: &str,
-        _sandbox_active: bool,
+        sandbox_active: bool,
     ) -> ApprovalDecision {
+        if action
+            .command_analysis
+            .as_ref()
+            .is_some_and(|analysis| analysis.one_time_only)
+            || (action.tool.starts_with("terminal.") && !sandbox_active)
+        {
+            return ApprovalDecision::Deny;
+        }
         let permitted = if self.writer {
             action.risk <= RiskLevel::Write
         } else {
@@ -593,6 +586,7 @@ mod tests {
             risk: RiskLevel::Destructive,
             paths: vec!["a".into()],
             command: None,
+            command_analysis: None,
             destination: None,
             summary: "delete".into(),
         };

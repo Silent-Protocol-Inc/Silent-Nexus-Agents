@@ -8,7 +8,6 @@
 
 use nexus_core::{NexusError, Result};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const UI_STATE_VERSION: u32 = 4;
@@ -102,44 +101,11 @@ impl UiState {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            nexus_core::permissions::repair_private_tree(parent)?;
         }
         let text = serde_json::to_string_pretty(self)
             .map_err(|e| NexusError::Other(format!("serializing state: {e}")))?;
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("ui-state.json");
-        let temp_path = path.with_file_name(format!(
-            ".{file_name}.tmp-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        let write_result = (|| -> Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temp_path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-            }
-            file.write_all(text.as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&temp_path, path)?;
-            if let Some(parent) = path.parent() {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
-                }
-            }
-            Ok(())
-        })();
-        if write_result.is_err() {
-            let _ = std::fs::remove_file(&temp_path);
-        }
-        write_result?;
-        Ok(())
+        nexus_core::atomic::atomic_write_private(path, text.as_bytes())
     }
 
     /// Record an input line in history (skips duplicates of the last entry).

@@ -3,6 +3,9 @@ name = "nexus-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 description = "Agent state machine: classification, structured actions, bounded execution loop, subagents"
 
 [dependencies]

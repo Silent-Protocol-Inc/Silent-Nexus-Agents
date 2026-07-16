@@ -20,12 +20,39 @@ pub struct WorkspaceGuard {
 /// Subtrees that are never readable or writable through tools, regardless of
 /// policy, because they routinely contain credentials.
 const BUILTIN_DENIED: &[&str] = &[
-    "**/.nexus/secrets*",
+    "**/.nexus",
+    "**/.nexus/**",
+    "**/.git",
+    "**/.git/**",
+    "**/.env",
+    "**/.netrc",
+    "**/.npmrc",
+    "**/.pypirc",
+    "**/.git-credentials",
+    "**/credentials.json",
+    "**/credentials.toml",
+    "**/credentials.yaml",
+    "**/credentials.yml",
+    "**/credentials.ini",
+    "**/credentials.env",
+    "**/credentials.txt",
+    "**/auth.json",
+    "**/*.pem",
+    "**/*.key",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/id_rsa",
+    "**/id_ed25519",
     "**/.ssh/**",
     "**/.gnupg/**",
-    "**/.aws/credentials",
+    "**/.aws/**",
+    "**/.azure/**",
+    "**/.kube/**",
+    "**/.docker/config.json",
     "**/.config/gcloud/**",
+    "**/.config/gh/**",
 ];
+const SENSITIVE_SCAN_LIMIT: usize = 50_000;
 
 impl WorkspaceGuard {
     /// Create a guard rooted at `root`. `root` must exist; it is canonicalized
@@ -66,11 +93,27 @@ impl WorkspaceGuard {
         &self.denied_patterns
     }
 
+    /// Existing sensitive paths that a model-run container must mask. The
+    /// result is workspace-relative and never follows symlinks.
+    pub fn sensitive_paths_for_masking(&self) -> Result<Vec<PathBuf>> {
+        self.sensitive_paths_for_masking_with_limit(SENSITIVE_SCAN_LIMIT)
+    }
+
+    fn sensitive_paths_for_masking_with_limit(&self, limit: usize) -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        let mut visited = 0usize;
+        collect_sensitive_paths(&self.root, &self.root, &mut paths, &mut visited, limit)?;
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
     /// Resolve a path (absolute or workspace-relative) for **reading**.
     /// The target must exist; symlinks are fully resolved and the final
     /// real path must stay inside the workspace.
     pub fn resolve_existing(&self, input: impl AsRef<Path>) -> Result<PathBuf> {
         let joined = self.join(input.as_ref());
+        self.check_denied(&joined)?;
         let real = joined
             .canonicalize()
             .map_err(|_| NexusError::NotFound(joined.display().to_string()))?;
@@ -84,6 +127,7 @@ impl WorkspaceGuard {
     /// symlink (symlink-swap escape protection).
     pub fn resolve_for_write(&self, input: impl AsRef<Path>) -> Result<PathBuf> {
         let joined = self.join(input.as_ref());
+        self.check_denied(&joined)?;
         let file_name = joined
             .file_name()
             .ok_or_else(|| NexusError::PathDenied("path has no file name".into()))?
@@ -114,16 +158,17 @@ impl WorkspaceGuard {
             full.push(part);
         }
         full.push(&file_name);
-        // If the leaf exists and is a symlink, resolve and re-check.
+        // Existing symlink leaves are always rejected. Even an in-workspace
+        // target can be swapped between validation and write.
         if full
             .symlink_metadata()
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
         {
-            let target = full
-                .canonicalize()
-                .map_err(|e| NexusError::PathDenied(format!("symlink target: {e}")))?;
-            self.check_inside(&target)?;
+            return Err(NexusError::PathDenied(format!(
+                "refusing to write through symlink {}",
+                full.display()
+            )));
         }
         self.check_denied(&full)?;
         Ok(full)
@@ -167,11 +212,106 @@ impl WorkspaceGuard {
     }
 
     fn check_denied(&self, path: &Path) -> Result<()> {
+        if is_private_env_variant(path) {
+            return Err(NexusError::PathDenied(path.display().to_string()));
+        }
         if self.denied.is_match(path) {
             return Err(NexusError::PathDenied(path.display().to_string()));
         }
         Ok(())
     }
+}
+
+fn is_public_example(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some(".env.example")
+}
+
+fn is_private_env_variant(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(".env.") && name != ".env.example")
+}
+
+fn collect_sensitive_paths(
+    root: &Path,
+    directory: &Path,
+    output: &mut Vec<PathBuf>,
+    visited: &mut usize,
+    limit: usize,
+) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        if *visited >= limit {
+            return Err(NexusError::PathDenied(format!(
+                "sensitive-path scan exceeded {limit} entries; refusing unmasked container execution"
+            )));
+        }
+        *visited += 1;
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if is_sensitive_relative(relative) {
+            output.push(relative.to_path_buf());
+            continue;
+        }
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            collect_sensitive_paths(root, &path, output, visited, limit)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_sensitive_relative(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    if components.iter().any(|component| {
+        matches!(
+            *component,
+            ".git" | ".nexus" | ".ssh" | ".gnupg" | ".aws" | ".azure" | ".kube" | ".docker"
+        )
+    }) {
+        return true;
+    }
+    if components
+        .windows(2)
+        .any(|pair| pair == [".config", "gcloud"] || pair == [".config", "gh"])
+    {
+        return true;
+    }
+    if is_public_example(path) {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower == ".env"
+        || lower.starts_with(".env.")
+        || matches!(
+            lower.as_str(),
+            ".netrc"
+                | ".npmrc"
+                | ".pypirc"
+                | ".git-credentials"
+                | "credentials.json"
+                | "auth.json"
+                | "id_rsa"
+                | "id_ed25519"
+        )
+        || matches!(
+            lower.as_str(),
+            "credentials.toml"
+                | "credentials.yaml"
+                | "credentials.yml"
+                | "credentials.ini"
+                | "credentials.env"
+                | "credentials.txt"
+        )
+        || [".pem", ".key", ".p12", ".pfx"]
+            .iter()
+            .any(|extension| lower.ends_with(extension))
 }
 
 #[cfg(test)]
@@ -231,5 +371,88 @@ mod tests {
             g.resolve_existing(".ssh/id_rsa"),
             Err(NexusError::PathDenied(_))
         ));
+    }
+
+    #[test]
+    fn denies_git_state_and_credentials_but_allows_public_env_example() {
+        let (d, g) = guard();
+        std::fs::create_dir_all(d.path().join(".git")).expect("git");
+        std::fs::write(d.path().join(".git/config"), "secret").expect("config");
+        std::fs::write(d.path().join(".env"), "TOKEN=secret").expect("env");
+        std::fs::write(d.path().join(".env.example"), "TOKEN=").expect("example");
+        std::fs::write(d.path().join(".env.production"), "TOKEN=secret").expect("variant");
+        std::fs::write(d.path().join("credentials.rs"), "pub struct Credentials;").expect("source");
+        assert!(matches!(
+            g.resolve_existing(".git/config"),
+            Err(NexusError::PathDenied(_))
+        ));
+        assert!(matches!(
+            g.resolve_existing(".env"),
+            Err(NexusError::PathDenied(_))
+        ));
+        assert!(g.resolve_existing(".env.example").is_ok());
+        assert!(matches!(
+            g.resolve_existing(".env.production"),
+            Err(NexusError::PathDenied(_))
+        ));
+        assert!(g.resolve_existing("credentials.rs").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn denied_lexical_paths_cannot_be_hidden_by_in_workspace_symlinks() {
+        let (d, g) = guard();
+        std::fs::create_dir_all(d.path().join("safe")).expect("safe");
+        std::fs::write(d.path().join("safe/config"), "secret").expect("config");
+        std::fs::write(d.path().join("safe/token"), "secret").expect("token");
+        std::os::unix::fs::symlink("safe", d.path().join(".git")).expect("git link");
+        std::os::unix::fs::symlink("safe/token", d.path().join(".env")).expect("env link");
+        assert!(matches!(
+            g.resolve_existing(".git/config"),
+            Err(NexusError::PathDenied(_))
+        ));
+        assert!(matches!(
+            g.resolve_existing(".env"),
+            Err(NexusError::PathDenied(_))
+        ));
+        assert!(matches!(
+            g.resolve_for_write(".git/new"),
+            Err(NexusError::PathDenied(_))
+        ));
+    }
+
+    #[test]
+    fn public_env_example_does_not_override_a_sensitive_parent() {
+        let (d, g) = guard();
+        std::fs::create_dir_all(d.path().join(".git")).expect("git");
+        std::fs::write(d.path().join(".git/.env.example"), "TOKEN=").expect("example");
+        assert!(matches!(
+            g.resolve_existing(".git/.env.example"),
+            Err(NexusError::PathDenied(_))
+        ));
+    }
+
+    #[test]
+    fn sensitive_mask_list_is_relative_and_skips_public_examples() {
+        let (d, g) = guard();
+        std::fs::create_dir_all(d.path().join(".git")).expect("git");
+        std::fs::write(d.path().join(".env"), "TOKEN=secret").expect("env");
+        std::fs::write(d.path().join(".env.example"), "TOKEN=").expect("example");
+        let masks = g.sensitive_paths_for_masking().expect("masks");
+        assert!(masks.contains(&PathBuf::from(".git")));
+        assert!(masks.contains(&PathBuf::from(".env")));
+        assert!(!masks.contains(&PathBuf::from(".env.example")));
+    }
+
+    #[test]
+    fn sensitive_mask_scan_fails_closed_when_the_limit_is_exceeded() {
+        let directory = tempfile::tempdir().expect("directory");
+        std::fs::write(directory.path().join("one"), "one").expect("one");
+        std::fs::write(directory.path().join("two"), "two").expect("two");
+        let guard = WorkspaceGuard::new(directory.path(), &[]).expect("guard");
+        let error = guard
+            .sensitive_paths_for_masking_with_limit(1)
+            .expect_err("scan must fail closed");
+        assert!(error.to_string().contains("refusing unmasked"));
     }
 }

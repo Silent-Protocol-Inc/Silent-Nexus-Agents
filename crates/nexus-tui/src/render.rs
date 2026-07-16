@@ -6,7 +6,7 @@
 //! a compact activity strip; narrow stacks a single column. Panels never
 //! overlap and text never renders outside the terminal.
 
-use crate::state::{Focus, Mode, State};
+use crate::state::{Focus, Mode, State, WrapLayoutCacheEntry};
 use crate::theme::Theme;
 use crate::views::{Form, Menu, Overlay, Pager, Palette, Progress, SecretInput, SummaryPreview};
 use nexus_app::{Item, Report, Sev};
@@ -18,6 +18,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::Frame;
+use std::hash::{Hash, Hasher};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const SPINNER: [&str; 4] = ["▖", "▘", "▝", "▗"];
@@ -213,13 +214,8 @@ fn processing_line(st: &State, t: &Theme) -> Line<'static> {
 
 fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
     let inner_width = area.width.saturating_sub(3).max(1) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-    if st.has_older_events {
-        lines.push(Line::from(Span::styled(
-            "↑ older events available · PgUp/Home loads history",
-            t.muted(),
-        )));
-    }
+    let mut next_row = usize::from(st.has_older_events);
+    let mut layouts = Vec::new();
     st.event_row_offsets.clear();
     for (index, event) in st.timeline.iter().enumerate() {
         if !st.transcript_filter.matches(event) {
@@ -233,27 +229,42 @@ fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
             continue;
         }
         let selected = st.selected_event == Some(index) && st.focus == Focus::Timeline;
-        st.event_row_offsets.insert(event.id.clone(), lines.len());
+        st.event_row_offsets.insert(event.id.clone(), next_row);
         let expanded = st.detail_level != nexus_core::timeline::TranscriptDetail::Compact
             || st.collapsed_cards.contains(&event.id);
-        lines.extend(event_lines(
-            event,
-            st.detail_level,
-            expanded,
-            selected,
-            inner_width,
-            t,
-        ));
+        let signature = event_layout_signature(event, st.detail_level, expanded, inner_width);
+        let rows = match st.wrap_layout_cache.get(&event.id) {
+            Some(cached)
+                if cached.signature == signature
+                    && cached.width == inner_width
+                    && cached.detail == st.detail_level
+                    && cached.expanded == expanded =>
+            {
+                cached.rows
+            }
+            _ => {
+                let rows =
+                    event_lines(event, st.detail_level, expanded, selected, inner_width, t).len();
+                st.wrap_layout_cache.insert(
+                    event.id.clone(),
+                    WrapLayoutCacheEntry {
+                        signature,
+                        width: inner_width,
+                        detail: st.detail_level,
+                        expanded,
+                        rows,
+                    },
+                );
+                rows
+            }
+        };
+        layouts.push((index, next_row, rows, expanded));
+        next_row = next_row.saturating_add(rows);
     }
-    if st.mode == Mode::Running {
-        lines.push(processing_line(st, t));
-    }
-    if st.new_events > 0 {
-        lines.push(Line::from(Span::styled(
-            format!("↓ {} NEW EVENTS · End to follow", st.new_events),
-            t.warning().add_modifier(Modifier::BOLD),
-        )));
-    }
+    let processing_row = (st.mode == Mode::Running).then_some(next_row);
+    next_row = next_row.saturating_add(usize::from(processing_row.is_some()));
+    let new_events_row = (st.new_events > 0).then_some(next_row);
+    next_row = next_row.saturating_add(usize::from(new_events_row.is_some()));
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -271,7 +282,7 @@ fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
             t.primary(),
         ));
     let inner_h = area.height.saturating_sub(2) as usize;
-    let total = lines.len();
+    let total = next_row;
     if let Some(before) = st.prepend_anchor_rows.take() {
         st.scroll = st.scroll.saturating_add(total.saturating_sub(before));
     }
@@ -284,9 +295,39 @@ fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
         st.scroll.min(max_scroll)
     };
     st.scroll = scroll;
-    let p = Paragraph::new(Text::from(lines))
-        .block(block)
-        .scroll((scroll.min(u16::MAX as usize) as u16, 0));
+    let visible_end = scroll.saturating_add(inner_h).min(total);
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner_h);
+    if st.has_older_events && scroll == 0 {
+        lines.push(Line::from(Span::styled(
+            "↑ older events available · PgUp/Home loads history",
+            t.muted(),
+        )));
+    }
+    for (index, offset, rows, expanded) in layouts {
+        let event_end = offset.saturating_add(rows);
+        if event_end <= scroll || offset >= visible_end {
+            continue;
+        }
+        let event = &st.timeline[index];
+        let selected = st.selected_event == Some(index) && st.focus == Focus::Timeline;
+        let rendered = event_lines(event, st.detail_level, expanded, selected, inner_width, t);
+        let from = scroll.saturating_sub(offset).min(rendered.len());
+        let to = visible_end
+            .saturating_sub(offset)
+            .min(rendered.len())
+            .max(from);
+        lines.extend(rendered[from..to].iter().cloned());
+    }
+    if processing_row.is_some_and(|row| row >= scroll && row < visible_end) {
+        lines.push(processing_line(st, t));
+    }
+    if new_events_row.is_some_and(|row| row >= scroll && row < visible_end) {
+        lines.push(Line::from(Span::styled(
+            format!("↓ {} NEW EVENTS · End to follow", st.new_events),
+            t.warning().add_modifier(Modifier::BOLD),
+        )));
+    }
+    let p = Paragraph::new(Text::from(lines)).block(block);
     f.render_widget(p, area);
     if total > inner_h {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -306,6 +347,22 @@ fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
             &mut scrollbar_state,
         );
     }
+}
+
+fn event_layout_signature(
+    event: &nexus_core::timeline::TimelineEvent,
+    detail: nexus_core::timeline::TranscriptDetail,
+    expanded: bool,
+    width: usize,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(event)
+        .unwrap_or_else(|_| event.summary.clone())
+        .hash(&mut hasher);
+    detail.as_str().hash(&mut hasher);
+    expanded.hash(&mut hasher);
+    width.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn event_lines(
@@ -1627,17 +1684,21 @@ fn draw_approval(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
             t.muted(),
         )));
     } else {
-        let persistent_allowed =
-            req.action.command.is_some() && req.action.risk < nexus_core::RiskLevel::Destructive;
-        let options: Vec<&str> = if persistent_allowed {
-            vec![
+        let persistent_allowed = req.sandbox_active && req.action.session_grant_allowed();
+        let edit_allowed = !req
+            .action
+            .command_analysis
+            .as_ref()
+            .is_some_and(|analysis| analysis.one_time_only);
+        let options: Vec<&str> = match (persistent_allowed, edit_allowed) {
+            (true, true) => vec![
                 "Allow once",
-                "Allow this normalized command for this session",
+                "Allow this proved argv for this session",
                 "Deny",
                 "Edit / propose a safer action",
-            ]
-        } else {
-            vec!["Allow once", "Deny", "Propose a safer alternative"]
+            ],
+            (false, true) => vec!["Allow once", "Deny", "Propose a safer alternative"],
+            (_, false) => vec!["Allow once", "Deny"],
         };
         for (index, option) in options.iter().enumerate() {
             let selected = index == st.approval_selected;
@@ -1783,7 +1844,7 @@ mod tests {
                     model_label: "mock / test".into(),
                     model_ok: true,
                     agent: "orchestrator".into(),
-                    sandbox_level: "process-restricted".into(),
+                    sandbox_level: "approval-only-host".into(),
                     network: "restricted".into(),
                     git_branch: Some("main".into()),
                     tokens_in: 12,
@@ -1829,7 +1890,7 @@ mod tests {
                 model_label: "anthropic / claude-sonnet".into(),
                 model_ok: true,
                 agent: "orchestrator".into(),
-                sandbox_level: "process-restricted".into(),
+                sandbox_level: "approval-only-host".into(),
                 network: "approval".into(),
                 git_branch: Some("feature/timeline".into()),
                 tokens_in: 2048,
@@ -1968,11 +2029,20 @@ mod tests {
         let expected = [
             (60, 20, 2_468_489_370_746_786_139),
             (80, 24, 14_081_812_276_202_335_441),
-            (100, 30, 7_871_530_028_872_666_287),
-            (120, 40, 10_492_792_602_719_640_108),
-            (160, 50, 18_367_351_968_530_561_750),
+            (100, 30, 18_372_343_820_622_957_908),
+            (120, 40, 3_339_358_300_467_670_496),
+            (160, 50, 4_274_527_342_362_157_938),
         ];
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn wrap_layout_cache_preserves_the_rendered_frame() {
+        let mut state = representative_state();
+        let first = render_state_text(&mut state, 120, 40);
+        assert!(!state.wrap_layout_cache.is_empty());
+        let second = render_state_text(&mut state, 120, 40);
+        assert_eq!(first, second);
     }
 
     #[test]

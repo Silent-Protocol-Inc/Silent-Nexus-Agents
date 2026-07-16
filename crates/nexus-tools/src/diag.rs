@@ -65,6 +65,7 @@ impl Tool for DiagTool {
             risk: RiskLevel::Read,
             paths: vec![],
             command: None,
+            command_analysis: None,
             destination: None,
             summary: self.meta.name.clone(),
         })
