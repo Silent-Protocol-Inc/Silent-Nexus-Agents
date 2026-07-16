@@ -1,0 +1,126 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nexus-cli",
+    "crates/nexus-tui",
+    "crates/nexus-app",
+    "crates/nexus-core",
+    "crates/nexus-agent",
+    "crates/nexus-models",
+    "crates/nexus-tools",
+    "crates/nexus-sandbox",
+    "crates/nexus-memory",
+    "crates/nexus-context",
+    "crates/nexus-goals",
+    "crates/nexus-mcp",
+    "crates/nexus-skills",
+    "crates/nexus-index",
+    "crates/nexus-policy",
+    "crates/nexus-observability",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/silent-protocol/silent-nexus"
+rust-version = "1.80"
+
+[workspace.dependencies]
+# Internal crates
+nexus-core = { path = "crates/nexus-core" }
+nexus-agent = { path = "crates/nexus-agent" }
+nexus-models = { path = "crates/nexus-models" }
+nexus-tools = { path = "crates/nexus-tools" }
+nexus-sandbox = { path = "crates/nexus-sandbox" }
+nexus-memory = { path = "crates/nexus-memory" }
+nexus-context = { path = "crates/nexus-context" }
+nexus-goals = { path = "crates/nexus-goals" }
+nexus-mcp = { path = "crates/nexus-mcp" }
+nexus-skills = { path = "crates/nexus-skills" }
+nexus-index = { path = "crates/nexus-index" }
+nexus-policy = { path = "crates/nexus-policy" }
+nexus-observability = { path = "crates/nexus-observability" }
+nexus-app = { path = "crates/nexus-app" }
+nexus-tui = { path = "crates/nexus-tui" }
+
+# Async runtime
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread", "macros", "process", "io-util", "time", "sync", "signal", "fs", "net",
+] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# CLI / TUI
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls", "json", "stream", "gzip", "charset",
+] }
+bytes = "1"
+url = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+schemars = "0.8"
+jsonschema = { version = "0.26", default-features = false }
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+regex = "1"
+globset = "0.4"
+ignore = "0.4"
+directories = "5"
+libc = "0.2"
+rand = "0.8"
+shell-words = "1"
+unicode-width = "0.2"
+textwrap = "0.16"
+tempfile = "3"
+portable-pty = "0.8"
+
+# Dev
+insta = { version = "1", features = ["json"] }
+wiremock = "0.6"
+pretty_assertions = "1"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+dbg_macro = "warn"
+
+# Keep the debug target small: this workstation has limited disk.
+[profile.dev]
+debug = 0
+strip = "debuginfo"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = "symbols"
+panic = "abort"

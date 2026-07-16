@@ -1,0 +1,2756 @@
+#compdef snx
+
+autoload -U is-at-least
+
+_snx() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx_commands" \
+"*::: :->snx" \
+&& ret=0
+    case $state in
+    (snx)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-command-$line[1]:"
+        case $line[1] in
+            (chat)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(run)
+_arguments "${_arguments_options[@]}" : \
+'--agent=[Agent role\: orchestrator, planner, implementer, researcher, debugger, reviewer, verifier, security, documentation]:AGENT:_default' \
+'--session=[Continue an existing session by id]:SESSION:_default' \
+'--yes[Auto-approve escalated actions (explicit, audited authorization)]' \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::objective -- The objective for the agent to accomplish:_default' \
+&& ret=0
+;;
+(goal)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__goal_commands" \
+"*::: :->goal" \
+&& ret=0
+
+    case $state in
+    (goal)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-goal-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(new)
+_arguments "${_arguments_options[@]}" : \
+'*-c+[Acceptance criterion (repeatable). A goal only completes when each has evidence]:CRITERIA:_default' \
+'*--criterion=[Acceptance criterion (repeatable). A goal only completes when each has evidence]:CRITERIA:_default' \
+'--objective=[]:OBJECTIVE:_default' \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::title:_default' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id:_default' \
+&& ret=0
+;;
+(verify)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id:_default' \
+&& ret=0
+;;
+(recover)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__goal__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-goal-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(new)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(verify)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(recover)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(session)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__session_commands" \
+"*::: :->session" \
+&& ret=0
+
+    case $state in
+    (session)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-session-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__session__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-session-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(memory)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__memory_commands" \
+"*::: :->memory" \
+&& ret=0
+
+    case $state in
+    (memory)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-memory-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--all[]' \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+'--kind=[]:KIND:_default' \
+'--scope=[]:SCOPE:_default' \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::content:_default' \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::query:_default' \
+&& ret=0
+;;
+(approve)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id:_default' \
+&& ret=0
+;;
+(forget)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id:_default' \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__memory__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-memory-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(approve)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(forget)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(skill)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__skill_commands" \
+"*::: :->skill" \
+&& ret=0
+
+    case $state in
+    (skill)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-skill-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':file:_default' \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__skill__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-skill-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(mcp)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__mcp_commands" \
+"*::: :->mcp" \
+&& ret=0
+
+    case $state in
+    (mcp)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-mcp-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+'--command=[Command to launch the server]:COMMAND:_default' \
+'*--arg=[Arguments passed to the server command]:ARGS:_default' \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(trust)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(untrust)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(tools)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__mcp__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-mcp-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(trust)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(untrust)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(tools)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(sandbox)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__sandbox_commands" \
+"*::: :->sandbox" \
+&& ret=0
+
+    case $state in
+    (sandbox)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-sandbox-command-$line[1]:"
+        case $line[1] in
+            (status)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(test)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::command -- Command to run (defaults to a harmless probe):_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__sandbox__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-sandbox-help-command-$line[1]:"
+        case $line[1] in
+            (status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(test)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__index_commands" \
+"*::: :->index" \
+&& ret=0
+
+    case $state in
+    (index)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-index-command-$line[1]:"
+        case $line[1] in
+            (build)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(symbol)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(file)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':path:_default' \
+&& ret=0
+;;
+(clean)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__index__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-index-help-command-$line[1]:"
+        case $line[1] in
+            (build)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(symbol)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(file)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clean)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(tools)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__tools_commands" \
+"*::: :->tools" \
+&& ret=0
+
+    case $state in
+    (tools)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-tools-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__tools__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-tools-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(models)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__models_commands" \
+"*::: :->models" \
+&& ret=0
+
+    case $state in
+    (models)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-models-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(health)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__models__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-models-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(health)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_snx__subcmd__config_commands" \
+"*::: :->config" \
+&& ret=0
+
+    case $state in
+    (config)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-config-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(path)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(schema)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__config__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-config-help-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(schema)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(audit)
+_arguments "${_arguments_options[@]}" : \
+'--kind=[Filter by audit event kind]:KIND:_default' \
+'--limit=[Maximum events to show]:LIMIT:_default' \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(logs)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(completion)
+_arguments "${_arguments_options[@]}" : \
+'--no-color[Disable colored output (also honors NO_COLOR and config)]' \
+'--json[Emit machine-readable JSON where supported]' \
+'-v[Increase log verbosity]' \
+'--verbose[Increase log verbosity]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':shell:(bash elvish fish powershell zsh)' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-command-$line[1]:"
+        case $line[1] in
+            (chat)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(goal)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__goal_commands" \
+"*::: :->goal" \
+&& ret=0
+
+    case $state in
+    (goal)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-goal-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(new)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(verify)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(recover)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(session)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__session_commands" \
+"*::: :->session" \
+&& ret=0
+
+    case $state in
+    (session)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-session-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(memory)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__memory_commands" \
+"*::: :->memory" \
+&& ret=0
+
+    case $state in
+    (memory)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-memory-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(approve)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(forget)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(skill)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__skill_commands" \
+"*::: :->skill" \
+&& ret=0
+
+    case $state in
+    (skill)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-skill-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(mcp)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__mcp_commands" \
+"*::: :->mcp" \
+&& ret=0
+
+    case $state in
+    (mcp)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-mcp-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(trust)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(untrust)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(tools)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(sandbox)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__sandbox_commands" \
+"*::: :->sandbox" \
+&& ret=0
+
+    case $state in
+    (sandbox)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-sandbox-command-$line[1]:"
+        case $line[1] in
+            (status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(test)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__index_commands" \
+"*::: :->index" \
+&& ret=0
+
+    case $state in
+    (index)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-index-command-$line[1]:"
+        case $line[1] in
+            (build)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(symbol)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(file)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clean)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(tools)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__tools_commands" \
+"*::: :->tools" \
+&& ret=0
+
+    case $state in
+    (tools)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-tools-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(models)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__models_commands" \
+"*::: :->models" \
+&& ret=0
+
+    case $state in
+    (models)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-models-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(health)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+":: :_snx__subcmd__help__subcmd__config_commands" \
+"*::: :->config" \
+&& ret=0
+
+    case $state in
+    (config)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:snx-help-config-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(schema)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(audit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(logs)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(completion)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_snx_commands] )) ||
+_snx_commands() {
+    local commands; commands=(
+'chat:Launch the interactive TUI (default when no command is given)' \
+'run:Run one objective to completion, non-interactively' \
+'goal:Persistent, verifiable goals' \
+'session:Conversation sessions' \
+'memory:Long-term memory (approval-gated, secret-refusing)' \
+'skill:Versioned, inspectable skills' \
+'mcp:Model Context Protocol servers (client + server)' \
+'sandbox:Execution sandbox inspection and self-test' \
+'index:Code intelligence index' \
+'tools:Available tools and their risk levels' \
+'models:Configured models and their health' \
+'config:Configuration inspection' \
+'audit:Show recent audit events' \
+'logs:Show where structured logs are written' \
+'doctor:Environment and readiness diagnostics' \
+'completion:Generate a shell completion script' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__audit_commands] )) ||
+_snx__subcmd__audit_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx audit commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__chat_commands] )) ||
+_snx__subcmd__chat_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx chat commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__completion_commands] )) ||
+_snx__subcmd__completion_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx completion commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__config_commands] )) ||
+_snx__subcmd__config_commands() {
+    local commands; commands=(
+'show:Print the effective configuration' \
+'path:Print the config file locations' \
+'schema:Print the configuration JSON schema' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx config commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__config__subcmd__help_commands] )) ||
+_snx__subcmd__config__subcmd__help_commands() {
+    local commands; commands=(
+'show:Print the effective configuration' \
+'path:Print the config file locations' \
+'schema:Print the configuration JSON schema' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx config help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__config__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__config__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx config help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__config__subcmd__help__subcmd__path_commands] )) ||
+_snx__subcmd__config__subcmd__help__subcmd__path_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx config help path commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__config__subcmd__help__subcmd__schema_commands] )) ||
+_snx__subcmd__config__subcmd__help__subcmd__schema_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx config help schema commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__config__subcmd__help__subcmd__show_commands] )) ||
+_snx__subcmd__config__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx config help show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__config__subcmd__path_commands] )) ||
+_snx__subcmd__config__subcmd__path_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx config path commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__config__subcmd__schema_commands] )) ||
+_snx__subcmd__config__subcmd__schema_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx config schema commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__config__subcmd__show_commands] )) ||
+_snx__subcmd__config__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx config show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__doctor_commands] )) ||
+_snx__subcmd__doctor_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx doctor commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal_commands] )) ||
+_snx__subcmd__goal_commands() {
+    local commands; commands=(
+'list:List goals in this workspace' \
+'new:Create a new goal' \
+'show:Show a goal and its steps/evidence' \
+'verify:Verify a goal'\''s acceptance criteria against recorded evidence' \
+'recover:List goals recoverable after an interrupted run' \
+'export:Export a goal as JSON' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx goal commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__export_commands] )) ||
+_snx__subcmd__goal__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal export commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__help_commands] )) ||
+_snx__subcmd__goal__subcmd__help_commands() {
+    local commands; commands=(
+'list:List goals in this workspace' \
+'new:Create a new goal' \
+'show:Show a goal and its steps/evidence' \
+'verify:Verify a goal'\''s acceptance criteria against recorded evidence' \
+'recover:List goals recoverable after an interrupted run' \
+'export:Export a goal as JSON' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx goal help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__help__subcmd__export_commands] )) ||
+_snx__subcmd__goal__subcmd__help__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal help export commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__goal__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__help__subcmd__list_commands] )) ||
+_snx__subcmd__goal__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal help list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__help__subcmd__new_commands] )) ||
+_snx__subcmd__goal__subcmd__help__subcmd__new_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal help new commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__help__subcmd__recover_commands] )) ||
+_snx__subcmd__goal__subcmd__help__subcmd__recover_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal help recover commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__help__subcmd__show_commands] )) ||
+_snx__subcmd__goal__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal help show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__help__subcmd__verify_commands] )) ||
+_snx__subcmd__goal__subcmd__help__subcmd__verify_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal help verify commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__list_commands] )) ||
+_snx__subcmd__goal__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__new_commands] )) ||
+_snx__subcmd__goal__subcmd__new_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal new commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__recover_commands] )) ||
+_snx__subcmd__goal__subcmd__recover_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal recover commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__show_commands] )) ||
+_snx__subcmd__goal__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__goal__subcmd__verify_commands] )) ||
+_snx__subcmd__goal__subcmd__verify_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx goal verify commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help_commands] )) ||
+_snx__subcmd__help_commands() {
+    local commands; commands=(
+'chat:Launch the interactive TUI (default when no command is given)' \
+'run:Run one objective to completion, non-interactively' \
+'goal:Persistent, verifiable goals' \
+'session:Conversation sessions' \
+'memory:Long-term memory (approval-gated, secret-refusing)' \
+'skill:Versioned, inspectable skills' \
+'mcp:Model Context Protocol servers (client + server)' \
+'sandbox:Execution sandbox inspection and self-test' \
+'index:Code intelligence index' \
+'tools:Available tools and their risk levels' \
+'models:Configured models and their health' \
+'config:Configuration inspection' \
+'audit:Show recent audit events' \
+'logs:Show where structured logs are written' \
+'doctor:Environment and readiness diagnostics' \
+'completion:Generate a shell completion script' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__audit_commands] )) ||
+_snx__subcmd__help__subcmd__audit_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help audit commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__chat_commands] )) ||
+_snx__subcmd__help__subcmd__chat_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help chat commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__completion_commands] )) ||
+_snx__subcmd__help__subcmd__completion_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help completion commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__config_commands] )) ||
+_snx__subcmd__help__subcmd__config_commands() {
+    local commands; commands=(
+'show:Print the effective configuration' \
+'path:Print the config file locations' \
+'schema:Print the configuration JSON schema' \
+    )
+    _describe -t commands 'snx help config commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__config__subcmd__path_commands] )) ||
+_snx__subcmd__help__subcmd__config__subcmd__path_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help config path commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__config__subcmd__schema_commands] )) ||
+_snx__subcmd__help__subcmd__config__subcmd__schema_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help config schema commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__config__subcmd__show_commands] )) ||
+_snx__subcmd__help__subcmd__config__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help config show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__doctor_commands] )) ||
+_snx__subcmd__help__subcmd__doctor_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help doctor commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__goal_commands] )) ||
+_snx__subcmd__help__subcmd__goal_commands() {
+    local commands; commands=(
+'list:List goals in this workspace' \
+'new:Create a new goal' \
+'show:Show a goal and its steps/evidence' \
+'verify:Verify a goal'\''s acceptance criteria against recorded evidence' \
+'recover:List goals recoverable after an interrupted run' \
+'export:Export a goal as JSON' \
+    )
+    _describe -t commands 'snx help goal commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__goal__subcmd__export_commands] )) ||
+_snx__subcmd__help__subcmd__goal__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help goal export commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__goal__subcmd__list_commands] )) ||
+_snx__subcmd__help__subcmd__goal__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help goal list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__goal__subcmd__new_commands] )) ||
+_snx__subcmd__help__subcmd__goal__subcmd__new_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help goal new commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__goal__subcmd__recover_commands] )) ||
+_snx__subcmd__help__subcmd__goal__subcmd__recover_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help goal recover commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__goal__subcmd__show_commands] )) ||
+_snx__subcmd__help__subcmd__goal__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help goal show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__goal__subcmd__verify_commands] )) ||
+_snx__subcmd__help__subcmd__goal__subcmd__verify_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help goal verify commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__index_commands] )) ||
+_snx__subcmd__help__subcmd__index_commands() {
+    local commands; commands=(
+'build:Build or refresh the workspace index' \
+'status:Show index statistics' \
+'symbol:Find a symbol by name' \
+'file:List symbols in a workspace file' \
+'clean:Clear the index' \
+    )
+    _describe -t commands 'snx help index commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__index__subcmd__build_commands] )) ||
+_snx__subcmd__help__subcmd__index__subcmd__build_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help index build commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__index__subcmd__clean_commands] )) ||
+_snx__subcmd__help__subcmd__index__subcmd__clean_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help index clean commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__index__subcmd__file_commands] )) ||
+_snx__subcmd__help__subcmd__index__subcmd__file_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help index file commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__index__subcmd__status_commands] )) ||
+_snx__subcmd__help__subcmd__index__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help index status commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__index__subcmd__symbol_commands] )) ||
+_snx__subcmd__help__subcmd__index__subcmd__symbol_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help index symbol commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__logs_commands] )) ||
+_snx__subcmd__help__subcmd__logs_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help logs commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__mcp_commands] )) ||
+_snx__subcmd__help__subcmd__mcp_commands() {
+    local commands; commands=(
+'list:List registered MCP servers' \
+'add:Register an MCP server (stdio). This is an explicit user action' \
+'remove:Remove a registered server' \
+'trust:Mark a server trusted (its tools may run under normal policy)' \
+'untrust:Mark a server untrusted (its tools require per-call approval)' \
+'tools:Connect to a registered server and list its tools' \
+'serve:Run Silent Nexus as an MCP server over stdio (curated read-only tools)' \
+    )
+    _describe -t commands 'snx help mcp commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__mcp__subcmd__add_commands] )) ||
+_snx__subcmd__help__subcmd__mcp__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help mcp add commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__mcp__subcmd__list_commands] )) ||
+_snx__subcmd__help__subcmd__mcp__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help mcp list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__mcp__subcmd__remove_commands] )) ||
+_snx__subcmd__help__subcmd__mcp__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help mcp remove commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__mcp__subcmd__serve_commands] )) ||
+_snx__subcmd__help__subcmd__mcp__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help mcp serve commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__mcp__subcmd__tools_commands] )) ||
+_snx__subcmd__help__subcmd__mcp__subcmd__tools_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help mcp tools commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__mcp__subcmd__trust_commands] )) ||
+_snx__subcmd__help__subcmd__mcp__subcmd__trust_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help mcp trust commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__mcp__subcmd__untrust_commands] )) ||
+_snx__subcmd__help__subcmd__mcp__subcmd__untrust_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help mcp untrust commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__memory_commands] )) ||
+_snx__subcmd__help__subcmd__memory_commands() {
+    local commands; commands=(
+'list:List stored memories' \
+'add:Add a memory (secrets are refused)' \
+'search:Full-text search memories' \
+'approve:Approve a memory that required review' \
+'forget:Delete a memory' \
+'prune:Delete expired memories' \
+'export:Export all memories as JSON' \
+    )
+    _describe -t commands 'snx help memory commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__memory__subcmd__add_commands] )) ||
+_snx__subcmd__help__subcmd__memory__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help memory add commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__memory__subcmd__approve_commands] )) ||
+_snx__subcmd__help__subcmd__memory__subcmd__approve_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help memory approve commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__memory__subcmd__export_commands] )) ||
+_snx__subcmd__help__subcmd__memory__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help memory export commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__memory__subcmd__forget_commands] )) ||
+_snx__subcmd__help__subcmd__memory__subcmd__forget_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help memory forget commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__memory__subcmd__list_commands] )) ||
+_snx__subcmd__help__subcmd__memory__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help memory list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__memory__subcmd__prune_commands] )) ||
+_snx__subcmd__help__subcmd__memory__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help memory prune commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__memory__subcmd__search_commands] )) ||
+_snx__subcmd__help__subcmd__memory__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help memory search commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__models_commands] )) ||
+_snx__subcmd__help__subcmd__models_commands() {
+    local commands; commands=(
+'list:List configured models' \
+'health:Probe each configured provider'\''s reachability' \
+    )
+    _describe -t commands 'snx help models commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__models__subcmd__health_commands] )) ||
+_snx__subcmd__help__subcmd__models__subcmd__health_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help models health commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__models__subcmd__list_commands] )) ||
+_snx__subcmd__help__subcmd__models__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help models list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__run_commands] )) ||
+_snx__subcmd__help__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help run commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__sandbox_commands] )) ||
+_snx__subcmd__help__subcmd__sandbox_commands() {
+    local commands; commands=(
+'status:Show the active backend and its honest isolation level' \
+'test:Run a command inside the sandbox and report the outcome' \
+    )
+    _describe -t commands 'snx help sandbox commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__sandbox__subcmd__status_commands] )) ||
+_snx__subcmd__help__subcmd__sandbox__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help sandbox status commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__sandbox__subcmd__test_commands] )) ||
+_snx__subcmd__help__subcmd__sandbox__subcmd__test_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help sandbox test commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__session_commands] )) ||
+_snx__subcmd__help__subcmd__session_commands() {
+    local commands; commands=(
+'list:List recent sessions' \
+'show:Show a session'\''s messages' \
+    )
+    _describe -t commands 'snx help session commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__session__subcmd__list_commands] )) ||
+_snx__subcmd__help__subcmd__session__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help session list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__session__subcmd__show_commands] )) ||
+_snx__subcmd__help__subcmd__session__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help session show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__skill_commands] )) ||
+_snx__subcmd__help__subcmd__skill_commands() {
+    local commands; commands=(
+'list:List skills' \
+'show:Show a skill manifest' \
+'enable:Enable a skill (verifies referenced tools exist)' \
+'disable:Disable a skill' \
+'import:Import a skill manifest JSON file (stored disabled)' \
+'export:Export a skill manifest as JSON' \
+    )
+    _describe -t commands 'snx help skill commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__skill__subcmd__disable_commands] )) ||
+_snx__subcmd__help__subcmd__skill__subcmd__disable_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help skill disable commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__skill__subcmd__enable_commands] )) ||
+_snx__subcmd__help__subcmd__skill__subcmd__enable_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help skill enable commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__skill__subcmd__export_commands] )) ||
+_snx__subcmd__help__subcmd__skill__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help skill export commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__skill__subcmd__import_commands] )) ||
+_snx__subcmd__help__subcmd__skill__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help skill import commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__skill__subcmd__list_commands] )) ||
+_snx__subcmd__help__subcmd__skill__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help skill list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__skill__subcmd__show_commands] )) ||
+_snx__subcmd__help__subcmd__skill__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help skill show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__tools_commands] )) ||
+_snx__subcmd__help__subcmd__tools_commands() {
+    local commands; commands=(
+'list:List all tools and their risk levels' \
+'show:Show a tool'\''s schema and metadata' \
+    )
+    _describe -t commands 'snx help tools commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__tools__subcmd__list_commands] )) ||
+_snx__subcmd__help__subcmd__tools__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help tools list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__help__subcmd__tools__subcmd__show_commands] )) ||
+_snx__subcmd__help__subcmd__tools__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx help tools show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index_commands] )) ||
+_snx__subcmd__index_commands() {
+    local commands; commands=(
+'build:Build or refresh the workspace index' \
+'status:Show index statistics' \
+'symbol:Find a symbol by name' \
+'file:List symbols in a workspace file' \
+'clean:Clear the index' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx index commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__build_commands] )) ||
+_snx__subcmd__index__subcmd__build_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index build commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__clean_commands] )) ||
+_snx__subcmd__index__subcmd__clean_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index clean commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__file_commands] )) ||
+_snx__subcmd__index__subcmd__file_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index file commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__help_commands] )) ||
+_snx__subcmd__index__subcmd__help_commands() {
+    local commands; commands=(
+'build:Build or refresh the workspace index' \
+'status:Show index statistics' \
+'symbol:Find a symbol by name' \
+'file:List symbols in a workspace file' \
+'clean:Clear the index' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx index help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__help__subcmd__build_commands] )) ||
+_snx__subcmd__index__subcmd__help__subcmd__build_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index help build commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__help__subcmd__clean_commands] )) ||
+_snx__subcmd__index__subcmd__help__subcmd__clean_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index help clean commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__help__subcmd__file_commands] )) ||
+_snx__subcmd__index__subcmd__help__subcmd__file_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index help file commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__index__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__help__subcmd__status_commands] )) ||
+_snx__subcmd__index__subcmd__help__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index help status commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__help__subcmd__symbol_commands] )) ||
+_snx__subcmd__index__subcmd__help__subcmd__symbol_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index help symbol commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__status_commands] )) ||
+_snx__subcmd__index__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index status commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__index__subcmd__symbol_commands] )) ||
+_snx__subcmd__index__subcmd__symbol_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx index symbol commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__logs_commands] )) ||
+_snx__subcmd__logs_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx logs commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp_commands] )) ||
+_snx__subcmd__mcp_commands() {
+    local commands; commands=(
+'list:List registered MCP servers' \
+'add:Register an MCP server (stdio). This is an explicit user action' \
+'remove:Remove a registered server' \
+'trust:Mark a server trusted (its tools may run under normal policy)' \
+'untrust:Mark a server untrusted (its tools require per-call approval)' \
+'tools:Connect to a registered server and list its tools' \
+'serve:Run Silent Nexus as an MCP server over stdio (curated read-only tools)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx mcp commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__add_commands] )) ||
+_snx__subcmd__mcp__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp add commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__help_commands] )) ||
+_snx__subcmd__mcp__subcmd__help_commands() {
+    local commands; commands=(
+'list:List registered MCP servers' \
+'add:Register an MCP server (stdio). This is an explicit user action' \
+'remove:Remove a registered server' \
+'trust:Mark a server trusted (its tools may run under normal policy)' \
+'untrust:Mark a server untrusted (its tools require per-call approval)' \
+'tools:Connect to a registered server and list its tools' \
+'serve:Run Silent Nexus as an MCP server over stdio (curated read-only tools)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx mcp help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__help__subcmd__add_commands] )) ||
+_snx__subcmd__mcp__subcmd__help__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp help add commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__mcp__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__help__subcmd__list_commands] )) ||
+_snx__subcmd__mcp__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp help list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__help__subcmd__remove_commands] )) ||
+_snx__subcmd__mcp__subcmd__help__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp help remove commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__help__subcmd__serve_commands] )) ||
+_snx__subcmd__mcp__subcmd__help__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp help serve commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__help__subcmd__tools_commands] )) ||
+_snx__subcmd__mcp__subcmd__help__subcmd__tools_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp help tools commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__help__subcmd__trust_commands] )) ||
+_snx__subcmd__mcp__subcmd__help__subcmd__trust_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp help trust commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__help__subcmd__untrust_commands] )) ||
+_snx__subcmd__mcp__subcmd__help__subcmd__untrust_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp help untrust commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__list_commands] )) ||
+_snx__subcmd__mcp__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__remove_commands] )) ||
+_snx__subcmd__mcp__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp remove commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__serve_commands] )) ||
+_snx__subcmd__mcp__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp serve commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__tools_commands] )) ||
+_snx__subcmd__mcp__subcmd__tools_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp tools commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__trust_commands] )) ||
+_snx__subcmd__mcp__subcmd__trust_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp trust commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__mcp__subcmd__untrust_commands] )) ||
+_snx__subcmd__mcp__subcmd__untrust_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx mcp untrust commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory_commands] )) ||
+_snx__subcmd__memory_commands() {
+    local commands; commands=(
+'list:List stored memories' \
+'add:Add a memory (secrets are refused)' \
+'search:Full-text search memories' \
+'approve:Approve a memory that required review' \
+'forget:Delete a memory' \
+'prune:Delete expired memories' \
+'export:Export all memories as JSON' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx memory commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__add_commands] )) ||
+_snx__subcmd__memory__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory add commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__approve_commands] )) ||
+_snx__subcmd__memory__subcmd__approve_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory approve commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__export_commands] )) ||
+_snx__subcmd__memory__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory export commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__forget_commands] )) ||
+_snx__subcmd__memory__subcmd__forget_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory forget commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__help_commands] )) ||
+_snx__subcmd__memory__subcmd__help_commands() {
+    local commands; commands=(
+'list:List stored memories' \
+'add:Add a memory (secrets are refused)' \
+'search:Full-text search memories' \
+'approve:Approve a memory that required review' \
+'forget:Delete a memory' \
+'prune:Delete expired memories' \
+'export:Export all memories as JSON' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx memory help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__help__subcmd__add_commands] )) ||
+_snx__subcmd__memory__subcmd__help__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory help add commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__help__subcmd__approve_commands] )) ||
+_snx__subcmd__memory__subcmd__help__subcmd__approve_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory help approve commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__help__subcmd__export_commands] )) ||
+_snx__subcmd__memory__subcmd__help__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory help export commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__help__subcmd__forget_commands] )) ||
+_snx__subcmd__memory__subcmd__help__subcmd__forget_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory help forget commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__memory__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__help__subcmd__list_commands] )) ||
+_snx__subcmd__memory__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory help list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__help__subcmd__prune_commands] )) ||
+_snx__subcmd__memory__subcmd__help__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory help prune commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__help__subcmd__search_commands] )) ||
+_snx__subcmd__memory__subcmd__help__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory help search commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__list_commands] )) ||
+_snx__subcmd__memory__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__prune_commands] )) ||
+_snx__subcmd__memory__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory prune commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__memory__subcmd__search_commands] )) ||
+_snx__subcmd__memory__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx memory search commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__models_commands] )) ||
+_snx__subcmd__models_commands() {
+    local commands; commands=(
+'list:List configured models' \
+'health:Probe each configured provider'\''s reachability' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx models commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__models__subcmd__health_commands] )) ||
+_snx__subcmd__models__subcmd__health_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx models health commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__models__subcmd__help_commands] )) ||
+_snx__subcmd__models__subcmd__help_commands() {
+    local commands; commands=(
+'list:List configured models' \
+'health:Probe each configured provider'\''s reachability' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx models help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__models__subcmd__help__subcmd__health_commands] )) ||
+_snx__subcmd__models__subcmd__help__subcmd__health_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx models help health commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__models__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__models__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx models help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__models__subcmd__help__subcmd__list_commands] )) ||
+_snx__subcmd__models__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx models help list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__models__subcmd__list_commands] )) ||
+_snx__subcmd__models__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx models list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__run_commands] )) ||
+_snx__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx run commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__sandbox_commands] )) ||
+_snx__subcmd__sandbox_commands() {
+    local commands; commands=(
+'status:Show the active backend and its honest isolation level' \
+'test:Run a command inside the sandbox and report the outcome' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx sandbox commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__sandbox__subcmd__help_commands] )) ||
+_snx__subcmd__sandbox__subcmd__help_commands() {
+    local commands; commands=(
+'status:Show the active backend and its honest isolation level' \
+'test:Run a command inside the sandbox and report the outcome' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx sandbox help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__sandbox__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__sandbox__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx sandbox help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__sandbox__subcmd__help__subcmd__status_commands] )) ||
+_snx__subcmd__sandbox__subcmd__help__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx sandbox help status commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__sandbox__subcmd__help__subcmd__test_commands] )) ||
+_snx__subcmd__sandbox__subcmd__help__subcmd__test_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx sandbox help test commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__sandbox__subcmd__status_commands] )) ||
+_snx__subcmd__sandbox__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx sandbox status commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__sandbox__subcmd__test_commands] )) ||
+_snx__subcmd__sandbox__subcmd__test_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx sandbox test commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__session_commands] )) ||
+_snx__subcmd__session_commands() {
+    local commands; commands=(
+'list:List recent sessions' \
+'show:Show a session'\''s messages' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx session commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__session__subcmd__help_commands] )) ||
+_snx__subcmd__session__subcmd__help_commands() {
+    local commands; commands=(
+'list:List recent sessions' \
+'show:Show a session'\''s messages' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx session help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__session__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__session__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx session help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__session__subcmd__help__subcmd__list_commands] )) ||
+_snx__subcmd__session__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx session help list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__session__subcmd__help__subcmd__show_commands] )) ||
+_snx__subcmd__session__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx session help show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__session__subcmd__list_commands] )) ||
+_snx__subcmd__session__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx session list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__session__subcmd__show_commands] )) ||
+_snx__subcmd__session__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx session show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill_commands] )) ||
+_snx__subcmd__skill_commands() {
+    local commands; commands=(
+'list:List skills' \
+'show:Show a skill manifest' \
+'enable:Enable a skill (verifies referenced tools exist)' \
+'disable:Disable a skill' \
+'import:Import a skill manifest JSON file (stored disabled)' \
+'export:Export a skill manifest as JSON' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx skill commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__disable_commands] )) ||
+_snx__subcmd__skill__subcmd__disable_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill disable commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__enable_commands] )) ||
+_snx__subcmd__skill__subcmd__enable_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill enable commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__export_commands] )) ||
+_snx__subcmd__skill__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill export commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__help_commands] )) ||
+_snx__subcmd__skill__subcmd__help_commands() {
+    local commands; commands=(
+'list:List skills' \
+'show:Show a skill manifest' \
+'enable:Enable a skill (verifies referenced tools exist)' \
+'disable:Disable a skill' \
+'import:Import a skill manifest JSON file (stored disabled)' \
+'export:Export a skill manifest as JSON' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx skill help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__help__subcmd__disable_commands] )) ||
+_snx__subcmd__skill__subcmd__help__subcmd__disable_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill help disable commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__help__subcmd__enable_commands] )) ||
+_snx__subcmd__skill__subcmd__help__subcmd__enable_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill help enable commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__help__subcmd__export_commands] )) ||
+_snx__subcmd__skill__subcmd__help__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill help export commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__skill__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__help__subcmd__import_commands] )) ||
+_snx__subcmd__skill__subcmd__help__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill help import commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__help__subcmd__list_commands] )) ||
+_snx__subcmd__skill__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill help list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__help__subcmd__show_commands] )) ||
+_snx__subcmd__skill__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill help show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__import_commands] )) ||
+_snx__subcmd__skill__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill import commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__list_commands] )) ||
+_snx__subcmd__skill__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__skill__subcmd__show_commands] )) ||
+_snx__subcmd__skill__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx skill show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__tools_commands] )) ||
+_snx__subcmd__tools_commands() {
+    local commands; commands=(
+'list:List all tools and their risk levels' \
+'show:Show a tool'\''s schema and metadata' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx tools commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__tools__subcmd__help_commands] )) ||
+_snx__subcmd__tools__subcmd__help_commands() {
+    local commands; commands=(
+'list:List all tools and their risk levels' \
+'show:Show a tool'\''s schema and metadata' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'snx tools help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__tools__subcmd__help__subcmd__help_commands] )) ||
+_snx__subcmd__tools__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx tools help help commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__tools__subcmd__help__subcmd__list_commands] )) ||
+_snx__subcmd__tools__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx tools help list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__tools__subcmd__help__subcmd__show_commands] )) ||
+_snx__subcmd__tools__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx tools help show commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__tools__subcmd__list_commands] )) ||
+_snx__subcmd__tools__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx tools list commands' commands "$@"
+}
+(( $+functions[_snx__subcmd__tools__subcmd__show_commands] )) ||
+_snx__subcmd__tools__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'snx tools show commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_snx" ]; then
+    _snx "$@"
+else
+    compdef _snx snx
+fi

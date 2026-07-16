@@ -1,0 +1,620 @@
+//! Native Anthropic Messages API provider.
+
+use crate::provider::ModelProvider;
+use crate::sse::{SseItem, SseParser};
+use crate::types::*;
+use futures::stream::BoxStream;
+use futures::StreamExt;
+use nexus_core::config::ModelConfig;
+use nexus_core::{NexusError, Result};
+use serde_json::{json, Value};
+use std::time::{Duration, Instant};
+
+pub const ANTHROPIC_DEFAULT: &str = "https://api.anthropic.com/v1";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Read-only model discovery used by `/connect`.
+pub async fn list_models(
+    base_url: &str,
+    api_key: &str,
+    timeout: Duration,
+) -> std::result::Result<crate::discovery::ProbeOutcome, crate::discovery::ProbeError> {
+    use crate::discovery::{DiscoveredModel, ProbeError, ProbeFailure, ProbeOutcome};
+    let base = crate::discovery::validate_base_url(base_url)?;
+    let started = Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(5)))
+        .build()
+        .map_err(|error| ProbeError {
+            failure: ProbeFailure::Other,
+            detail: format!("http client: {error}"),
+        })?;
+    let response = client
+        .get(format!("{}/models", base.as_str().trim_end_matches('/')))
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .send()
+        .await
+        .map_err(|error| ProbeError {
+            failure: if error.is_timeout() {
+                ProbeFailure::Timeout
+            } else if error.is_connect() {
+                ProbeFailure::ConnectionRefused
+            } else {
+                ProbeFailure::Other
+            },
+            detail: format!("GET /models: {error}"),
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let failure = match status.as_u16() {
+            401 => ProbeFailure::InvalidCredentials,
+            403 => ProbeFailure::PermissionDenied,
+            404 | 405 => ProbeFailure::UnsupportedEndpoint,
+            429 => ProbeFailure::RateLimited,
+            _ => ProbeFailure::Other,
+        };
+        return Err(ProbeError {
+            failure,
+            detail: format!("GET /models returned {status}"),
+        });
+    }
+    let value: Value = response.json().await.map_err(|_| ProbeError {
+        failure: ProbeFailure::MalformedResponse,
+        detail: "response was not JSON".into(),
+    })?;
+    let entries = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ProbeError {
+            failure: ProbeFailure::MalformedResponse,
+            detail: "no `data` array in Anthropic model listing".into(),
+        })?;
+    let models = entries
+        .iter()
+        .filter_map(|model| {
+            Some(DiscoveredModel {
+                id: model.get("id")?.as_str()?.to_string(),
+                size_bytes: None,
+                family: None,
+                parameter_size: None,
+                quantization: None,
+                display_name: model
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                description: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Err(ProbeError {
+            failure: ProbeFailure::NoModels,
+            detail: "Anthropic returned an empty model list".into(),
+        });
+    }
+    Ok(ProbeOutcome {
+        models,
+        latency_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct AnthropicProvider {
+    client: reqwest::Client,
+    base_url: String,
+    model: String,
+    api_key: String,
+    config: ModelConfig,
+}
+
+impl AnthropicProvider {
+    pub fn new(config: &ModelConfig) -> Result<Self> {
+        let api_key = config
+            .api_key_env
+            .as_ref()
+            .and_then(|name| std::env::var(name).ok())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                config
+                    .resolved_api_key
+                    .as_ref()
+                    .map(|secret| secret.expose().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .ok_or_else(|| {
+                NexusError::Config(
+                    "provider `anthropic` requires ANTHROPIC_API_KEY or a stored \
+                     credential selected through `/login`"
+                        .into(),
+                )
+            })?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.timeout_secs))
+            .connect_timeout(Duration::from_secs(10))
+            .danger_accept_invalid_certs(!config.tls_verify)
+            .build()
+            .map_err(|error| provider_error(format!("http client: {error}")))?;
+        let configured = config.base_url.trim_end_matches('/');
+        let base_url = if configured.is_empty() || configured == "http://127.0.0.1:8080/v1" {
+            ANTHROPIC_DEFAULT.into()
+        } else {
+            configured.into()
+        };
+        Ok(Self {
+            client,
+            base_url,
+            model: config.model.clone(),
+            api_key,
+            config: config.clone(),
+        })
+    }
+
+    fn messages_url(&self) -> String {
+        format!("{}/messages", self.base_url)
+    }
+
+    fn build_body(&self, request: &CompletionRequest, stream: bool) -> Value {
+        let system = request
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let messages = anthropic_messages(&request.messages);
+        let mut body = json!({
+            "model": self.model,
+            "max_tokens": request.max_tokens.unwrap_or(self.config.max_output_tokens),
+            "messages": messages,
+            "stream": stream,
+        });
+        if !system.is_empty() {
+            body["system"] = json!(system);
+        }
+        if let Some(temperature) = request.temperature.or(self.config.temperature) {
+            body["temperature"] = json!(temperature);
+        }
+        if !request.stop.is_empty() {
+            body["stop_sequences"] = json!(request.stop);
+        }
+        if !request.tools.is_empty() && self.capabilities().native_tool_calls {
+            body["tools"] = json!(request
+                .tools
+                .iter()
+                .map(|tool| json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                }))
+                .collect::<Vec<_>>());
+        }
+        body
+    }
+
+    fn request(&self, body: &Value) -> reqwest::RequestBuilder {
+        self.client
+            .post(self.messages_url())
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(body)
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for AnthropicProvider {
+    fn kind(&self) -> &'static str {
+        "anthropic"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: self.model.clone(),
+            provider_kind: self.kind().into(),
+            streaming: true,
+            native_tool_calls: self.config.native_tool_calls.unwrap_or(true),
+            structured_output: true,
+            image_input: true,
+            embeddings: false,
+            context_window: self.config.context_window,
+            max_output_tokens: self.config.max_output_tokens,
+            reasoning_controls: false,
+            local: false,
+            accelerator: None,
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion> {
+        let response = self
+            .request(&self.build_body(&request, false))
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|error| provider_error(format!("reading response: {error}")))?;
+        if !status.is_success() {
+            return Err(provider_error(format!(
+                "HTTP {status}: {}",
+                truncate_error(&text)
+            )));
+        }
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|error| provider_error(format!("invalid JSON response: {error}")))?;
+        Ok(parse_completion(&value))
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
+        let response = self
+            .request(&self.build_body(&request, true))
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(provider_error(format!(
+                "HTTP {status}: {}",
+                truncate_error(&text)
+            )));
+        }
+        let state = AnthropicStreamState {
+            bytes: response.bytes_stream().boxed(),
+            parser: SseParser::new(),
+            pending: Vec::new(),
+            usage: Usage::default(),
+            finish_reason: "stop".into(),
+            done_sent: false,
+            finished: false,
+        };
+        Ok(futures::stream::unfold(state, next_anthropic_event).boxed())
+    }
+
+    async fn health(&self) -> ProviderHealth {
+        let started = Instant::now();
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        match response {
+            Ok(response) if response.status().is_success() => ProviderHealth {
+                reachable: true,
+                detail: "Anthropic API authenticated".into(),
+                latency_ms: Some(started.elapsed().as_millis() as u64),
+            },
+            Ok(response) => ProviderHealth {
+                reachable: false,
+                detail: format!("endpoint returned {}", response.status()),
+                latency_ms: Some(started.elapsed().as_millis() as u64),
+            },
+            Err(error) => ProviderHealth {
+                reachable: false,
+                detail: format!("unreachable: {error}"),
+                latency_ms: None,
+            },
+        }
+    }
+}
+
+type ByteStream =
+    futures::stream::BoxStream<'static, std::result::Result<bytes::Bytes, reqwest::Error>>;
+
+struct AnthropicStreamState {
+    bytes: ByteStream,
+    parser: SseParser,
+    pending: Vec<Result<StreamEvent>>,
+    usage: Usage,
+    finish_reason: String,
+    done_sent: bool,
+    finished: bool,
+}
+
+async fn next_anthropic_event(
+    mut state: AnthropicStreamState,
+) -> Option<(Result<StreamEvent>, AnthropicStreamState)> {
+    loop {
+        if let Some(event) = state.pending.pop() {
+            return Some((event, state));
+        }
+        if state.finished {
+            return None;
+        }
+        match state.bytes.next().await {
+            Some(Ok(chunk)) => {
+                let mut events = Vec::new();
+                for item in state.parser.feed(&chunk) {
+                    match item {
+                        SseItem::Done => state.finished = true,
+                        SseItem::Data(data) => match serde_json::from_str::<Value>(&data) {
+                            Ok(value) => {
+                                events.extend(parse_stream_value(&value, &mut state));
+                            }
+                            Err(error) => {
+                                events.push(Err(provider_error(format!(
+                                    "invalid stream JSON: {error}"
+                                ))));
+                                state.finished = true;
+                            }
+                        },
+                    }
+                }
+                events.reverse();
+                state.pending = events;
+            }
+            Some(Err(error)) => {
+                state.finished = true;
+                return Some((
+                    Err(provider_error(format!("stream interrupted: {error}"))),
+                    state,
+                ));
+            }
+            None => {
+                state.finished = true;
+                if !state.done_sent {
+                    state.done_sent = true;
+                    return Some((
+                        Ok(StreamEvent::Done {
+                            usage: state.usage.clone(),
+                            finish_reason: state.finish_reason.clone(),
+                        }),
+                        state,
+                    ));
+                }
+                return None;
+            }
+        }
+    }
+}
+
+fn anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
+    let mut output: Vec<Value> = Vec::new();
+    for message in messages
+        .iter()
+        .filter(|message| message.role != Role::System)
+    {
+        let (role, blocks) = match message.role {
+            Role::User => (
+                "user",
+                vec![json!({"type": "text", "text": message.content})],
+            ),
+            Role::Assistant => {
+                let mut blocks = Vec::new();
+                if !message.content.is_empty() {
+                    blocks.push(json!({"type": "text", "text": message.content}));
+                }
+                blocks.extend(message.tool_calls.iter().map(|call| {
+                    json!({
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": serde_json::from_str::<Value>(&call.arguments)
+                            .unwrap_or_else(|_| json!({})),
+                    })
+                }));
+                ("assistant", blocks)
+            }
+            Role::Tool => (
+                "user",
+                vec![json!({
+                    "type": "tool_result",
+                    "tool_use_id": message.tool_call_id,
+                    "content": message.content,
+                })],
+            ),
+            Role::System => unreachable!("filtered above"),
+        };
+        if let Some(previous) = output
+            .last_mut()
+            .filter(|previous| previous.get("role").and_then(Value::as_str) == Some(role))
+        {
+            if let (Some(existing), Some(more)) = (
+                previous.get_mut("content").and_then(Value::as_array_mut),
+                Some(blocks),
+            ) {
+                existing.extend(more);
+            }
+        } else {
+            output.push(json!({"role": role, "content": blocks}));
+        }
+    }
+    output
+}
+
+fn parse_completion(value: &Value) -> Completion {
+    let mut content = String::new();
+    let mut tool_calls = Vec::new();
+    if let Some(blocks) = value.get("content").and_then(Value::as_array) {
+        for (index, block) in blocks.iter().enumerate() {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    content.push_str(block.get("text").and_then(Value::as_str).unwrap_or(""));
+                }
+                Some("tool_use") => tool_calls.push(ToolCallRequest {
+                    id: block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("tool_{index}")),
+                    name: block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    arguments: block
+                        .get("input")
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| "{}".into()),
+                }),
+                _ => {}
+            }
+        }
+    }
+    Completion {
+        content,
+        tool_calls,
+        usage: parse_usage(value.get("usage")),
+        finish_reason: value
+            .get("stop_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("stop")
+            .to_string(),
+    }
+}
+
+fn parse_stream_value(value: &Value, state: &mut AnthropicStreamState) -> Vec<Result<StreamEvent>> {
+    let mut events = Vec::new();
+    match value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "message_start" => {
+            let usage = parse_usage(value.pointer("/message/usage"));
+            merge_usage(&mut state.usage, &usage);
+        }
+        "content_block_start" => {
+            let block = value.get("content_block").unwrap_or(value);
+            if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                events.push(Ok(StreamEvent::ToolCallDelta {
+                    index: value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    id: block.get("id").and_then(Value::as_str).map(String::from),
+                    name: block.get("name").and_then(Value::as_str).map(String::from),
+                    arguments_delta: String::new(),
+                }));
+            } else if let Some(text) = block.get("text").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    events.push(Ok(StreamEvent::TextDelta(text.to_string())));
+                }
+            }
+        }
+        "content_block_delta" => {
+            let delta = value.get("delta").unwrap_or(value);
+            if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                events.push(Ok(StreamEvent::TextDelta(text.to_string())));
+            }
+            if let Some(arguments) = delta.get("partial_json").and_then(Value::as_str) {
+                events.push(Ok(StreamEvent::ToolCallDelta {
+                    index: value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    id: None,
+                    name: None,
+                    arguments_delta: arguments.to_string(),
+                }));
+            }
+        }
+        "message_delta" => {
+            if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                state.finish_reason = reason.to_string();
+            }
+            let usage = parse_usage(value.get("usage"));
+            merge_usage(&mut state.usage, &usage);
+        }
+        "message_stop" => {
+            if !state.done_sent {
+                state.done_sent = true;
+                events.push(Ok(StreamEvent::Done {
+                    usage: state.usage.clone(),
+                    finish_reason: state.finish_reason.clone(),
+                }));
+            }
+        }
+        "error" => {
+            let detail = value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("Anthropic stream error");
+            events.push(Err(provider_error(detail)));
+            state.finished = true;
+        }
+        _ => {}
+    }
+    events
+}
+
+fn parse_usage(value: Option<&Value>) -> Usage {
+    Usage {
+        prompt_tokens: value
+            .and_then(|usage| usage.get("input_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+        completion_tokens: value
+            .and_then(|usage| usage.get("output_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+    }
+}
+
+fn merge_usage(target: &mut Usage, update: &Usage) {
+    target.prompt_tokens = target.prompt_tokens.max(update.prompt_tokens);
+    target.completion_tokens = target.completion_tokens.max(update.completion_tokens);
+}
+
+fn map_reqwest_error(error: reqwest::Error) -> NexusError {
+    if error.is_timeout() {
+        NexusError::ModelTimeout(0)
+    } else {
+        provider_error(format!("request failed: {error}"))
+    }
+}
+
+fn provider_error(message: impl Into<String>) -> NexusError {
+    NexusError::Provider {
+        provider: "anthropic".into(),
+        message: message.into(),
+    }
+}
+
+fn truncate_error(text: &str) -> String {
+    text.trim().chars().take(400).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_tool_calls_and_results_to_content_blocks() {
+        let messages = vec![
+            ChatMessage {
+                role: Role::Assistant,
+                content: "checking".into(),
+                tool_calls: vec![ToolCallRequest {
+                    id: "call-1".into(),
+                    name: "fs_read".into(),
+                    arguments: "{\"path\":\"a\"}".into(),
+                }],
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage::tool_result("call-1", "fs_read", "contents"),
+        ];
+        let converted = anthropic_messages(&messages);
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0]["content"][1]["type"], "tool_use");
+        assert_eq!(converted[1]["content"][0]["type"], "tool_result");
+    }
+
+    #[test]
+    fn parses_native_tool_use_completion() {
+        let completion = parse_completion(&json!({
+            "content": [
+                {"type":"text","text":"read it"},
+                {"type":"tool_use","id":"call-1","name":"fs_read","input":{"path":"a"}}
+            ],
+            "usage":{"input_tokens":10,"output_tokens":4},
+            "stop_reason":"tool_use"
+        }));
+        assert_eq!(completion.content, "read it");
+        assert_eq!(completion.tool_calls[0].name, "fs_read");
+        assert_eq!(completion.usage.prompt_tokens, 10);
+    }
+}

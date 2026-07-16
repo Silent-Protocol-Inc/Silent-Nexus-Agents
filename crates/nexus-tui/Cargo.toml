@@ -1,0 +1,30 @@
+[package]
+name = "nexus-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Silent Nexus cyberpunk terminal UI (SILENT//NEXUS)"
+
+[dependencies]
+nexus-core.workspace = true
+nexus-agent.workspace = true
+nexus-models.workspace = true
+nexus-policy.workspace = true
+nexus-sandbox.workspace = true
+nexus-goals.workspace = true
+nexus-memory.workspace = true
+nexus-app.workspace = true
+
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+unicode-width.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

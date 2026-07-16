@@ -1,0 +1,21 @@
+[package]
+name = "nexus-goals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Persistent goal engine: plans, checkpoints, evidence, crash recovery"
+
+[dependencies]
+nexus-core.workspace = true
+nexus-policy.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,628 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "GeneralConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "default_agent": {
+          "default": "orchestrator",
+          "description": "Default agent profile used for plain `snx run`.",
+          "type": "string"
+        },
+        "no_color": {
+          "default": false,
+          "description": "Disable all color output (also honors NO_COLOR).",
+          "type": "boolean"
+        },
+        "reduced_motion": {
+          "default": false,
+          "description": "Disable animations (also honors reduced-motion preferences).",
+          "type": "boolean"
+        },
+        "theme": {
+          "default": "nexus-dark",
+          "description": "UI theme name (`nexus-dark`, `no-color`).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "LimitsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "completion_reserve_tokens": {
+          "default": 1024,
+          "description": "Tokens reserved for the model completion when packing context.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "goal_runtime_budget_min": {
+          "default": 120,
+          "description": "Default per-goal wall-clock budget in minutes.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "goal_step_budget": {
+          "default": 200,
+          "description": "Default per-goal step budget.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_repeated_calls": {
+          "default": 3,
+          "description": "Maximum identical tool calls before loop detection stops the turn.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_retries": {
+          "default": 3,
+          "description": "Maximum consecutive failed/invalid model actions before stopping.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_steps_per_turn": {
+          "default": 24,
+          "description": "Maximum agent-loop steps per turn.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "McpServerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "default": "",
+          "description": "Command to launch (stdio transport).",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "description": "Enabled state.",
+          "type": "boolean"
+        },
+        "env_allowlist": {
+          "default": [
+            "PATH",
+            "HOME",
+            "LANG"
+          ],
+          "description": "Environment variables forwarded to the server process.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout_secs": {
+          "default": 30,
+          "description": "Startup/request timeout seconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "transport": {
+          "default": "stdio",
+          "description": "Transport: `stdio` or `http`.",
+          "type": "string"
+        },
+        "trust": {
+          "default": "untrusted",
+          "description": "Trust level: `untrusted` (tools require approval) or `trusted`.",
+          "type": "string"
+        },
+        "url": {
+          "default": null,
+          "description": "URL (http transport).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MemoryConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "default_ttl_days": {
+          "default": 90,
+          "description": "Days after which unverified memories expire (0 = never).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Enable persistent memory.",
+          "type": "boolean"
+        },
+        "global_enabled": {
+          "default": false,
+          "description": "Allow global (cross-project) memory. Off by default.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ModelConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "api_key_env": {
+          "default": null,
+          "description": "Environment variable holding the API key, if any. The value itself is never written to config or logs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth": {
+          "default": null,
+          "description": "Credential source when not using `api_key_env`. Currently `codex` reuses the OpenAI Codex CLI's OAuth session (`~/.codex/auth.json`), so the device/browser login is performed by the trusted `codex` CLI and Silent Nexus consumes the resulting token. `None`/empty = use `api_key_env`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "default": "http://127.0.0.1:8080/v1",
+          "description": "Base URL of the endpoint, e.g. `http://127.0.0.1:8080/v1`.",
+          "type": "string"
+        },
+        "context_window": {
+          "default": 8192,
+          "description": "Context window in tokens (prompt + completion).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_output_tokens": {
+          "default": 1024,
+          "description": "Maximum completion tokens per request.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "model": {
+          "default": "",
+          "description": "Model identifier passed to the provider.",
+          "type": "string"
+        },
+        "native_tool_calls": {
+          "default": null,
+          "description": "Override native tool-calling support detection. When `false`, the structured-action compatibility layer is used.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "provider": {
+          "default": "llamacpp",
+          "description": "Provider kind: `llamacpp`, `ollama`, `openai_compatible`, `custom_http`, `mock`.",
+          "type": "string"
+        },
+        "role": {
+          "default": "executor",
+          "description": "Role hint for routing: `router`, `executor`, `planner`, `verifier`, `embedder`.",
+          "type": "string"
+        },
+        "temperature": {
+          "default": null,
+          "description": "Sampling temperature.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "timeout_secs": {
+          "default": 120,
+          "description": "Request timeout in seconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "PolicyConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_commands": {
+          "default": [],
+          "description": "Command prefixes allowed without prompting (e.g. `cargo check`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "commands": {
+          "default": "ask",
+          "description": "Decision for shell commands not otherwise classified.",
+          "type": "string"
+        },
+        "denied_commands": {
+          "default": [
+            "sudo",
+            "su",
+            "doas",
+            "shutdown",
+            "reboot",
+            "mkfs",
+            "dd"
+          ],
+          "description": "Command prefixes always denied (e.g. `sudo`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "denied_paths": {
+          "default": [],
+          "description": "Additional denied path globs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "destructive": {
+          "default": "ask",
+          "description": "Decision for destructive operations (delete, reset). `deny` or `ask` only.",
+          "type": "string"
+        },
+        "downloads": {
+          "default": "ask",
+          "description": "Decision for file downloads.",
+          "type": "string"
+        },
+        "external": {
+          "default": "ask",
+          "description": "Decision for external side effects (git push, publish). `deny` or `ask` only.",
+          "type": "string"
+        },
+        "network": {
+          "default": "allow",
+          "description": "Decision for internet search/fetch.",
+          "type": "string"
+        },
+        "reads": {
+          "default": "allow",
+          "description": "Decision for workspace reads: allow | ask | deny.",
+          "type": "string"
+        },
+        "writes": {
+          "default": "ask",
+          "description": "Decision for workspace writes.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RoutingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "coding": {
+          "default": null,
+          "description": "Model name for coding tasks.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fallback": {
+          "default": null,
+          "description": "Fallback when a routed model is unavailable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planning": {
+          "default": null,
+          "description": "Model name for planning.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "description": "Model name for trivial classification/routing turns.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SandboxConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "default": "auto",
+          "description": "Preferred backend: `auto`, `process`, `container`, `none`. `auto` picks the strongest available backend.",
+          "type": "string"
+        },
+        "container_image": {
+          "default": "debian:bookworm-slim",
+          "description": "Container image used by the container backend.",
+          "type": "string"
+        },
+        "cpu_limit_secs": {
+          "default": 120,
+          "description": "CPU seconds limit per execution.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "env_allowlist": {
+          "default": [
+            "PATH",
+            "HOME",
+            "LANG",
+            "TERM",
+            "USER",
+            "SHELL",
+            "CARGO_HOME",
+            "RUSTUP_HOME"
+          ],
+          "description": "Environment variables forwarded into sandboxed processes.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_output_bytes": {
+          "default": 200000,
+          "description": "Maximum captured output bytes before truncation to artifact.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "memory_limit_mb": {
+          "default": 1024,
+          "description": "Memory limit in megabytes.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "network": {
+          "default": "off",
+          "description": "Network mode inside the sandbox: `off`, `restricted`, `full`.",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "default": 120,
+          "description": "Wall-clock timeout per execution in seconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "WebConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_loopback": {
+          "default": false,
+          "description": "Permit fetching loopback addresses (off by default; needed only for deliberate local-service testing).",
+          "type": "boolean"
+        },
+        "allowlist": {
+          "default": [],
+          "description": "Hosts always allowed (exact or `*.suffix`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "denylist": {
+          "default": [],
+          "description": "Hosts always denied.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Allow outbound web access at all.",
+          "type": "boolean"
+        },
+        "max_fetch_bytes": {
+          "default": 2000000,
+          "description": "Maximum download size in bytes for page retrieval.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "per_host_delay_ms": {
+          "default": 1000,
+          "description": "Per-host minimum delay between requests, milliseconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "search_provider": {
+          "default": "duckduckgo",
+          "description": "Search provider: `duckduckgo` (no key required) or `none`.",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "default": 30,
+          "description": "Request timeout in seconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "properties": {
+    "general": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/GeneralConfig"
+        }
+      ],
+      "default": {
+        "default_agent": "orchestrator",
+        "no_color": false,
+        "reduced_motion": false,
+        "theme": "nexus-dark"
+      }
+    },
+    "limits": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LimitsConfig"
+        }
+      ],
+      "default": {
+        "completion_reserve_tokens": 1024,
+        "goal_runtime_budget_min": 120,
+        "goal_step_budget": 200,
+        "max_repeated_calls": 3,
+        "max_retries": 3,
+        "max_steps_per_turn": 24
+      }
+    },
+    "mcp": {
+      "additionalProperties": {
+        "$ref": "#/definitions/McpServerConfig"
+      },
+      "default": {},
+      "description": "Registered MCP servers, e.g. `[mcp.my_server]`.",
+      "type": "object"
+    },
+    "memory": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/MemoryConfig"
+        }
+      ],
+      "default": {
+        "default_ttl_days": 90,
+        "enabled": true,
+        "global_enabled": false
+      }
+    },
+    "models": {
+      "additionalProperties": {
+        "$ref": "#/definitions/ModelConfig"
+      },
+      "default": {},
+      "description": "Named model endpoints, e.g. `[models.local_main]`.",
+      "type": "object"
+    },
+    "policy": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/PolicyConfig"
+        }
+      ],
+      "default": {
+        "allowed_commands": [],
+        "commands": "ask",
+        "denied_commands": [
+          "sudo",
+          "su",
+          "doas",
+          "shutdown",
+          "reboot",
+          "mkfs",
+          "dd"
+        ],
+        "denied_paths": [],
+        "destructive": "ask",
+        "downloads": "ask",
+        "external": "ask",
+        "network": "allow",
+        "reads": "allow",
+        "writes": "ask"
+      }
+    },
+    "routing": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/RoutingConfig"
+        }
+      ],
+      "default": {
+        "coding": null,
+        "fallback": null,
+        "planning": null,
+        "simple": null
+      }
+    },
+    "sandbox": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SandboxConfig"
+        }
+      ],
+      "default": {
+        "backend": "auto",
+        "container_image": "debian:bookworm-slim",
+        "cpu_limit_secs": 120,
+        "env_allowlist": [
+          "PATH",
+          "HOME",
+          "LANG",
+          "TERM",
+          "USER",
+          "SHELL",
+          "CARGO_HOME",
+          "RUSTUP_HOME"
+        ],
+        "max_output_bytes": 200000,
+        "memory_limit_mb": 1024,
+        "network": "off",
+        "timeout_secs": 120
+      }
+    },
+    "version": {
+      "default": 0,
+      "description": "Config schema version; migrated automatically when older.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "web": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/WebConfig"
+        }
+      ],
+      "default": {
+        "allow_loopback": false,
+        "allowlist": [],
+        "denylist": [],
+        "enabled": true,
+        "max_fetch_bytes": 2000000,
+        "per_host_delay_ms": 1000,
+        "search_provider": "duckduckgo",
+        "timeout_secs": 30
+      }
+    }
+  },
+  "title": "Config",
+  "type": "object"
+}

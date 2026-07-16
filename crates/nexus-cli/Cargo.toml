@@ -1,0 +1,45 @@
+[package]
+name = "nexus-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Silent Nexus command-line interface (snx)"
+
+[[bin]]
+name = "snx"
+path = "src/main.rs"
+
+[dependencies]
+nexus-core.workspace = true
+nexus-agent.workspace = true
+nexus-models.workspace = true
+nexus-tools.workspace = true
+nexus-sandbox.workspace = true
+nexus-memory.workspace = true
+nexus-context.workspace = true
+nexus-goals.workspace = true
+nexus-mcp.workspace = true
+nexus-skills.workspace = true
+nexus-index.workspace = true
+nexus-policy.workspace = true
+nexus-observability.workspace = true
+nexus-app.workspace = true
+nexus-tui.workspace = true
+
+tokio = { workspace = true, features = ["io-std"] }
+async-trait.workspace = true
+clap = { workspace = true }
+clap_complete.workspace = true
+crossterm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+directories.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

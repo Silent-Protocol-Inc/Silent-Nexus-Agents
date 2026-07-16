@@ -1,0 +1,21 @@
+[package]
+name = "nexus-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Persistent SQLite-backed memory with FTS retrieval and approval controls"
+
+[dependencies]
+nexus-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

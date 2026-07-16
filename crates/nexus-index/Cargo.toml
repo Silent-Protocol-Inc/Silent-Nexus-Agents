@@ -1,0 +1,23 @@
+[package]
+name = "nexus-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Code intelligence index: file tree, language detection, heuristic symbol extraction"
+
+[dependencies]
+nexus-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+ignore.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

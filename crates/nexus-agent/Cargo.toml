@@ -1,0 +1,36 @@
+[package]
+name = "nexus-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent state machine: classification, structured actions, bounded execution loop, subagents"
+
+[dependencies]
+nexus-core.workspace = true
+nexus-models.workspace = true
+nexus-tools.workspace = true
+nexus-policy.workspace = true
+nexus-sandbox.workspace = true
+nexus-memory.workspace = true
+nexus-context.workspace = true
+nexus-goals.workspace = true
+nexus-observability.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+rusqlite.workspace = true
+regex.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+pretty_assertions.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

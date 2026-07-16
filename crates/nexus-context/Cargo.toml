@@ -1,0 +1,19 @@
+[package]
+name = "nexus-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Context window management: token estimation, packing, and compaction"
+
+[dependencies]
+nexus-core.workspace = true
+nexus-models.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

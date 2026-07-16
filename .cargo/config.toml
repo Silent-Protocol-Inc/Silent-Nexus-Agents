@@ -1,0 +1,7 @@
+# Build settings tuned for constrained development hosts.
+# This workstation shares RAM with other services; cap parallel rustc invocations.
+[build]
+jobs = 2
+
+[term]
+color = "auto"

@@ -1,0 +1,121 @@
+# Silent Nexus example configuration.
+#
+# Copy to `.nexus/config.toml` in your project (project layer) or to the global
+# config location shown by `snx config path`. Values here are illustrative;
+# every field has a conservative default, so a minimal config only needs a
+# [models.*] entry and a [routing] mapping.
+#
+# Silent Nexus NEVER downloads models. Point these entries at a local server you
+# run yourself.
+
+version = 1
+
+[general]
+theme = "nexus-dark"        # or "no-color"
+no_color = false
+reduced_motion = false
+default_agent = "implementer"
+
+# ---------------------------------------------------------------------------
+# Models. Each key is a name you choose; `provider` selects the client.
+# API keys are referenced by ENV VAR NAME via `api_key_env`, never inline.
+# ---------------------------------------------------------------------------
+
+[models.small]
+provider = "llamacpp"                    # llama.cpp llama-server
+base_url = "http://127.0.0.1:8080/v1"
+model = "local-small"
+role = "executor"
+context_window = 8192
+max_output_tokens = 1024
+native_tool_calls = false                # use the compatibility protocol
+timeout_secs = 120
+
+[models.coder]
+provider = "openai_compatible"           # vLLM / LM Studio / etc.
+base_url = "http://127.0.0.1:8000/v1"
+model = "local-coder"
+role = "executor"
+context_window = 16384
+max_output_tokens = 2048
+timeout_secs = 180
+
+# Example remote endpoint whose key comes from the environment:
+# [models.remote]
+# provider = "openai_compatible"
+# base_url = "https://my-endpoint.example/v1"
+# model = "my-model"
+# api_key_env = "MY_ENDPOINT_KEY"
+# role = "executor"
+
+[routing]
+simple   = "small"
+coding   = "coder"
+planning = "coder"
+fallback = "coder"
+
+# ---------------------------------------------------------------------------
+# Policy. Destructive/external may be "ask" or "deny" — never "allow".
+# ---------------------------------------------------------------------------
+
+[policy]
+reads       = "allow"
+writes      = "ask"
+commands    = "ask"
+network     = "ask"
+downloads   = "ask"
+destructive = "ask"
+external    = "ask"
+denied_commands  = ["sudo"]
+allowed_commands = ["cargo check", "cargo test", "cargo fmt"]
+denied_paths     = [".ssh", ".aws/credentials", ".env"]
+
+# ---------------------------------------------------------------------------
+# Sandbox. "auto" prefers a container and falls back to a restricted process.
+# ---------------------------------------------------------------------------
+
+[sandbox]
+backend = "auto"                 # container | process | none | auto
+container_image = "docker.io/library/debian:stable-slim"
+cpu_limit_secs = 30
+memory_limit_mb = 1024
+timeout_secs = 60
+max_output_bytes = 1048576
+network = "off"                  # off | restricted | full
+env_allowlist = ["PATH", "HOME", "LANG"]
+
+[web]
+enabled = true
+search_provider = "duckduckgo"
+max_fetch_bytes = 2097152
+allowlist = []                   # empty = allow any PUBLIC host (SSRF-guarded)
+denylist = []
+allow_loopback = false
+per_host_delay_ms = 500
+timeout_secs = 20
+
+[memory]
+enabled = true
+global_enabled = false           # cross-workspace memories require this
+default_ttl_days = 90
+
+[limits]
+max_steps_per_turn = 24
+max_retries = 3
+max_repeated_calls = 3
+goal_step_budget = 200
+goal_runtime_budget_min = 120
+completion_reserve_tokens = 1024
+
+# ---------------------------------------------------------------------------
+# MCP servers (optional). Untrusted by default; registering is explicit.
+# ---------------------------------------------------------------------------
+
+# [mcp.example]
+# transport = "stdio"
+# command = "my-mcp-server"
+# args = ["--root", "."]
+# enabled = true
+# trust = "untrusted"
+# env_allowlist = ["PATH", "HOME"]
+# timeout_secs = 30

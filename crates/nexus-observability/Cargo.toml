@@ -1,0 +1,22 @@
+[package]
+name = "nexus-observability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Structured logging, tracing, and audit persistence for Silent Nexus"
+
+[dependencies]
+nexus-core.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
