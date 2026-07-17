@@ -20,8 +20,10 @@ an existing command, config, or approval flow may be closed even if that
 removes unsafe behavior. Such changes must be documented in the changelog and
 upgrade guide.
 
-Linux `x86_64-unknown-linux-gnu` is the certified 1.0.0 target. Other targets
-are experimental; source compatibility does not imply release certification.
+Linux `x86_64-unknown-linux-gnu` is the certified 1.0.0 baseline and the 1.1.0
+release-tooling target. The 1.1.0 release is certified only after its delivery
+report records passing gates. Other targets are experimental; source
+compatibility does not imply release certification.
 
-Rust/MSRV for 1.0.0 is exactly `1.97.0`. Later 1.x releases may raise MSRV only
-with release notes and CI/toolchain changes.
+Rust/MSRV remains exactly `1.97.0` for 1.1.0. Later 1.x releases may raise it
+only with release notes and CI/toolchain changes.

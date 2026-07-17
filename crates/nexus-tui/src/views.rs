@@ -9,7 +9,7 @@ use nexus_app::services::GoalSpec;
 use nexus_app::{ConfirmedAction, Report};
 use nexus_core::brand::BrandVariant;
 use nexus_core::SecretString;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// What the event loop should do after an overlay consumed a key.
 pub enum Outcome {
@@ -28,6 +28,9 @@ pub enum Outcome {
 pub enum UiAction {
     /// Execute a slash command line (without the leading `/`).
     RunCommand(String),
+    /// Execute a bare command's real default behavior without reopening its
+    /// menu. Used only by the generic command menu.
+    RunDefaultCommand(String),
     /// Put text into the main input (palette arg-completion).
     InsertInput(String),
     /// A confirmation dialog approved this.
@@ -76,6 +79,8 @@ pub enum UiAction {
         title: String,
     },
     CopyText(String),
+    ShowHarnessMemory(Box<nexus_core::harness::MemoryRecord>),
+    SelectHarnessProfile(String),
     RolloverSummary {
         source_session: String,
         content: String,
@@ -96,8 +101,10 @@ pub enum LoadRequest {
     Resume,
     Sessions,
     Login,
+    Connect,
     Model,
     Agents,
+    Plan,
     Tasks,
     Subagents,
     Persona,
@@ -118,6 +125,7 @@ pub enum LoadRequest {
     Branch,
     Commit,
     Connector,
+    CommandMenu(String),
 }
 
 // ------------------------------------------------------------------- palette
@@ -223,7 +231,11 @@ impl Palette {
 /// One selectable row.
 #[derive(Debug, Clone)]
 pub struct MenuItem {
+    /// Stable identity used for selection/toggle state. Callers should set a
+    /// domain id when labels can change.
+    pub id: String,
     pub label: String,
+    pub category: String,
     /// Right-aligned badge (state marker + short status).
     pub badge: String,
     /// Second line of detail under the label.
@@ -235,13 +247,26 @@ pub struct MenuItem {
 
 impl MenuItem {
     pub fn new(label: impl Into<String>, action: UiAction) -> Self {
+        let label = label.into();
         Self {
-            label: label.into(),
+            id: label.clone(),
+            label,
+            category: String::new(),
             badge: String::new(),
             detail: String::new(),
             disabled: None,
             action: Some(action),
         }
+    }
+
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
+    pub fn category(mut self, category: impl Into<String>) -> Self {
+        self.category = category.into();
+        self
     }
 
     pub fn badge(mut self, badge: impl Into<String>) -> Self {
@@ -260,34 +285,138 @@ impl MenuItem {
     }
 }
 
-/// A searchable selection menu (provider picker, goal menu, resume list…).
-pub struct Menu {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuFocusRegion {
+    Search,
+    Items,
+    Detail,
+    Actions,
+}
+
+impl MenuFocusRegion {
+    fn next(self) -> Self {
+        match self {
+            Self::Search => Self::Items,
+            Self::Items => Self::Detail,
+            Self::Detail => Self::Actions,
+            Self::Actions => Self::Search,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Search => Self::Actions,
+            Self::Items => Self::Search,
+            Self::Detail => Self::Items,
+            Self::Actions => Self::Detail,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Items => "items",
+            Self::Detail => "detail",
+            Self::Actions => "actions",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuSortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuSort {
+    /// Supported values are `label`, `badge`, `detail`, and `category`.
+    pub field: String,
+    pub direction: MenuSortDirection,
+}
+
+/// Structured menu state shared by every menu route. Rendering consumes this
+/// state directly; it never parses report text to infer actions.
+#[derive(Debug, Clone)]
+pub struct InteractiveMenuState {
+    pub menu_id: String,
+    pub route: String,
     pub title: String,
     pub brand: Option<BrandVariant>,
     pub items: Vec<MenuItem>,
     pub selected: usize,
+    pub selected_item_id: Option<String>,
+    pub toggled_item_ids: BTreeSet<String>,
+    pub focused_region: MenuFocusRegion,
     pub filter: String,
+    pub search_mode: bool,
+    pub filters: BTreeMap<String, String>,
+    pub sort: Option<MenuSort>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub empty_message: String,
+    pub help_visible: bool,
+    pub detail_preview: Option<String>,
+    pub parent_route: Option<String>,
     /// Typing filters when true (list menus); false for action menus where
     /// keys like `r` refresh.
     pub searchable: bool,
     /// Extra hint line rendered at the bottom.
     pub hint: String,
-    /// Action for the `r` key (refresh) when not searchable.
+    /// Action for Ctrl+R, plus `r` on legacy non-searchable menus.
     pub on_refresh: Option<UiAction>,
+    /// Action used by Esc when this is a nested route.
+    pub on_back: Option<UiAction>,
 }
 
-impl Menu {
+/// Compatibility name retained for existing menus.
+pub type Menu = InteractiveMenuState;
+
+impl InteractiveMenuState {
     pub fn new(title: impl Into<String>, items: Vec<MenuItem>) -> Self {
+        let title = title.into();
+        let selected_item_id = items.first().map(|item| item.id.clone());
         Self {
-            title: title.into(),
+            menu_id: title.clone(),
+            route: String::new(),
+            title,
             brand: None,
             items,
             selected: 0,
+            selected_item_id,
+            toggled_item_ids: BTreeSet::new(),
+            focused_region: MenuFocusRegion::Items,
             filter: String::new(),
+            search_mode: false,
+            filters: BTreeMap::new(),
+            sort: None,
+            loading: false,
+            error: None,
+            empty_message: "nothing matches".into(),
+            help_visible: false,
+            detail_preview: None,
+            parent_route: None,
             searchable: false,
             hint: String::new(),
             on_refresh: None,
+            on_back: None,
         }
+    }
+
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.menu_id = id.into();
+        self
+    }
+
+    pub fn route(mut self, route: impl Into<String>) -> Self {
+        self.route = route.into();
+        self
+    }
+
+    pub fn parent(mut self, route: impl Into<String>, action: UiAction) -> Self {
+        self.parent_route = Some(route.into());
+        self.on_back = Some(action);
+        self
     }
 
     pub fn searchable(mut self) -> Self {
@@ -305,18 +434,59 @@ impl Menu {
         self
     }
 
+    pub fn empty_message(mut self, message: impl Into<String>) -> Self {
+        self.empty_message = message.into();
+        self
+    }
+
+    pub fn sorted(mut self, field: impl Into<String>, direction: MenuSortDirection) -> Self {
+        self.sort = Some(MenuSort {
+            field: field.into(),
+            direction,
+        });
+        self
+    }
+
     /// Indices of items matching the filter.
     pub fn visible(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..self.items.len()).collect();
-        }
         let f = self.filter.to_lowercase();
-        (0..self.items.len())
+        let mut visible: Vec<usize> = (0..self.items.len())
             .filter(|&i| {
-                self.items[i].label.to_lowercase().contains(&f)
-                    || self.items[i].detail.to_lowercase().contains(&f)
+                let item = &self.items[i];
+                (f.is_empty()
+                    || item.label.to_lowercase().contains(&f)
+                    || item.detail.to_lowercase().contains(&f)
+                    || item.badge.to_lowercase().contains(&f)
+                    || item.category.to_lowercase().contains(&f))
+                    && self.filters.iter().all(|(key, value)| {
+                        let expected = value.to_lowercase();
+                        expected.is_empty()
+                            || match key.as_str() {
+                                "category" => item.category.to_lowercase().contains(&expected),
+                                "badge" => item.badge.to_lowercase().contains(&expected),
+                                "id" => item.id.to_lowercase().contains(&expected),
+                                _ => true,
+                            }
+                    })
             })
-            .collect()
+            .collect();
+        if let Some(sort) = &self.sort {
+            visible.sort_by(|left, right| {
+                let value = |index: usize| match sort.field.as_str() {
+                    "badge" => self.items[index].badge.as_str(),
+                    "detail" => self.items[index].detail.as_str(),
+                    "category" => self.items[index].category.as_str(),
+                    _ => self.items[index].label.as_str(),
+                };
+                value(*left)
+                    .to_ascii_lowercase()
+                    .cmp(&value(*right).to_ascii_lowercase())
+            });
+            if sort.direction == MenuSortDirection::Descending {
+                visible.reverse();
+            }
+        }
+        visible
     }
 
     fn clamp(&mut self) {
@@ -326,32 +496,97 @@ impl Menu {
         } else if self.selected >= count {
             self.selected = count - 1;
         }
+        self.selected_item_id = self
+            .visible()
+            .get(self.selected)
+            .map(|index| self.items[*index].id.clone());
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        if delta < 0 {
+            self.selected = self.selected.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.selected = self.selected.saturating_add(delta as usize);
+        }
+        self.clamp();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('r')) {
+            return self
+                .on_refresh
+                .clone()
+                .map_or(Outcome::Consumed, Outcome::ActionKeepOpen);
+        }
         match key.code {
             KeyCode::Esc => {
-                if self.searchable && !self.filter.is_empty() {
+                if self.help_visible {
+                    self.help_visible = false;
+                    Outcome::Consumed
+                } else if self.search_mode {
+                    self.search_mode = false;
+                    self.focused_region = MenuFocusRegion::Items;
+                    Outcome::Consumed
+                } else if self.searchable && !self.filter.is_empty() {
                     self.filter.clear();
                     self.clamp();
                     Outcome::Consumed
+                } else if let Some(action) = self.on_back.clone() {
+                    Outcome::Action(action)
                 } else {
                     Outcome::Close
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') if !self.typing(key) => {
-                self.selected = self.selected.saturating_sub(1);
+            KeyCode::Tab => {
+                self.focused_region = self.focused_region.next();
                 Outcome::Consumed
             }
-            KeyCode::Down | KeyCode::Char('j') if !self.typing(key) => {
-                self.selected += 1;
-                self.clamp();
+            KeyCode::BackTab => {
+                self.focused_region = self.focused_region.previous();
                 Outcome::Consumed
             }
-            KeyCode::Char('r') if !self.typing(key) && self.on_refresh.is_some() => {
+            KeyCode::Char('?') if !self.search_mode => {
+                self.help_visible = !self.help_visible;
+                Outcome::Consumed
+            }
+            KeyCode::Char('/') if self.searchable && !self.search_mode => {
+                self.search_mode = true;
+                self.focused_region = MenuFocusRegion::Search;
+                Outcome::Consumed
+            }
+            KeyCode::Up | KeyCode::Char('k') if !self.search_mode => {
+                self.move_selection(-1);
+                Outcome::Consumed
+            }
+            KeyCode::Down | KeyCode::Char('j') if !self.search_mode => {
+                self.move_selection(1);
+                Outcome::Consumed
+            }
+            KeyCode::Char('r') if !self.searchable && self.on_refresh.is_some() => {
                 Outcome::ActionKeepOpen(self.on_refresh.clone().expect("checked above"))
             }
+            KeyCode::Char(' ') if !self.search_mode => {
+                let visible = self.visible();
+                let Some(&idx) = visible.get(self.selected) else {
+                    return Outcome::Consumed;
+                };
+                let item = &self.items[idx];
+                if item.disabled.is_some() {
+                    return Outcome::Consumed;
+                }
+                if !self.toggled_item_ids.remove(&item.id) {
+                    self.toggled_item_ids.insert(item.id.clone());
+                }
+                Outcome::Consumed
+            }
             KeyCode::Enter => {
+                if self.search_mode || self.focused_region == MenuFocusRegion::Search {
+                    self.search_mode = false;
+                    self.focused_region = MenuFocusRegion::Items;
+                }
+                if self.loading || self.error.is_some() {
+                    return Outcome::Consumed;
+                }
                 let visible = self.visible();
                 let Some(&idx) = visible.get(self.selected) else {
                     return Outcome::Consumed;
@@ -365,7 +600,7 @@ impl Menu {
                     None => Outcome::Consumed,
                 }
             }
-            KeyCode::Backspace if self.searchable => {
+            KeyCode::Backspace if self.search_mode => {
                 self.filter.pop();
                 self.clamp();
                 Outcome::Consumed
@@ -373,6 +608,8 @@ impl Menu {
             KeyCode::Char(c)
                 if self.searchable && !key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.search_mode = true;
+                self.focused_region = MenuFocusRegion::Search;
                 self.filter.push(c);
                 self.selected = 0;
                 self.clamp();
@@ -380,11 +617,6 @@ impl Menu {
             }
             _ => Outcome::Consumed,
         }
-    }
-
-    /// Whether a char key should type into the filter instead of navigating.
-    fn typing(&self, key: KeyEvent) -> bool {
-        self.searchable && matches!(key.code, KeyCode::Char(_))
     }
 }
 
@@ -1034,7 +1266,7 @@ impl Progress {
 /// The overlay stack element.
 pub enum Overlay {
     Palette(Palette),
-    Menu(Menu),
+    Menu(Box<Menu>),
     Confirm(Confirm),
     Secret(SecretInput),
     Form(Form),
@@ -1064,6 +1296,10 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
     }
 
     #[test]
@@ -1160,6 +1396,92 @@ mod tests {
             m.handle_key(key(KeyCode::Enter)),
             Outcome::Consumed
         ));
+    }
+
+    #[test]
+    fn structured_menu_controls_search_focus_toggle_refresh_and_back() {
+        let refresh = UiAction::Load(LoadRequest::Model);
+        let back = UiAction::RunCommand("profile".into());
+        let mut menu = Menu::new(
+            "models",
+            vec![
+                MenuItem::new("Alpha", UiAction::RunCommand("alpha".into()))
+                    .id("model-alpha")
+                    .category("hosted"),
+                MenuItem::new("Beta", UiAction::RunCommand("beta".into()))
+                    .id("model-beta")
+                    .category("local"),
+            ],
+        )
+        .id("model-picker")
+        .route("/model")
+        .parent("/profile", back.clone())
+        .searchable()
+        .sorted("label", MenuSortDirection::Descending);
+        menu.filters.insert("category".into(), "local".into());
+        menu.on_refresh = Some(refresh.clone());
+
+        assert_eq!(menu.visible(), vec![1]);
+        assert_eq!(menu.menu_id, "model-picker");
+        assert_eq!(menu.route, "/model");
+
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Char('/'))),
+            Outcome::Consumed
+        ));
+        assert!(menu.search_mode);
+        assert_eq!(menu.focused_region, MenuFocusRegion::Search);
+        menu.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(menu.filter, "b");
+        menu.handle_key(key(KeyCode::Esc));
+        assert!(!menu.search_mode);
+
+        menu.handle_key(key(KeyCode::Char(' ')));
+        assert!(menu.toggled_item_ids.contains("model-beta"));
+        menu.handle_key(key(KeyCode::Tab));
+        assert_eq!(menu.focused_region, MenuFocusRegion::Detail);
+        menu.handle_key(key(KeyCode::BackTab));
+        assert_eq!(menu.focused_region, MenuFocusRegion::Items);
+        menu.handle_key(key(KeyCode::Char('?')));
+        assert!(menu.help_visible);
+        menu.handle_key(key(KeyCode::Char('?')));
+        assert!(!menu.help_visible);
+
+        match menu.handle_key(modified_key(KeyCode::Char('r'), KeyModifiers::CONTROL)) {
+            Outcome::ActionKeepOpen(action) => assert_eq!(action, refresh),
+            other => panic!("unexpected {:?}", discriminant_name(&other)),
+        }
+
+        // Clear the search before the nested back action is eligible.
+        menu.handle_key(key(KeyCode::Esc));
+        match menu.handle_key(key(KeyCode::Esc)) {
+            Outcome::Action(action) => assert_eq!(action, back),
+            other => panic!("unexpected {:?}", discriminant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn structured_menu_statuses_disable_activation() {
+        let mut loading = Menu::new(
+            "loading",
+            vec![MenuItem::new(
+                "unsafe while loading",
+                UiAction::RunCommand("run".into()),
+            )],
+        )
+        .empty_message("no records yet");
+        loading.loading = true;
+        assert!(matches!(
+            loading.handle_key(key(KeyCode::Enter)),
+            Outcome::Consumed
+        ));
+        loading.loading = false;
+        loading.error = Some("provider offline".into());
+        assert!(matches!(
+            loading.handle_key(key(KeyCode::Enter)),
+            Outcome::Consumed
+        ));
+        assert_eq!(loading.empty_message, "no records yet");
     }
 
     #[test]

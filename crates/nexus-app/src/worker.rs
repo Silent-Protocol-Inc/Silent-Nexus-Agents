@@ -8,6 +8,7 @@
 
 use crate::app::App;
 use nexus_agent::{AgentLoop, AgentRole, ApprovalDecision, ApprovalHandler};
+use nexus_core::harness::{ResourceAccessMode, ResourceClaim};
 use nexus_core::orchestration::{BackgroundTask, TaskStatus, ValueEnvelope};
 use nexus_core::timeline::{LifecyclePhase, TimelineEvent, TimelineKind, TimelineStatus};
 use nexus_core::{NexusError, Result, RiskLevel, SpanId, TraceId, TurnId};
@@ -115,6 +116,24 @@ pub async fn run(app: Arc<App>, idle_secs: u64) -> Result<()> {
     Ok(())
 }
 
+/// Releases a writer's repository claim on every exit path, including
+/// panics and JoinSet aborts. Release failures are ignored: the claim
+/// self-expires with the lease.
+struct ClaimGuard {
+    app: Arc<App>,
+    claim_id: String,
+}
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .app
+            .harness()
+            .workspace_repository()
+            .release_resource_claim(&self.claim_id);
+    }
+}
+
 async fn execute_task(app: Arc<App>, task: BackgroundTask, worker_id: &str) -> Result<()> {
     let orchestration = app.orchestration();
     let run = orchestration.agent_run_for_task(task.id.as_str())?;
@@ -123,6 +142,40 @@ async fn execute_task(app: Arc<App>, task: BackgroundTask, worker_id: &str) -> R
         append_agent_event(&app, run, TimelineStatus::Running, "running")?;
     }
     append_task_event(&app, &task, TimelineStatus::Running, "running")?;
+
+    // Writer tasks claim the shared repository before touching it — belt and
+    // braces on top of the single-writer lease slot: the claim keeps writers
+    // serialized at the data layer even if worker concurrency rules change,
+    // and leaves an audit row for who held the repository when. The claim
+    // expires with the lease so a crashed worker cannot deadlock the slot.
+    let _repository_claim = if task.writer {
+        let claim = ResourceClaim::new(
+            task.id.as_str(),
+            "git-repository",
+            &app.workspace.display().to_string(),
+            ResourceAccessMode::Write,
+            Some(lease_expiry()),
+        );
+        match app.harness().workspace_repository().claim_resource(&claim) {
+            Ok(()) => Some(ClaimGuard {
+                app: app.clone(),
+                claim_id: claim.id,
+            }),
+            Err(error) => {
+                let message = app.redactor.redact(&error.to_string());
+                orchestration.set_task_status(
+                    task.id.as_str(),
+                    TaskStatus::Blocked,
+                    None,
+                    Some(&message),
+                )?;
+                append_task_event(&app, &task, TimelineStatus::Blocked, &message)?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
 
     let workspace = if task.writer {
         match ensure_writer_worktree(&app, &task) {

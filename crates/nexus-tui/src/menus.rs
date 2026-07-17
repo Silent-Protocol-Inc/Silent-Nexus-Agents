@@ -1,13 +1,59 @@
 //! Builders that turn real service data into interactive overlays. No fake
 //! rows: every entry is constructed from measured provider/goal/session state.
 
-use crate::views::{LoadRequest, Menu, MenuItem, SecretInput, SecretTarget, UiAction};
+use crate::views::{
+    LoadRequest, Menu, MenuItem, MenuSortDirection, SecretInput, SecretTarget, UiAction,
+};
 use nexus_agent::AgentRole;
 use nexus_app::codex::CodexStatus;
 use nexus_app::providers::{AuthRequirement, EndpointState, ProviderEntry};
 use nexus_app::services::ResumeCandidate;
 use nexus_core::brand::{self, BrandVariant};
 use nexus_goals::Goal;
+
+/// Menu-first compatibility surface for commands that do not yet have a
+/// richer domain workspace. The default action explicitly bypasses menu
+/// routing, so selecting it cannot recursively reopen this menu.
+pub fn command_menu(def: &nexus_app::registry::CommandDef) -> Menu {
+    let mut items = Vec::new();
+    if !def.usage.trim_start().starts_with('<') {
+        let mut run = MenuItem::new(
+            format!("Run default · {}", def.summary),
+            UiAction::RunDefaultCommand(def.name.into()),
+        )
+        .id(format!("command:{}:default", def.name))
+        .category("actions");
+        if def.requires_confirmation {
+            run = run
+                .badge("confirmation required")
+                .detail("the real executor will show the full risk confirmation before applying");
+        }
+        items.push(run);
+    }
+    if !def.usage.is_empty() {
+        items.push(
+            MenuItem::new(
+                format!("Advanced input · /{} {}", def.name, def.usage),
+                UiAction::InsertInput(format!("/{} ", def.name)),
+            )
+            .id(format!("command:{}:advanced", def.name))
+            .category("advanced")
+            .detail("typed arguments remain an optional compatibility layer"),
+        );
+    }
+    items.push(
+        MenuItem::new(
+            "Show command help",
+            UiAction::RunDefaultCommand(format!("help {}", def.name)),
+        )
+        .id(format!("command:{}:help", def.name))
+        .category("help"),
+    );
+    Menu::new(format!("/{} · {}", def.name, def.summary), items)
+        .id(format!("command-menu:{}", def.name))
+        .route(format!("/{}", def.name))
+        .hint("Enter invokes real behavior · Esc close")
+}
 
 // ---------------------------------------------------------------------- goal
 
@@ -56,7 +102,9 @@ pub fn goal_menu(goals: &[Goal], active_goal: Option<&str>) -> Menu {
             UiAction::RunCommand(format!("goal export {id}")),
         ));
     }
-    Menu::new("goal", items).hint("Enter select · Esc close")
+    Menu::new("goal", items)
+        .route("/goal")
+        .hint("Enter select · Esc close")
 }
 
 pub fn goals_menu(goals: &[Goal]) -> Menu {
@@ -77,7 +125,7 @@ pub fn goals_menu(goals: &[Goal]) -> Menu {
             ))
         })
         .collect();
-    let mut menu = Menu::new("goals", items).searchable();
+    let mut menu = Menu::new("goals", items).route("/goals").searchable();
     menu.hint = "type to filter · Enter opens · Esc close".into();
     menu.on_refresh = Some(UiAction::Load(LoadRequest::Goals));
     menu
@@ -101,7 +149,7 @@ pub fn resume_menu(candidates: &[ResumeCandidate]) -> Menu {
                 ))
         })
         .collect();
-    let mut menu = Menu::new("resume", items).searchable();
+    let mut menu = Menu::new("resume", items).route("/resume").searchable();
     menu.hint = "Enter resumes (completed side effects are never re-run) · Esc close".into();
     menu.on_refresh = Some(UiAction::Load(LoadRequest::Resume));
     menu
@@ -127,7 +175,7 @@ pub fn sessions_menu(sessions: &[nexus_agent::SessionMeta]) -> Menu {
                 ))
         })
         .collect();
-    let mut menu = Menu::new("sessions", items).searchable();
+    let mut menu = Menu::new("sessions", items).route("/sessions").searchable();
     menu.hint = "Enter attaches the session · Esc close".into();
     menu.on_refresh = Some(UiAction::Load(LoadRequest::Sessions));
     menu
@@ -138,15 +186,23 @@ pub fn sessions_menu(sessions: &[nexus_agent::SessionMeta]) -> Menu {
 /// First-run onboarding menu, shown when no models are configured yet.
 pub fn welcome_menu() -> Menu {
     let items = vec![
-        MenuItem::new("Run /setup (recommended)", UiAction::RunCommand("setup".into()))
+        MenuItem::new(
+            "Run /setup (recommended)",
+            UiAction::RunDefaultCommand("setup".into()),
+        )
             .detail("detects local runtimes (Ollama / llama.cpp), your Codex session, and writes a starter config"),
         MenuItem::new("Connect a provider", UiAction::Load(LoadRequest::Login))
             .detail("sign in with ChatGPT (Codex), enter an API key, or point at a local server"),
-        MenuItem::new("Just look around", UiAction::RunCommand("help".into()))
+        MenuItem::new(
+            "Just look around",
+            UiAction::RunDefaultCommand("help".into()),
+        )
             .detail("keys and commands — you can run /setup any time"),
     ];
-    let mut menu =
-        Menu::new(format!("Welcome to {}", brand::MARK), items).branded(BrandVariant::Compact);
+    let mut menu = Menu::new(format!("Welcome to {}", brand::MARK), items)
+        .id("welcome")
+        .route("/welcome")
+        .branded(BrandVariant::Compact);
     menu.hint = "Enter select · Esc dismiss".into();
     menu
 }
@@ -206,7 +262,9 @@ pub fn init_menu(plan: &nexus_app::services::InitPlan) -> Menu {
             .detail("runs git init in the exact invocation directory; avoids nested repos"),
         );
     }
-    Menu::new("initialize project", items).hint("Preview and confirm mutations · Esc close")
+    Menu::new("initialize project", items)
+        .route("/init")
+        .hint("Preview and confirm mutations · Esc close")
 }
 
 // --------------------------------------------------------------------- login
@@ -225,11 +283,56 @@ pub fn login_menu(entries: &[ProviderEntry]) -> Menu {
             item
         })
         .collect();
-    let mut menu = Menu::new(format!("{} · connect provider", brand::MARK), items)
+    let mut menu = Menu::new(format!("{} · provider login", brand::MARK), items)
         .branded(BrandVariant::Compact)
-        .searchable();
-    menu.hint = "Enter opens the provider's auth flow · r refresh · Esc close".into();
+        .id("provider-login")
+        .route("/login")
+        .searchable()
+        .empty_message("no authentication providers are available");
+    menu.hint = "Enter opens authentication · Ctrl+R refresh · Esc close".into();
     menu.on_refresh = Some(UiAction::Load(LoadRequest::Login));
+    menu
+}
+
+/// Endpoint/runtime connections are separate from provider authentication.
+/// Both views are sourced from the same provider catalog.
+pub fn connect_menu(entries: &[ProviderEntry]) -> Menu {
+    let mut items: Vec<MenuItem> = entries
+        .iter()
+        .filter(|entry| entry.local || entry.id.starts_with("custom:") || entry.endpoint.is_some())
+        .map(|entry| {
+            let endpoint = entry.endpoint.as_deref().unwrap_or("not configured");
+            let mut item = MenuItem::new(
+                format!("{} {}", entry.marker(), entry.label),
+                UiAction::ProbeProvider(entry.id.clone()),
+            )
+            .id(format!("connection:{}", entry.id))
+            .category(if entry.local { "local" } else { "remote" })
+            .badge(if entry.local { "runtime" } else { "endpoint" })
+            .detail(format!("{} · {endpoint}", entry.auth_state));
+            if !entry.implemented {
+                item = item.disabled("not implemented in this build");
+            }
+            item
+        })
+        .collect();
+    items.push(
+        MenuItem::new(
+            "＋ Custom endpoint…",
+            UiAction::RunCommand("__custom_endpoint".into()),
+        )
+        .id("connection:create-custom")
+        .category("custom")
+        .detail("OpenAI-compatible, Ollama-compatible, or llama.cpp-compatible runtime"),
+    );
+    let mut menu = Menu::new(format!("{} · endpoint connections", brand::MARK), items)
+        .branded(BrandVariant::Compact)
+        .id("provider-connect")
+        .route("/connect")
+        .searchable()
+        .sorted("label", MenuSortDirection::Ascending);
+    menu.hint = "Enter inspect/test · Ctrl+R refresh · Esc close".into();
+    menu.on_refresh = Some(UiAction::Load(LoadRequest::Connect));
     menu
 }
 
@@ -389,12 +492,54 @@ pub fn provider_key_input(provider: &str) -> SecretInput {
 
 // --------------------------------------------------------------------- model
 
+#[derive(Debug, Clone)]
+pub struct ConfiguredModelCard {
+    pub name: String,
+    pub provider: String,
+    pub model_id: String,
+    pub capabilities: Option<nexus_models::ModelCapabilities>,
+    pub availability: String,
+}
+
+fn capability_marker(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn configured_model_detail(card: &ConfiguredModelCard) -> String {
+    let Some(capabilities) = card.capabilities.as_ref() else {
+        return format!(
+            "model {} · {} · capabilities unavailable until the provider is repaired",
+            card.model_id, card.availability
+        );
+    };
+    format!(
+        "model {} · {} · context {} · tools {} · structured {} · schema {} · vision {} · streaming {} · {:?} · privacy {:?} · latency {:?} · cost {:?} · fallback {:?}",
+        card.model_id,
+        card.availability,
+        capabilities.context_window,
+        capability_marker(capabilities.native_tool_calls),
+        capability_marker(capabilities.structured_output),
+        capability_marker(capabilities.json_schema),
+        capability_marker(capabilities.image_input),
+        capability_marker(capabilities.streaming),
+        capabilities.locality,
+        capabilities.privacy,
+        capabilities.latency_class,
+        capabilities.cost_class,
+        capabilities.fallback_eligibility,
+    )
+}
+
 /// The /model picker: every model available RIGHT NOW, across configured
 /// entries, the codex plan (when connected), and reachable local runtimes.
 /// Providers that need connecting first point at /connect instead of faking
 /// availability.
 pub fn model_menu(
-    configured: &[(String, String, String)], // (config name, provider, model id)
+    configured: &[ConfiguredModelCard],
     entries: &[ProviderEntry],
     active_model: &str,
 ) -> Menu {
@@ -402,19 +547,25 @@ pub fn model_menu(
 
     // Configured entries first — Enter pins routing (codex ones go through
     // the effort picker).
-    for (name, provider, model_id) in configured {
-        let mark = if name == active_model { "●" } else { " " };
-        let action = if provider == "codex" {
+    for card in configured {
+        let mark = if card.name == active_model {
+            "●"
+        } else {
+            " "
+        };
+        let action = if card.provider == "codex" {
             UiAction::PickCodexEffort {
-                model_id: model_id.clone(),
+                model_id: card.model_id.clone(),
             }
         } else {
-            UiAction::SelectModel(name.clone())
+            UiAction::SelectModel(card.name.clone())
         };
         items.push(
-            MenuItem::new(format!("{mark} {name}"), action)
-                .badge(provider.clone())
-                .detail(format!("model {model_id} — Enter pins routing")),
+            MenuItem::new(format!("{mark} {}", card.name), action)
+                .id(format!("model:{}", card.name))
+                .category(card.provider.clone())
+                .badge(card.provider.clone())
+                .detail(configured_model_detail(card)),
         );
     }
 
@@ -425,7 +576,7 @@ pub fn model_menu(
         for m in &plan {
             if configured
                 .iter()
-                .any(|(_, p, id)| p == "codex" && id == &m.id)
+                .any(|card| card.provider == "codex" && card.model_id == m.id)
             {
                 continue;
             }
@@ -457,7 +608,7 @@ pub fn model_menu(
     for e in entries.iter().filter(|e| e.local) {
         if let EndpointState::Connected { models, .. } = &e.state {
             for m in models {
-                if configured.iter().any(|(_, _, id)| id == &m.id) {
+                if configured.iter().any(|card| card.model_id == m.id) {
                     continue;
                 }
                 items.push(
@@ -499,8 +650,10 @@ pub fn model_menu(
         )
         .detail(format!("currently active: {active_model}")),
     );
-    let mut menu = Menu::new("model — pick the active model", items).searchable();
-    menu.hint = "Enter select · r refresh · Esc close · /connect adds providers".into();
+    let mut menu = Menu::new("model — pick the active model", items)
+        .route("/model")
+        .searchable();
+    menu.hint = "Enter select · Ctrl+R refresh · Esc close · /connect adds providers".into();
     menu.on_refresh = Some(UiAction::Load(LoadRequest::Model));
     menu
 }
@@ -526,7 +679,8 @@ pub fn effort_menu(model: &nexus_app::codex::PlanModel) -> Menu {
             item
         })
         .collect();
-    let mut menu = Menu::new(format!("{} — reasoning effort", model.display_name), items);
+    let mut menu = Menu::new(format!("{} — reasoning effort", model.display_name), items)
+        .parent("/model", UiAction::Load(LoadRequest::Model));
     menu.hint = "Enter selects model + effort · Esc back".into();
     menu
 }
@@ -759,7 +913,9 @@ pub fn agents_menu(active: &str, custom: &[nexus_agent::CustomAgentDefinition]) 
             definition.description
         ))
     }));
-    Menu::new("agents", items).hint("Enter sets the active agent for new sessions · Esc close")
+    Menu::new("agents", items)
+        .route("/agent")
+        .hint("Enter sets the active agent for new sessions · Esc close")
 }
 
 pub fn personas_menu(personas: &[nexus_memory::PersonaRecord], selected: Option<&str>) -> Menu {
@@ -799,65 +955,333 @@ pub fn personas_menu(personas: &[nexus_memory::PersonaRecord], selected: Option<
         ))
     }));
     Menu::new("persona", items)
+        .route("/persona")
         .branded(BrandVariant::Compact)
         .searchable()
         .hint("Enter selects for new sessions · create/clone/edit/delete also work as commands")
 }
 
-pub fn profile_menu(active_profile: &str, traits: &[nexus_memory::ProfileTrait]) -> Menu {
-    let mut items = vec![
+/// Structured profile cards backed by the canonical harness repository.
+pub fn profile_cards_menu(
+    profiles: &[(nexus_core::harness::UserProfile, usize, usize)],
+    active_profile_id: Option<&str>,
+    pending_conflicts: usize,
+) -> Menu {
+    let mut items = vec![MenuItem::new(
+        "Create profile card…",
+        UiAction::InsertInput("/profile select new-name".into()),
+    )
+    .id("profile:create")
+    .category("actions")
+    .detail("creates a separate profile; existing people are never silently merged")];
+    items.extend(profiles.iter().map(|(profile, fact_count, memory_count)| {
+        let selected = active_profile_id == Some(profile.id.as_str());
         MenuItem::new(
-            format!("Active profile: {active_profile}"),
-            UiAction::InsertInput(format!("/profile select {active_profile}")),
+            format!(
+                "{} {}",
+                if selected { "●" } else { " " },
+                profile
+                    .preferred_name
+                    .as_deref()
+                    .unwrap_or(&profile.display_name)
+            ),
+            UiAction::SelectHarnessProfile(profile.id.clone()),
         )
-        .badge("selected")
-        .detail("edit the inserted name to switch or create a profile namespace"),
+        .id(profile.id.clone())
+        .category("profiles")
+        .badge(format!("{:?}", profile.status).to_ascii_lowercase())
+        .detail(format!(
+            "{} fact(s) · {} linked memory record(s) · aliases {} · isolation explicit",
+            fact_count,
+            memory_count,
+            if profile.aliases.is_empty() {
+                "none".into()
+            } else {
+                profile.aliases.join(", ")
+            }
+        ))
+    }));
+    Menu::new(
+        format!("profile cards · {pending_conflicts} conflict(s) pending"),
+        items,
+    )
+    .id("profile-dashboard")
+    .route("/profile")
+    .branded(BrandVariant::Compact)
+    .searchable()
+    .hint("/ search · Enter action · Tab details · ? controls · Esc close")
+}
+
+pub fn memory_dashboard(records: &[nexus_core::harness::MemoryRecord]) -> Menu {
+    let mut items = Vec::new();
+    items.extend(records.iter().map(|record| {
         MenuItem::new(
-            "Add explicit workflow preference…",
-            UiAction::InsertInput("/profile add key value".into()),
+            record.content.lines().next().unwrap_or("(empty memory)"),
+            UiAction::ShowHarnessMemory(Box::new(record.clone())),
         )
-        .detail("explicit low-risk workflow traits are approved automatically"),
-        MenuItem::new(
-            "Review RSI proposals",
-            UiAction::RunCommand("profile proposals".into()),
-        )
-        .detail("skills, tools, connectors, config, and source changes require review"),
-    ];
-    for record in traits {
-        if record.status == "pending" {
-            items.push(
-                MenuItem::new(
-                    format!("Approve {} = {}", record.trait_key, record.trait_value),
-                    UiAction::RunCommand(format!("profile approve {}", record.id)),
-                )
-                .badge(format!("{:.0}%", record.confidence * 100.0))
-                .detail(format!(
-                    "{} · evidence: {}",
-                    record.sensitivity, record.evidence
-                )),
-            );
-            items.push(
-                MenuItem::new(
-                    format!("Reject {}", record.trait_key),
-                    UiAction::RunCommand(format!("profile reject {}", record.id)),
-                )
-                .badge("pending"),
-            );
-        } else if record.status == "approved" {
-            items.push(
-                MenuItem::new(
-                    format!("{} = {}", record.trait_key, record.trait_value),
-                    UiAction::RunCommand(format!("profile delete {}", record.id)),
-                )
-                .badge("approved")
-                .detail("Enter opens a deletion confirmation"),
-            );
-        }
-    }
-    Menu::new("profile traits", items)
-        .branded(BrandVariant::Compact)
+        .id(record.id.clone())
+        .category(format!("{:?}", record.memory_type).to_ascii_lowercase())
+        .badge(format!("{:?}", record.status).to_ascii_lowercase())
+        .detail(format!(
+            "scope {} · source {:?} · sensitivity {} · confidence {:.0}% · importance {:.0}% · created {}{}",
+            memory_scope_label(&record.scope),
+            record.source_type,
+            record.sensitivity,
+            record.confidence * 100.0,
+            record.importance * 100.0,
+            record.created_at,
+            record
+                .expires_at
+                .as_ref()
+                .map(|expiry| format!(" · expires {expiry}"))
+                .unwrap_or_default()
+        ))
+    }));
+    Menu::new("memory dashboard", items)
+        .id("memory-dashboard")
+        .route("/memory")
         .searchable()
-        .hint("Pending/sensitive traits require review · Enter action · Esc close")
+        .hint("/ search · Enter details/action · Space select · Ctrl+R refresh · Esc close")
+}
+
+fn memory_scope_label(scope: &nexus_core::harness::MemoryScope) -> String {
+    if scope.global {
+        return "global".into();
+    }
+    [
+        ("profile", scope.profile_id.as_deref()),
+        ("workspace", scope.workspace_id.as_deref()),
+        ("project", scope.project_id.as_deref()),
+        ("session", scope.session_id.as_deref()),
+        ("goal", scope.goal_id.as_deref()),
+        ("plan", scope.plan_id.as_deref()),
+        ("task", scope.task_id.as_deref()),
+        ("agent", scope.agent_id.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(kind, value)| value.map(|value| format!("{kind}:{value}")))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+pub fn plan_workspace(
+    work: Option<&nexus_core::orchestration::WorkBreakdown>,
+    has_session: bool,
+) -> Menu {
+    let create = MenuItem::new(
+        "Create plan from objective…",
+        UiAction::InsertInput("/plan create ".into()),
+    )
+    .id("plan:create")
+    .category("actions");
+    let create = if has_session {
+        create
+    } else {
+        create.disabled("start or attach a session before creating a plan")
+    };
+    let revise = MenuItem::new(
+        "Generate revised proposal…",
+        UiAction::InsertInput("/plan replan ".into()),
+    )
+    .id("plan:revise")
+    .category("actions");
+    let revise = if has_session {
+        revise
+    } else {
+        revise.disabled("start or attach a session before revising a plan")
+    };
+    let mut items = vec![
+        create,
+        revise,
+        MenuItem::new("Open task graph", UiAction::RunCommand("task".into()))
+            .id("plan:tasks")
+            .category("work"),
+    ];
+    if let Some(work) = work {
+        items.insert(
+            0,
+            MenuItem::new(
+                format!("Active plan {} v{}", work.id, work.version),
+                UiAction::RunCommand("plan verify".into()),
+            )
+            .id(work.id.as_str())
+            .category("plan")
+            .badge(if work.paused {
+                "paused"
+            } else if work.approved {
+                "approved"
+            } else {
+                "under review"
+            })
+            .detail(format!(
+                "{} · current phase {} · next {} · {} stage(s)",
+                work.objective,
+                work.current_stage.as_deref().unwrap_or("not started"),
+                work.next_stage.as_deref().unwrap_or("none"),
+                work.stages.len()
+            )),
+        );
+        items.push(
+            MenuItem::new(
+                if work.approved {
+                    "Start / continue execution"
+                } else {
+                    "Review and approve plan"
+                },
+                UiAction::RunCommand("plan approve".into()),
+            )
+            .id("plan:approve")
+            .category("approval"),
+        );
+        items.push(
+            MenuItem::new(
+                if work.paused {
+                    "Resume plan"
+                } else {
+                    "Pause plan"
+                },
+                UiAction::RunCommand(if work.paused {
+                    "plan resume".into()
+                } else {
+                    "plan pause".into()
+                }),
+            )
+            .id("plan:pause")
+            .category("controls"),
+        );
+        items.push(
+            MenuItem::new(
+                "Revision history",
+                UiAction::RunCommand("plan history".into()),
+            )
+            .id("plan:history")
+            .category("inspection"),
+        );
+        items.push(
+            MenuItem::new("Export plan", UiAction::RunCommand("plan export".into()))
+                .id("plan:export")
+                .category("inspection"),
+        );
+    }
+    Menu::new("planning workspace", items)
+        .id("plan-workspace")
+        .route("/plan")
+        .searchable()
+        .hint("Review assumptions, phases, risks, gates, and rollback before approval")
+}
+
+pub fn tasks_menu(tasks: &[nexus_core::orchestration::BackgroundTask], has_session: bool) -> Menu {
+    let create_reader = MenuItem::new(
+        "Create read-only task…",
+        UiAction::InsertInput("/task create reader title objective".into()),
+    )
+    .id("task:create-reader")
+    .category("actions");
+    let create_reader = if has_session {
+        create_reader
+    } else {
+        create_reader.disabled("start or attach a session before creating a task")
+    };
+    let create_writer = MenuItem::new(
+        "Create writer task…",
+        UiAction::InsertInput("/task create writer title objective".into()),
+    )
+    .id("task:create-writer")
+    .category("actions")
+    .detail("writer tasks require confirmation and an isolated worktree");
+    let create_writer = if has_session {
+        create_writer
+    } else {
+        create_writer.disabled("start or attach a session before creating a task")
+    };
+    let manage = MenuItem::new(
+        "Manage task by id…",
+        UiAction::InsertInput("/task show ".into()),
+    )
+    .id("task:manage")
+    .category("actions")
+    .detail("pause, resume, retry, cancel, validate, or inspect artifacts");
+    let manage = if has_session {
+        manage
+    } else {
+        manage.disabled("start or attach a session before managing tasks")
+    };
+    let mut items = vec![create_reader, create_writer, manage];
+    items.extend(tasks.iter().map(|task| {
+        MenuItem::new(
+            task.title.clone(),
+            UiAction::RunCommand(format!("task show {}", task.id)),
+        )
+        .id(task.id.as_str())
+        .category(task.status.as_str())
+        .badge(if task.writer { "writer" } else { "reader" })
+        .detail(format!(
+            "{} · owner {} · attempts {} · plan {} · stage {}",
+            task.status.as_str(),
+            task.owner,
+            task.attempts,
+            task.plan_id.as_deref().unwrap_or("none"),
+            task.stage_id.as_deref().unwrap_or("none")
+        ))
+    }));
+    Menu::new("task graph", items)
+        .id("task-graph")
+        .route("/task")
+        .searchable()
+        .hint("/ search · Enter inspect · dependency and write-conflict checks are enforced")
+}
+
+pub fn subagents_menu(runs: &[nexus_core::orchestration::AgentRun], has_session: bool) -> Menu {
+    let create = MenuItem::new(
+        "Create bounded subagent…",
+        UiAction::InsertInput("/subagents spawn role assignment".into()),
+    )
+    .id("subagent:create")
+    .category("actions")
+    .detail("configure role, context, model, tools, budgets, and output contract");
+    let create = if has_session {
+        create
+    } else {
+        create.disabled("start or attach a session before creating a subagent")
+    };
+    let manage = MenuItem::new(
+        "Inspect or steer by id…",
+        UiAction::InsertInput("/subagents show ".into()),
+    )
+    .id("subagent:manage")
+    .category("actions");
+    let manage = if has_session {
+        manage
+    } else {
+        manage.disabled("start or attach a session before managing subagents")
+    };
+    let mut items = vec![create, manage];
+    items.extend(runs.iter().map(|run| {
+        MenuItem::new(
+            format!("{} · {}", run.role, run.objective),
+            UiAction::RunCommand(format!("subagents show {}", run.id)),
+        )
+        .id(run.id.as_str())
+        .category(run.status.as_str())
+        .badge(format!("depth {}", run.depth))
+        .detail(format!(
+            "model {} · task {} · unread events {} · budget {} action(s)",
+            run.model,
+            run.task_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "none".into()),
+            run.unread_events,
+            run.budget
+                .max_actions
+                .map_or_else(|| "unbounded".into(), |limit| limit.to_string())
+        ))
+    }));
+    Menu::new("subagent control", items)
+        .id("subagent-control")
+        .route("/subagents")
+        .searchable()
+        .hint("Results require review before promotion; circular delegation is rejected")
 }
 
 // --------------------------------------------------------- permissions & sandbox
@@ -894,6 +1318,7 @@ pub fn permissions_menu(active_mode: &str) -> Menu {
         .detail("every decision, allow/deny lists, and denied paths".to_string()),
     );
     Menu::new("permissions — approval mode", items)
+        .route("/permissions")
         .hint("Enter applies and persists · destructive actions always ask · Esc close")
 }
 
@@ -966,7 +1391,9 @@ pub fn sandbox_menu(cfg: &nexus_core::config::SandboxConfig) -> Menu {
     } else {
         "sandbox — DISABLED"
     };
-    Menu::new(title, items).hint("Enter applies and persists · Esc close")
+    Menu::new(title, items)
+        .route("/sandbox")
+        .hint("Enter applies and persists · Esc close")
 }
 
 // --------------------------------------------------------------------- theme
@@ -982,7 +1409,9 @@ pub fn theme_menu(active: &str) -> Menu {
             )
         })
         .collect();
-    Menu::new("theme", items).hint("Enter applies immediately and persists · Esc close")
+    Menu::new("theme", items)
+        .route("/theme")
+        .hint("Enter applies immediately and persists · Esc close")
 }
 
 pub fn thinking_menu(enabled: bool) -> Menu {
@@ -999,6 +1428,7 @@ pub fn thinking_menu(enabled: bool) -> Menu {
         .detail("show final answers, approvals, and errors only"),
     ];
     Menu::new("thinking visibility", items)
+        .route("/thinking")
         .hint("Hidden chain-of-thought is never requested or displayed · Enter applies · Esc close")
 }
 
@@ -1029,7 +1459,9 @@ pub fn details_menu(active: nexus_core::timeline::TranscriptDetail) -> Menu {
         .detail(detail)
     })
     .collect();
-    Menu::new("timeline details", items).hint("Enter applies · Esc close")
+    Menu::new("timeline details", items)
+        .route("/details")
+        .hint("Enter applies · Esc close")
 }
 
 pub fn transcript_menu(active: nexus_core::timeline::TranscriptFilter) -> Menu {
@@ -1051,7 +1483,9 @@ pub fn transcript_menu(active: nexus_core::timeline::TranscriptFilter) -> Menu {
         )
     })
     .collect();
-    Menu::new("timeline filter", items).hint("Enter applies · Esc close")
+    Menu::new("timeline filter", items)
+        .route("/transcript")
+        .hint("Enter applies · Esc close")
 }
 
 pub fn config_menu() -> Menu {
@@ -1083,6 +1517,7 @@ pub fn config_menu() -> Menu {
             .detail("effective layered configuration and managed file paths"),
         ],
     )
+    .route("/config")
     .branded(BrandVariant::Compact)
     .hint("Managed choices are written to override layers; hand-written config is preserved")
 }
@@ -1109,6 +1544,7 @@ pub fn connectors_menu(candidates: &[nexus_app::connectors::ConnectorCandidate])
         })
         .collect();
     Menu::new("connector catalog", items)
+        .route("/connector")
         .branded(BrandVariant::Compact)
         .searchable()
         .hint("Enter previews confirmation · credentials require a separate consented import")
@@ -1163,6 +1599,7 @@ pub fn branches_menu(branches: &[nexus_app::gitx::BranchInfo]) -> Menu {
         })
     }));
     Menu::new("local git branches", items)
+        .route("/branch")
         .searchable()
         .hint("Push/pull/PR operations stay in connector workflows")
 }

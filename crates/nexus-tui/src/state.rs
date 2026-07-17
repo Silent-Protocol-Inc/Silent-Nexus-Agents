@@ -92,7 +92,15 @@ pub struct State {
     pub detail_level: TranscriptDetail,
     pub collapsed_cards: std::collections::BTreeSet<String>,
     pub selected_event: Option<usize>,
-    pub live_assistant_event: Option<String>,
+    /// Streaming assistant cards, keyed by logical turn. A turn can update
+    /// only its own card, even if an older task drains after a new turn starts.
+    pub live_assistant_events: std::collections::BTreeMap<String, String>,
+    /// Terminal assistant cards, keyed by logical turn. This makes terminal
+    /// delivery idempotent without comparing answer text across turns.
+    pub terminal_events: std::collections::BTreeMap<String, String>,
+    /// Last accepted UI envelope sequence for each turn.
+    pub turn_sequences: std::collections::BTreeMap<String, u64>,
+    pub active_turn_id: Option<TurnId>,
     pub live_tool_events: std::collections::BTreeMap<String, String>,
     pub earliest_sequence: Option<u64>,
     pub last_background_sequence: u64,
@@ -166,7 +174,10 @@ impl State {
             detail_level: TranscriptDetail::Compact,
             collapsed_cards: std::collections::BTreeSet::new(),
             selected_event: None,
-            live_assistant_event: None,
+            live_assistant_events: std::collections::BTreeMap::new(),
+            terminal_events: std::collections::BTreeMap::new(),
+            turn_sequences: std::collections::BTreeMap::new(),
+            active_turn_id: None,
             live_tool_events: std::collections::BTreeMap::new(),
             earliest_sequence: None,
             last_background_sequence: 0,
@@ -248,21 +259,18 @@ impl State {
         );
     }
 
+    #[cfg(test)]
     pub fn user(&mut self, text: impl Into<String>) {
+        self.user_for_turn(TurnId::generate(), text);
+    }
+
+    pub fn user_for_turn(&mut self, turn_id: TurnId, text: impl Into<String>) {
         let text = text.into();
-        self.push_local_event(
+        self.push_local_event_for_turn(
+            turn_id,
             TimelineStatus::Completed,
             text.lines().next().unwrap_or("").to_string(),
             TimelineKind::UserMessage { text },
-        );
-    }
-
-    pub fn assistant(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        self.push_local_event(
-            TimelineStatus::Completed,
-            text.lines().next().unwrap_or("").to_string(),
-            TimelineKind::FinalAnswer { text },
         );
     }
 
@@ -352,7 +360,10 @@ impl State {
             .max()
             .unwrap_or(0);
         self.selected_event = self.timeline.len().checked_sub(1);
-        self.live_assistant_event = None;
+        self.live_assistant_events.clear();
+        self.terminal_events.clear();
+        self.turn_sequences.clear();
+        self.active_turn_id = None;
         self.live_tool_events.clear();
         self.scroll = 0;
         self.follow = true;
@@ -416,6 +427,16 @@ impl State {
         summary: String,
         kind: TimelineKind,
     ) -> String {
+        self.push_local_event_for_turn(TurnId::generate(), status, summary, kind)
+    }
+
+    pub fn push_local_event_for_turn(
+        &mut self,
+        turn_id: TurnId,
+        status: TimelineStatus,
+        summary: String,
+        kind: TimelineKind,
+    ) -> String {
         let sequence = self
             .timeline
             .last()
@@ -423,7 +444,7 @@ impl State {
             .unwrap_or(1);
         let mut event = TimelineEvent::new(
             SessionId::from(self.session_id.as_deref().unwrap_or("local")),
-            TurnId::from("ui"),
+            turn_id,
             TraceId::from("ui"),
             SpanId::generate(),
             None,

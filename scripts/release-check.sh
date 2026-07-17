@@ -4,6 +4,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+VERSION="$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])' </dev/null)"
+TARGET="x86_64-unknown-linux-gnu"
+ARCHIVE="dist/silent-nexus-${VERSION}-${TARGET}.tar.gz"
+CLEAN_ARCHIVE="dist/clean-checkout/silent-nexus-${VERSION}-${TARGET}.tar.gz"
 
 for command in cargo rustc git python3 sha256sum tar gzip; do
   command -v "$command" >/dev/null 2>&1 || {
@@ -32,20 +36,10 @@ git diff --cached --quiet
   echo "error: release checks require a clean tree" >&2
   exit 1
 }
-[[ -z "$(git remote)" ]] || {
-  echo "error: release repository must not have a configured remote" >&2
-  exit 1
-}
 [[ "$(git branch --show-current)" == "main" ]] || {
   echo "error: release must be checked on main" >&2
   exit 1
 }
-[[ "$(git rev-list --count HEAD)" -eq 2 ]] || {
-  echo "error: the certified repository must contain exactly the baseline and release commits" >&2
-  exit 1
-}
-[[ "$(git log -1 --format=%s HEAD~1)" == "chore: import Silent Nexus 0.2.0 baseline" ]]
-[[ "$(git log -1 --format=%s HEAD)" == "feat!: harden Silent Nexus for 1.0.0" ]]
 
 for ignored in \
   target/.release-ignore-probe \
@@ -60,11 +54,13 @@ for ignored in \
     exit 1
   }
 done
-git diff --quiet HEAD~1 -- \
-  migrations/0001_initial.sql \
-  migrations/0002_interactive_agent.sql \
-  migrations/0003_session_approval_grants.sql \
-  migrations/0004_orchestration_timeline.sql
+sha256sum -c <<'EOF'
+2e539861a8f1c962a0b976012277eaf86f268fef675c94b1ef114d2670c6b5ef  migrations/0001_initial.sql
+fb08343841693564462a9d9c3e53b7da21171e0ef5c1a044c632ece773edd263  migrations/0002_interactive_agent.sql
+cb126d62a9d6490b5ca614b06ccc8b3886256dad07c652bb635d4d5807159c0e  migrations/0003_session_approval_grants.sql
+f699ea59d2940f7e0c6435be7af6f72a74e6829720297b1b0d2500f4f965615c  migrations/0004_orchestration_timeline.sql
+d09f95133e1858237e55132784d4f6a2bdd5ed6260a6438439a70c452ce1f4d9  migrations/0005_production_hardening.sql
+EOF
 
 export SNX_BUILD_COMMIT="$(git rev-parse --verify HEAD)"
 export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
@@ -85,28 +81,27 @@ scripts/generate-spdx.py target/silent-nexus.spdx.json
 scripts/validate-spdx.py target/silent-nexus.spdx.json
 scripts/package-release.sh
 FIRST_ARCHIVE_SHA="$(
-  sha256sum dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}'
+  sha256sum "$ARCHIVE" | awk '{print $1}'
 )"
 scripts/package-release.sh
 SECOND_ARCHIVE_SHA="$(
-  sha256sum dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}'
+  sha256sum "$ARCHIVE" | awk '{print $1}'
 )"
 [[ "$FIRST_ARCHIVE_SHA" == "$SECOND_ARCHIVE_SHA" ]] || {
   echo "error: release archive is not deterministic" >&2
   exit 1
 }
-scripts/validate-release.sh dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+scripts/validate-release.sh "$ARCHIVE"
 scripts/clean-checkout-smoke.sh
 MAIN_ARCHIVE_SHA="$(
-  sha256sum dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}'
+  sha256sum "$ARCHIVE" | awk '{print $1}'
 )"
 CLEAN_ARCHIVE_SHA="$(
-  sha256sum dist/clean-checkout/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz \
-    | awk '{print $1}'
+  sha256sum "$CLEAN_ARCHIVE" | awk '{print $1}'
 )"
 [[ "$MAIN_ARCHIVE_SHA" == "$CLEAN_ARCHIVE_SHA" ]] || {
   echo "error: clean-checkout release archive differs from the primary archive" >&2
   exit 1
 }
 
-echo "release check: every local 1.0.0 production gate passed"
+echo "release check: every local $VERSION production gate passed"

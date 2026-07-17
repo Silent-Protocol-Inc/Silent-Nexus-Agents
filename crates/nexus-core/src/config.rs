@@ -321,6 +321,26 @@ pub struct LimitsConfig {
     pub max_retries: u32,
     /// Maximum identical tool calls before loop detection stops the turn.
     pub max_repeated_calls: u32,
+    /// Maximum provider requests in one foreground turn.
+    pub max_model_calls_per_turn: u32,
+    /// Maximum tool executions in one foreground turn.
+    pub max_tool_calls_per_turn: u32,
+    /// Maximum recoverable failures before the turn stops.
+    pub max_failures_per_turn: u32,
+    /// Aggregate input and output token ceiling per turn.
+    pub max_tokens_per_turn: usize,
+    /// Provider-reported monetary ceiling in micro-units per turn. Zero
+    /// disables cost enforcement; non-zero fails closed for adapters that do
+    /// not expose monetary usage.
+    pub max_cost_micros_per_turn: u64,
+    /// Foreground turn wall-clock ceiling in minutes.
+    pub max_turn_runtime_min: u32,
+    /// Maximum durable memory writes initiated by one turn.
+    pub max_memory_writes_per_turn: u32,
+    /// Maximum subagents created by one root run.
+    pub max_subagents_per_run: u32,
+    /// Maximum delegation ancestry depth.
+    pub max_recursion_depth: u8,
     /// Default per-goal step budget.
     pub goal_step_budget: u32,
     /// Default per-goal wall-clock budget in minutes.
@@ -335,6 +355,15 @@ impl Default for LimitsConfig {
             max_steps_per_turn: 24,
             max_retries: 3,
             max_repeated_calls: 3,
+            max_model_calls_per_turn: 24,
+            max_tool_calls_per_turn: 48,
+            max_failures_per_turn: 6,
+            max_tokens_per_turn: 250_000,
+            max_cost_micros_per_turn: 0,
+            max_turn_runtime_min: 30,
+            max_memory_writes_per_turn: 8,
+            max_subagents_per_run: 8,
+            max_recursion_depth: 2,
             goal_step_budget: 200,
             goal_runtime_budget_min: 120,
             completion_reserve_tokens: 1024,

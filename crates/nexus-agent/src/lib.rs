@@ -44,6 +44,13 @@ pub struct AgentRuntime {
     pub audit: AuditLog,
     pub sessions: SessionStore,
     pub redactor: Arc<Redactor>,
+    /// Profile cards, profile-only memory, and explicitly enabled global
+    /// harness patterns live outside any one workspace database.
+    pub global_store: Store,
+    /// Canonical state scoped to the active workspace.
     pub store: Store,
     pub limits: TurnLimits,
+    /// Current delegation nesting. The main agent starts at zero and each
+    /// orchestrated child receives a runtime incremented by exactly one.
+    pub recursion_depth: u8,
 }

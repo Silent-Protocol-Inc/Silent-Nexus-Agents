@@ -3,6 +3,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="$(awk '
+  $0 == "[workspace.package]" { in_package = 1; next }
+  in_package && /^\[/ { exit }
+  in_package && /^version = "/ {
+    value = $0
+    sub(/^version = "/, "", value)
+    sub(/".*$/, "", value)
+    print value
+    exit
+  }
+' "$ROOT/Cargo.toml")"
+[[ -n "$VERSION" ]] || { echo "error: workspace version missing from Cargo.toml" >&2; exit 1; }
 MODE="user"
 PREFIX=""
 BINARY=""
@@ -134,8 +146,8 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     echo "error: --binary must name an executable regular file: $BINARY" >&2
     exit 1
   }
-  "$BINARY" --version | grep -F "1.0.0" >/dev/null || {
-    echo "error: the supplied binary is not Silent Nexus 1.0.0" >&2
+  "$BINARY" --version | grep -F "$VERSION" >/dev/null || {
+    echo "error: the supplied binary is not Silent Nexus $VERSION" >&2
     exit 1
   }
 fi

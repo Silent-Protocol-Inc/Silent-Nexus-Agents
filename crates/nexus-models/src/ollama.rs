@@ -178,6 +178,33 @@ impl OllamaProvider {
                 as usize,
         }
     }
+
+    fn parse_stream_line(line: &str) -> Result<Vec<StreamEvent>> {
+        let value = serde_json::from_str::<Value>(line).map_err(|error| NexusError::Provider {
+            provider: "ollama".into(),
+            message: format!("invalid stream line: {error}"),
+        })?;
+        let (content, calls) = Self::parse_message(&value);
+        let mut events = Vec::new();
+        if !content.is_empty() {
+            events.push(StreamEvent::TextDelta(content));
+        }
+        for (index, call) in calls.into_iter().enumerate() {
+            events.push(StreamEvent::ToolCallDelta {
+                index,
+                id: Some(call.id),
+                name: Some(call.name),
+                arguments_delta: call.arguments,
+            });
+        }
+        if value.get("done").and_then(Value::as_bool).unwrap_or(false) {
+            events.push(StreamEvent::Done {
+                usage: Self::parse_usage(&value),
+                finish_reason: "stop".into(),
+            });
+        }
+        Ok(events)
+    }
 }
 
 #[async_trait::async_trait]
@@ -187,6 +214,7 @@ impl ModelProvider for OllamaProvider {
     }
 
     fn capabilities(&self) -> ModelCapabilities {
+        let local = crate::openai_compat::is_local_url(&self.config.base_url);
         ModelCapabilities {
             model_id: self.model.clone(),
             provider_kind: "ollama".into(),
@@ -198,10 +226,32 @@ impl ModelProvider for OllamaProvider {
             context_window: self.config.context_window,
             max_output_tokens: self.config.max_output_tokens,
             reasoning_controls: false,
-            local: crate::openai_compat::is_local_url(&self.config.base_url),
-            accelerator: crate::openai_compat::local_accelerator(
-                crate::openai_compat::is_local_url(&self.config.base_url),
-            ),
+            system_prompt: true,
+            parallel_tool_calls: false,
+            json_schema: false,
+            local,
+            accelerator: crate::openai_compat::local_accelerator(local),
+            locality: if local {
+                ModelLocality::Local
+            } else {
+                ModelLocality::Remote
+            },
+            privacy: if local {
+                ModelPrivacy::LocalOnly
+            } else {
+                ModelPrivacy::EndpointControlled
+            },
+            latency_class: ModelLatencyClass::Unknown,
+            cost_class: if local {
+                ModelCostClass::Free
+            } else {
+                ModelCostClass::Unknown
+            },
+            fallback_eligibility: if local {
+                FallbackEligibility::Eligible
+            } else {
+                FallbackEligibility::ApprovalRequired
+            },
         }
     }
 
@@ -290,35 +340,10 @@ impl ModelProvider for OllamaProvider {
                                 if line.is_empty() {
                                     continue;
                                 }
-                                match serde_json::from_str::<Value>(line) {
-                                    Ok(v) => {
-                                        let (content, calls) = OllamaProvider::parse_message(&v);
-                                        if !content.is_empty() {
-                                            events.push(StreamEvent::TextDelta(content));
-                                        }
-                                        for (i, c) in calls.into_iter().enumerate() {
-                                            events.push(StreamEvent::ToolCallDelta {
-                                                index: i,
-                                                id: Some(c.id),
-                                                name: Some(c.name),
-                                                arguments_delta: c.arguments,
-                                            });
-                                        }
-                                        if v.get("done").and_then(Value::as_bool).unwrap_or(false) {
-                                            events.push(StreamEvent::Done {
-                                                usage: OllamaProvider::parse_usage(&v),
-                                                finish_reason: "stop".into(),
-                                            });
-                                        }
-                                    }
-                                    Err(e) => {
-                                        return Some((
-                                            Err(NexusError::Provider {
-                                                provider: "ollama".into(),
-                                                message: format!("invalid stream line: {e}"),
-                                            }),
-                                            (bytes, buf, pending),
-                                        ));
+                                match OllamaProvider::parse_stream_line(line) {
+                                    Ok(mut parsed) => events.append(&mut parsed),
+                                    Err(error) => {
+                                        return Some((Err(error), (bytes, buf, pending)));
                                     }
                                 }
                             }
@@ -334,7 +359,26 @@ impl ModelProvider for OllamaProvider {
                                 (bytes, buf, pending),
                             ));
                         }
-                        None => return None,
+                        None => {
+                            // `bytes_stream` is not required to end with a
+                            // newline. Ollama and reverse proxies may close
+                            // immediately after the terminal JSON object, so
+                            // parse the remaining buffer exactly once at EOF.
+                            let line = std::mem::take(&mut buf);
+                            let line = line.trim();
+                            if line.is_empty() {
+                                return None;
+                            }
+                            match OllamaProvider::parse_stream_line(line) {
+                                Ok(mut events) => {
+                                    events.reverse();
+                                    pending = events;
+                                }
+                                Err(error) => {
+                                    return Some((Err(error), (bytes, String::new(), pending)));
+                                }
+                            }
+                        }
                     }
                 }
             },

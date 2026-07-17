@@ -15,6 +15,7 @@ pub mod claude;
 pub mod clipboard;
 pub mod codex;
 pub mod connectors;
+pub mod control_plane;
 pub mod credentials;
 pub mod exec;
 pub mod gitx;
@@ -28,6 +29,7 @@ pub mod uistate;
 pub mod worker;
 
 pub use app::App;
+pub use control_plane::{HarnessAction, HarnessActionResult, HarnessControlPlane, LearningOutcome};
 pub use exec::{apply_confirmed, execute, ConfirmedAction, Effect, ExecCtx, View};
 pub use parse::{classify, Input, SlashCommand};
 pub use report::{Item, Report, Sev};

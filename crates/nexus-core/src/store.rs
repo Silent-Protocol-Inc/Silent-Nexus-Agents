@@ -38,6 +38,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0005_production_hardening",
         include_str!("../../../migrations/0005_production_hardening.sql"),
     ),
+    (
+        "0006_adaptive_harness",
+        include_str!("../../../migrations/0006_adaptive_harness.sql"),
+    ),
+    (
+        "0007_task_dependencies",
+        include_str!("../../../migrations/0007_task_dependencies.sql"),
+    ),
 ];
 pub const MIGRATION_COUNT: usize = MIGRATIONS.len();
 
@@ -372,6 +380,24 @@ mod tests {
                     )
                     .expect("record old migration");
                 }
+                // Migration 0005 introduced checksum enforcement. A database
+                // genuinely produced by Store::migrate has checksums for every
+                // applied migration; preserve that invariant when synthesizing
+                // old migration levels for this upgrade test.
+                if applied_count >= 5 {
+                    for (name, sql) in MIGRATIONS.iter().take(applied_count) {
+                        conn.execute(
+                            "INSERT INTO migration_checksums(name,sha256,verified_at)
+                             VALUES (?1,?2,?3)",
+                            rusqlite::params![
+                                name,
+                                hex::encode(Sha256::digest(sql.as_bytes())),
+                                crate::now_rfc3339()
+                            ],
+                        )
+                        .expect("record old migration checksum");
+                    }
+                }
             }
             let store = Store::open(&path).expect("upgrade");
             let (migration_count, timeline_exists): (i64, bool) = store
@@ -498,6 +524,28 @@ mod tests {
             "session_interruptions",
             "migration_checksums",
             "timeline_fts",
+            "harness_active_contexts",
+            "harness_profiles",
+            "harness_profile_facts",
+            "harness_identity_conflicts",
+            "harness_memories",
+            "harness_persona_versions",
+            "harness_persona_assignments",
+            "harness_agent_definitions",
+            "harness_goals",
+            "harness_plans",
+            "harness_tasks",
+            "harness_task_edges",
+            "harness_subagent_specs",
+            "harness_loop_states",
+            "harness_checkpoints",
+            "harness_improvement_proposals",
+            "harness_events",
+            "harness_provider_privacy_grants",
+            "harness_model_assignments",
+            "harness_task_attempts",
+            "harness_resource_claims",
+            "harness_approval_requests",
         ] {
             let ok: bool = store
                 .with(|c| {

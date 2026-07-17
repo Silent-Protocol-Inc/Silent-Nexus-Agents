@@ -1,17 +1,17 @@
 # Release process
 
-The local release process is evidence-driven and never configures a remote,
-pushes, publishes crates, contacts model providers, or creates a hosted release.
+The local release process is evidence-driven and never pushes, publishes
+crates, contacts model providers, or creates a hosted release. A configured
+Git remote is allowed but is never used by the release scripts.
 
 ## Required state
 
 - branch `main`;
-- exactly the baseline import and release commits for the 1.0.0 certification;
 - clean worktree and index;
-- no configured Git remote;
 - Rust `1.97.0`;
-- version `1.0.0`;
-- migrations `0001` through `0004` unchanged and `0005` appended;
+- a valid workspace version in `Cargo.toml`, used for every artifact check;
+- migrations `0001` through `0005` match their certified baseline SHA-256
+  checksums and later migrations are appended;
 - `cargo-audit` and `cargo-deny` installed.
 
 Install the pinned release tools with:
@@ -46,10 +46,10 @@ blocks the tag.
 
 ## Artifact
 
-`scripts/package-release.sh` creates:
+For the workspace version `$VERSION`, `scripts/package-release.sh` creates:
 
 ```text
-dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+dist/silent-nexus-$VERSION-x86_64-unknown-linux-gnu.tar.gz
 dist/SHA256SUMS
 ```
 
@@ -61,10 +61,10 @@ Validate independently with `scripts/validate-release.sh ARCHIVE`.
 
 ## Tag and installation
 
-After every gate passes, create annotated tag `v1.0.0`. Install the exact
+After every gate passes, create annotated tag `v$VERSION`. Install the exact
 verified packaged/build binary atomically, then compare SHA-256 across build,
 package, installed file, and compatibility symlink target. Confirm root
-ownership, mode `0755`, version `1.0.0`, and no remote.
+ownership, mode `0755`, and the expected version.
 
 Rollback means restoring the previous verified binary; schema rollback requires
 the pre-upgrade backup.

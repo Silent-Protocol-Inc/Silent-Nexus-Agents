@@ -9,6 +9,7 @@ use nexus_agent::{
 };
 use nexus_core::artifacts::ArtifactStore;
 use nexus_core::config::Config;
+use nexus_core::harness::{ApprovalStatus, HarnessRepository, LoopStatus, LoopStopReason};
 use nexus_core::ids::SessionId;
 use nexus_core::redact::Redactor;
 use nexus_core::store::Store;
@@ -95,7 +96,6 @@ fn runtime_with_provider(
     provider: Arc<MockProvider>,
     dir: &std::path::Path,
 ) -> (AgentRuntime, SessionId) {
-    let store = Store::open_in_memory().expect("store");
     let mut config = Config::default();
     // Auto-approve writes at policy level would defeat approval tests; keep
     // defaults (writes ask, reads allow).
@@ -104,6 +104,17 @@ fn runtime_with_provider(
 
     let mut manager = ModelManager::from_config(&config).expect("manager");
     manager.insert("main", provider);
+    runtime_with_manager(manager, config, dir, "main")
+}
+
+fn runtime_with_manager(
+    manager: ModelManager,
+    config: Arc<Config>,
+    dir: &std::path::Path,
+    initial_model: &str,
+) -> (AgentRuntime, SessionId) {
+    let store = Store::open_in_memory().expect("store");
+    let global_store = Store::open_in_memory().expect("global store");
     let models = Arc::new(manager);
 
     let redactor = Arc::new(Redactor::new());
@@ -123,7 +134,7 @@ fn runtime_with_provider(
     };
     let sessions = SessionStore::new(store.clone());
     let session_id = sessions
-        .create(&dir.to_string_lossy(), "orchestrator", "main")
+        .create(&dir.to_string_lossy(), "orchestrator", initial_model)
         .expect("session");
     let runtime = AgentRuntime {
         models,
@@ -133,12 +144,15 @@ fn runtime_with_provider(
         audit: AuditLog::new(store.clone(), redactor.clone()),
         sessions,
         redactor,
+        global_store,
         store,
         limits: TurnLimits {
             max_steps: 12,
             max_retries: 2,
             max_repeated_calls: 2,
+            ..TurnLimits::default()
         },
+        recursion_depth: 0,
     };
     (runtime, session_id)
 }
@@ -157,6 +171,7 @@ async fn valid_tool_call_then_finish() {
         ],
         dir.path(),
     );
+    let harness = HarnessRepository::new(runtime.store.clone());
     // Mock declares native tool calls; the finish is returned as prose message.
     let agent = AgentLoop::new(runtime, AgentRole::Orchestrator);
     let outcome = agent
@@ -166,6 +181,106 @@ async fn valid_tool_call_then_finish() {
     assert_eq!(outcome.stopped_reason, "finished");
     assert!(outcome.final_message.contains("world"));
     assert_eq!(outcome.tool_calls, 1);
+    let states = harness
+        .loop_states(session.as_str(), Some(LoopStatus::Completed))
+        .expect("loop states");
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].model_call_count, 2);
+    assert_eq!(states[0].tool_call_count, 1);
+    assert_eq!(
+        states[0].stop_reason,
+        Some(LoopStopReason::AcceptanceCriteriaSatisfied)
+    );
+    let checkpoints = harness
+        .checkpoints(session.as_str(), true)
+        .expect("checkpoints");
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].status, "completed");
+    assert!(checkpoints[0].validation_state.contains_key("limits"));
+    assert!(checkpoints[0].validation_state.contains_key("counters"));
+}
+
+#[tokio::test]
+async fn pre_stream_fallback_is_locked_for_the_remainder_of_the_turn() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("hello.txt"), "world").expect("write");
+    let primary = Arc::new(
+        MockProvider::new(vec![MockScript::Error(
+            "HTTP 503 Service Unavailable".into(),
+        )])
+        .with_provider_kind("primary_mock"),
+    );
+    let fallback = Arc::new(
+        MockProvider::new(vec![
+            MockScript::ToolCall {
+                name: "fs.read_file".into(),
+                arguments: json!({"path": "hello.txt"}).to_string(),
+            },
+            MockScript::Text("fallback completed the turn".into()),
+        ])
+        .with_provider_kind("fallback_mock"),
+    );
+    let mut config = Config::default();
+    config.sandbox.backend = "process".into();
+    config.routing.simple = Some("primary".into());
+    config.routing.coding = Some("primary".into());
+    config.routing.planning = Some("primary".into());
+    config.routing.fallback = Some("fallback".into());
+    let config = Arc::new(config);
+    let mut manager = ModelManager::from_config(&config).expect("manager");
+    manager.insert("primary", primary.clone());
+    manager.insert("fallback", fallback.clone());
+    let (runtime, session) = runtime_with_manager(manager, config, dir.path(), "primary");
+    let harness = HarnessRepository::new(runtime.store.clone());
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let outcome = AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .with_events(events_tx)
+        .run(&session, "read hello.txt", Arc::new(AutoApprove))
+        .await
+        .expect("run");
+
+    assert_eq!(outcome.stopped_reason, "finished");
+    assert_eq!(primary.recorded_requests().len(), 1);
+    assert_eq!(fallback.recorded_requests().len(), 2);
+    let mut fallback_events = 0;
+    while let Ok(event) = events_rx.try_recv() {
+        if matches!(event, LoopEvent::ModelFallback { .. }) {
+            fallback_events += 1;
+        }
+    }
+    assert_eq!(fallback_events, 1);
+    assert!(harness
+        .session_events(session.as_str(), 20)
+        .expect("harness events")
+        .iter()
+        .any(|event| event.event_type == "model_fallback"));
+}
+
+#[tokio::test]
+async fn configured_cost_budget_fails_closed_without_provider_cost_usage() {
+    let dir = tempfile::tempdir().expect("dir");
+    let provider = Arc::new(MockProvider::new(vec![MockScript::Text(
+        "must not be called".into(),
+    )]));
+    let (mut runtime, session) = runtime_with_provider(provider.clone(), dir.path());
+    runtime.limits.max_cost_micros = 1;
+    let harness = HarnessRepository::new(runtime.store.clone());
+
+    let outcome = AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .run(&session, "answer safely", Arc::new(AutoApprove))
+        .await
+        .expect("bounded stop");
+
+    assert_eq!(outcome.stopped_reason, "cost_tracking_unavailable");
+    assert!(provider.recorded_requests().is_empty());
+    let states = harness
+        .loop_states(session.as_str(), None)
+        .expect("loop state");
+    assert_eq!(
+        states[0].stop_reason,
+        Some(LoopStopReason::RequiredCapabilityUnavailable)
+    );
 }
 
 #[tokio::test]
@@ -290,6 +405,7 @@ async fn destructive_action_runs_only_after_approval() {
         ],
         dir.path(),
     );
+    let harness = HarnessRepository::new(runtime.store.clone());
     let agent = AgentLoop::new(runtime, AgentRole::Orchestrator);
     let outcome = agent
         .run(&session, "delete victim.txt", Arc::new(AutoApprove))
@@ -297,6 +413,13 @@ async fn destructive_action_runs_only_after_approval() {
         .expect("run");
     assert_eq!(outcome.stopped_reason, "finished");
     assert!(!dir.path().join("victim.txt").exists());
+    let approvals = harness
+        .approval_requests(Some(session.as_str()), false)
+        .expect("canonical approvals");
+    assert!(approvals
+        .iter()
+        .any(|approval| approval.action == "tool:fs.delete"
+            && approval.status == ApprovalStatus::ApprovedOnce));
 }
 
 #[tokio::test]
@@ -470,11 +593,11 @@ async fn prompt_precedence_matches_the_audited_contract() {
         position("Provider protocol requirements"),
         position("Active policy and sandbox constraints"),
         position("PROJECT_PRECEDENCE_MARKER"),
-        position("Agent role and audited base contract"),
-        position("PERSONA_PRECEDENCE_MARKER"),
         position("PROFILE_PRECEDENCE_MARKER"),
+        position("PERSONA_PRECEDENCE_MARKER"),
+        position("[selected agent contract]"),
+        position("[approved plan and current phase]"),
         position("MEMORY_PRECEDENCE_MARKER"),
-        position("Current work breakdown"),
         request
             .messages
             .iter()
@@ -572,7 +695,7 @@ async fn reasoning_plan_approval_execution_diff_and_final_are_distinct_events() 
     ];
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
 
-    let timeline = nexus_core::timeline::TimelineStore::new(timeline_store)
+    let timeline = nexus_core::timeline::TimelineStore::new(timeline_store.clone())
         .all(
             session.as_str(),
             nexus_core::timeline::TranscriptFilter::All,
@@ -597,6 +720,11 @@ async fn reasoning_plan_approval_execution_diff_and_final_are_distinct_events() 
             ..
         }
     )));
+    let checkpoints = HarnessRepository::new(timeline_store)
+        .checkpoints(session.as_str(), true)
+        .expect("checkpoints");
+    assert!(checkpoints[0].file_hashes.contains_key("tracked.txt"));
+    assert_eq!(checkpoints[0].environment_fingerprint.len(), 64);
 }
 
 #[tokio::test]

@@ -23,8 +23,8 @@ mod views;
 
 use approver::{ApprovalRequest, TuiApprover};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -48,11 +48,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
-use views::{LoadRequest, Menu, Outcome, Overlay, Pager, Palette, SummaryPreview, UiAction};
+use views::{
+    LoadRequest, Menu, MenuFocusRegion, MenuSort, MenuSortDirection, Outcome, Overlay, Pager,
+    Palette, SummaryPreview, UiAction,
+};
 
-/// Message sent from the agent task back to the render loop when a turn ends.
-struct TurnDone {
-    result: Result<nexus_agent::LoopOutcome, String>,
+/// One ordered message from a logical agent turn. Loop events and completion
+/// share this channel so completion can never race ahead and create a second
+/// assistant card. `(turn_id, sequence)` is the idempotency key at the UI
+/// boundary.
+enum TurnMessage {
+    Event {
+        turn_id: TurnId,
+        sequence: u64,
+        event: Box<LoopEvent>,
+    },
+    Done {
+        turn_id: TurnId,
+        sequence: u64,
+        result: Result<nexus_agent::LoopOutcome, String>,
+    },
 }
 
 /// Results of background operations.
@@ -84,6 +99,7 @@ enum UiMsg {
 enum Loaded {
     Status(Box<StatusSnapshot>),
     Login(Vec<ProviderEntry>),
+    Connect(Vec<ProviderEntry>),
     Model(Vec<ProviderEntry>),
     Provider {
         entry: Box<ProviderEntry>,
@@ -252,9 +268,8 @@ async fn event_loop(
     st.active_work = nexus_app::services::active_work_snapshot(&app, None, "idle");
 
     // Channels.
-    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<LoopEvent>();
+    let (turn_tx, mut turn_rx) = mpsc::unbounded_channel::<TurnMessage>();
     let (appr_tx, mut appr_rx) = mpsc::unbounded_channel::<ApprovalRequest>();
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<TurnDone>();
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Event>();
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiMsg>();
 
@@ -283,7 +298,7 @@ async fn event_loop(
             "FIRST RUN :: no models configured yet — /setup gets you talking to an agent",
             Sev::Warn,
         );
-        st.push_overlay(Overlay::Menu(menus::welcome_menu()));
+        push_menu(&mut st, &app, menus::welcome_menu());
     }
     if let Some(id) = initial_target {
         if app.sessions().get(&id).is_ok() {
@@ -303,10 +318,7 @@ async fn event_loop(
     while !st.should_quit {
         tokio::select! {
             Some(evt) = key_rx.recv() => {
-                handle_key(&mut st, evt, &app, &mut session, &ev_tx, &done_tx, &approver, &ui_tx);
-            }
-            Some(ev) = ev_rx.recv() => {
-                apply_loop_event(&mut st, ev);
+                handle_key(&mut st, evt, &app, &mut session, &turn_tx, &approver, &ui_tx);
             }
             Some(req) = appr_rx.recv() => {
                 st.pending_approvals = 1;
@@ -320,42 +332,31 @@ async fn event_loop(
                 st.approval_edit = None;
                 st.pending = Some(req);
             }
-            Some(done) = done_rx.recv() => {
-                st.mode = Mode::Idle;
-                st.turn_abort = None;
-                match done.result {
-                    Ok(o) => {
-                        let final_already_streamed = st.timeline.iter().rev().any(|event| {
-                            matches!(
-                                &event.kind,
-                                TimelineKind::FinalAnswer { text } if text == &o.final_message
-                            )
-                        });
-                        if !o.final_message.trim().is_empty() && !final_already_streamed {
-                            st.assistant(o.final_message.clone());
+            Some(message) = turn_rx.recv() => {
+                let turn_id = match &message {
+                    TurnMessage::Event { turn_id, .. } | TurnMessage::Done { turn_id, .. } => turn_id,
+                };
+                let sequence = match &message {
+                    TurnMessage::Event { sequence, .. } | TurnMessage::Done { sequence, .. } => *sequence,
+                };
+                if accept_turn_sequence(&mut st, turn_id, sequence) {
+                    match message {
+                        TurnMessage::Event { turn_id, event, .. } => {
+                            apply_loop_event(&mut st, &turn_id, *event);
                         }
-                        st.bar.tokens_in += o.input_tokens;
-                        st.bar.tokens_out += o.output_tokens;
-                        st.activity(format!(
-                            "turn done · {} steps · {} tool calls · {}",
-                            o.steps, o.tool_calls, o.stopped_reason
-                        ));
+                        TurnMessage::Done { turn_id, result, .. } => {
+                            if apply_turn_done(&mut st, &turn_id, result) {
+                                st.active_work = nexus_app::services::active_work_snapshot(
+                                    &app,
+                                    session.as_ref().map(SessionId::as_str),
+                                    "idle",
+                                );
+                                if let Some(view) = st.session_view_state() {
+                                    let _ = app.timeline().save_view_state(&view);
+                                }
+                            }
+                        }
                     }
-                    Err(e) => {
-                        st.last_error = Some(e.clone());
-                        st.system_sev(format!("error: {e}"), Sev::Err);
-                        st.activity(format!("error: {e}"));
-                    }
-                }
-                st.follow = true;
-                st.new_events = 0;
-                st.active_work = nexus_app::services::active_work_snapshot(
-                    &app,
-                    session.as_ref().map(SessionId::as_str),
-                    "idle",
-                );
-                if let Some(view) = st.session_view_state() {
-                    let _ = app.timeline().save_view_state(&view);
                 }
             }
             Some(msg) = ui_rx.recv() => {
@@ -518,20 +519,87 @@ fn exit_handoff(app: &App, st: &State, session: Option<&SessionId>) -> String {
 
 // ------------------------------------------------------------------ keyboard
 
+fn accept_turn_sequence(st: &mut State, turn_id: &TurnId, sequence: u64) -> bool {
+    let last = st
+        .turn_sequences
+        .entry(turn_id.as_str().to_string())
+        .or_default();
+    if sequence <= *last {
+        return false;
+    }
+    *last = sequence;
+    true
+}
+
+/// Apply completion metadata for the active turn. Assistant content is
+/// intentionally absent here: only `LoopEvent::FinalAnswer` may create or
+/// finish an assistant card.
+fn apply_turn_done(
+    st: &mut State,
+    turn_id: &TurnId,
+    result: Result<nexus_agent::LoopOutcome, String>,
+) -> bool {
+    if st.active_turn_id.as_ref() != Some(turn_id) {
+        return false;
+    }
+    st.mode = Mode::Idle;
+    st.turn_abort = None;
+    st.active_turn_id = None;
+    match result {
+        Ok(outcome) => {
+            st.bar.tokens_in += outcome.input_tokens;
+            st.bar.tokens_out += outcome.output_tokens;
+            st.activity(format!(
+                "turn done · {} steps · {} tool calls · {}",
+                outcome.steps, outcome.tool_calls, outcome.stopped_reason
+            ));
+        }
+        Err(error) => {
+            st.last_error = Some(error.clone());
+            st.activity(format!("error: {error}"));
+        }
+    }
+    st.follow = true;
+    st.new_events = 0;
+    true
+}
+
+fn pressed_key(event: Event) -> Option<KeyEvent> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => Some(key),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_key(
     st: &mut State,
     evt: Event,
     app: &Arc<App>,
     session: &mut Option<SessionId>,
-    ev_tx: &mpsc::UnboundedSender<LoopEvent>,
-    done_tx: &mpsc::UnboundedSender<TurnDone>,
+    turn_tx: &mpsc::UnboundedSender<TurnMessage>,
     approver: &Arc<dyn ApprovalHandler>,
     ui_tx: &mpsc::UnboundedSender<UiMsg>,
 ) {
     let key = match evt {
-        Event::Key(k) if k.kind != KeyEventKind::Release => k,
+        event @ Event::Key(_) => match pressed_key(event) {
+            Some(key) => key,
+            None => return,
+        },
         Event::Mouse(mouse) => {
+            // An overlay owns the full input surface. Never let a click or
+            // scroll activate transcript content underneath it.
+            if let Some(Overlay::Menu(menu)) = st.overlays.last_mut() {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => menu.move_selection(-1),
+                    MouseEventKind::ScrollDown => menu.move_selection(1),
+                    _ => {}
+                }
+                return;
+            }
+            if !st.overlays.is_empty() {
+                return;
+            }
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     transcript_scroll_up(st, 3, app, session.as_ref());
@@ -588,7 +656,8 @@ fn handle_key(
                     _ => {}
                 }
             }
-            st.live_assistant_event = None;
+            st.live_assistant_events.clear();
+            st.active_turn_id = None;
             st.live_tool_events.clear();
             st.mode = Mode::Idle;
             st.pending_approvals = 0;
@@ -679,7 +748,22 @@ fn handle_key(
 
     // Overlays capture input next.
     if let Some(overlay) = st.overlay_top() {
-        match overlay.handle_key(key) {
+        let outcome = overlay.handle_key(key);
+        let menu_to_persist = if matches!(
+            &outcome,
+            Outcome::Close | Outcome::Action(_) | Outcome::ActionKeepOpen(_)
+        ) {
+            match overlay {
+                Overlay::Menu(menu) => Some(menu.as_ref().clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(menu) = menu_to_persist {
+            persist_menu_state(app, &menu);
+        }
+        match outcome {
             Outcome::Consumed => {}
             Outcome::Close => st.pop_overlay(),
             Outcome::Action(action) => {
@@ -855,7 +939,7 @@ fn handle_key(
             }
             let final_history: Vec<String> = st.input.history_snapshot().to_vec();
             let _ = app.update_ui_state(move |s| s.history = final_history);
-            submit_line(st, &trimmed, app, session, ev_tx, done_tx, approver, ui_tx);
+            submit_line(st, &trimmed, app, session, turn_tx, approver, ui_tx);
         }
         KeyCode::Char('?') if st.input.is_empty() => {
             start_load(st, LoadRequest::Help, app, ui_tx);
@@ -1159,8 +1243,7 @@ fn submit_line(
     line: &str,
     app: &Arc<App>,
     session: &mut Option<SessionId>,
-    ev_tx: &mpsc::UnboundedSender<LoopEvent>,
-    done_tx: &mpsc::UnboundedSender<TurnDone>,
+    turn_tx: &mpsc::UnboundedSender<TurnMessage>,
     approver: &Arc<dyn ApprovalHandler>,
     ui_tx: &mpsc::UnboundedSender<UiMsg>,
 ) {
@@ -1175,9 +1258,10 @@ fn submit_line(
                 st.input.set_text(text);
                 return;
             }
-            st.user(text.clone());
+            let turn_id = TurnId::generate();
+            st.user_for_turn(turn_id.clone(), text.clone());
             st.follow = true;
-            submit_objective(st, app, session, text, ev_tx, done_tx, approver);
+            submit_objective(st, app, session, turn_id, text, turn_tx, approver);
         }
         Ok(nexus_app::Input::Slash(cmd)) => {
             push_command_event(
@@ -1257,6 +1341,17 @@ fn run_command(
     session: &mut Option<SessionId>,
     ui_tx: &mpsc::UnboundedSender<UiMsg>,
 ) {
+    run_command_with_mode(st, line, app, session, ui_tx, true);
+}
+
+fn run_command_with_mode(
+    st: &mut State,
+    line: &str,
+    app: &Arc<App>,
+    session: &mut Option<SessionId>,
+    ui_tx: &mpsc::UnboundedSender<UiMsg>,
+    interactive: bool,
+) {
     // Internal names start with `__`, which the user-facing parser rightly
     // refuses — route them straight to the internal dispatcher.
     if line.starts_with("__") {
@@ -1276,7 +1371,9 @@ fn run_command(
         return run_internal(st, &cmd, app, ui_tx);
     }
     match nexus_app::classify(&format!("/{line}")) {
-        Ok(nexus_app::Input::Slash(cmd)) => run_command_parsed(st, cmd, app, session, ui_tx),
+        Ok(nexus_app::Input::Slash(cmd)) => {
+            run_command_parsed_with_mode(st, cmd, app, session, ui_tx, interactive)
+        }
         _ => st.system_sev(format!("internal: bad command `{line}`"), Sev::Err),
     }
 }
@@ -1287,6 +1384,17 @@ fn run_command_parsed(
     app: &Arc<App>,
     session: &mut Option<SessionId>,
     ui_tx: &mpsc::UnboundedSender<UiMsg>,
+) {
+    run_command_parsed_with_mode(st, cmd, app, session, ui_tx, true);
+}
+
+fn run_command_parsed_with_mode(
+    st: &mut State,
+    cmd: nexus_app::SlashCommand,
+    app: &Arc<App>,
+    session: &mut Option<SessionId>,
+    ui_tx: &mpsc::UnboundedSender<UiMsg>,
+    interactive: bool,
 ) {
     if cmd.name.starts_with("__") {
         return run_internal(st, &cmd, app, ui_tx);
@@ -1314,7 +1422,7 @@ fn run_command_parsed(
 
     let exec_ctx = ExecCtx {
         session_id: session.as_ref().map(|s| s.as_str().to_string()),
-        interactive: true,
+        interactive,
         active: nexus_app::status::ActiveContext {
             session_id: session.as_ref().map(|s| s.as_str().to_string()),
             tool_calls: st.tool_calls,
@@ -1434,13 +1542,17 @@ fn run_internal(
         "__codex_auth" => {
             let status =
                 nexus_app::codex::status_with_consent(app.read_ui_state(|s| s.codex_use_existing));
-            st.push_overlay(Overlay::Menu(menus::codex_menu(&status)));
+            push_menu(st, app, menus::codex_menu(&status));
         }
         "__claude_auth" => {
-            st.push_overlay(Overlay::Menu(menus::claude_menu(
-                nexus_app::claude::claude_binary().is_some(),
-                app.read_ui_state(|state| state.claude_use_existing),
-            )));
+            push_menu(
+                st,
+                app,
+                menus::claude_menu(
+                    nexus_app::claude::claude_binary().is_some(),
+                    app.read_ui_state(|state| state.claude_use_existing),
+                ),
+            );
         }
         "__ollama_help" => {
             st.push_overlay(Overlay::Pager(Pager::new(
@@ -1582,7 +1694,7 @@ fn handle_effect(
         }
         Effect::View(view) => {
             if view == nexus_app::View::Welcome {
-                st.push_overlay(Overlay::Menu(menus::welcome_menu()));
+                push_menu(st, app, menus::welcome_menu());
                 return;
             }
             let load = match view {
@@ -1591,9 +1703,11 @@ fn handle_effect(
                 nexus_app::View::GoalMenu => LoadRequest::GoalMenu,
                 nexus_app::View::GoalDetail(id) => LoadRequest::GoalDetail(id),
                 nexus_app::View::GoalForm => LoadRequest::GoalDetail("NEW".into()),
+                nexus_app::View::Plan => LoadRequest::Plan,
                 nexus_app::View::Resume => LoadRequest::Resume,
                 nexus_app::View::Sessions => LoadRequest::Sessions,
                 nexus_app::View::Login => LoadRequest::Login,
+                nexus_app::View::Connect => LoadRequest::Connect,
                 nexus_app::View::Model => LoadRequest::Model,
                 nexus_app::View::Agents => LoadRequest::Agents,
                 nexus_app::View::Tasks => LoadRequest::Tasks,
@@ -1617,6 +1731,7 @@ fn handle_effect(
                 nexus_app::View::Connector => LoadRequest::Connector,
                 nexus_app::View::Welcome => unreachable!("handled above"),
                 nexus_app::View::Help => LoadRequest::Help,
+                nexus_app::View::CommandMenu(name) => LoadRequest::CommandMenu(name),
             };
             start_load(st, load, app, ui_tx);
         }
@@ -1749,6 +1864,12 @@ fn attach_session(st: &mut State, id: &str, app: &Arc<App>, session: &mut Option
                 }
             }
             st.active_work = nexus_app::services::active_work_snapshot(app, Some(id), "idle");
+            // Surface checkpoint drift before the operator continues the run.
+            match nexus_app::services::resume_recovery_report(app, id) {
+                Ok(Some(report)) => st.push_report(&report),
+                Ok(None) => {}
+                Err(e) => st.system_sev(format!("resume check: {e}"), Sev::Err),
+            }
             let id2 = id.to_string();
             let _ = app.update_ui_state(move |s| s.last_session = Some(id2));
             st.toast("session attached", Sev::Ok);
@@ -1834,6 +1955,9 @@ fn handle_action(
     }
     match action {
         UiAction::RunCommand(line) => run_command(st, &line, app, session, ui_tx),
+        UiAction::RunDefaultCommand(line) => {
+            run_command_with_mode(st, &line, app, session, ui_tx, false)
+        }
         UiAction::InsertInput(text) => {
             st.close_overlays();
             st.input.set_text(text);
@@ -2047,7 +2171,7 @@ fn handle_action(
             let plan = nexus_app::codex::cached_plan_models();
             match plan.iter().find(|m| m.id == model_id) {
                 Some(m) if !m.reasoning_efforts.is_empty() => {
-                    st.push_overlay(Overlay::Menu(menus::effort_menu(m)));
+                    push_menu(st, app, menus::effort_menu(m));
                 }
                 _ => handle_action(
                     st,
@@ -2128,6 +2252,44 @@ fn handle_action(
             Ok(method) => st.toast(format!("copied via {method}"), Sev::Ok),
             Err(e) => st.toast(e.to_string(), Sev::Warn),
         },
+        UiAction::ShowHarnessMemory(memory) => {
+            let scope =
+                serde_json::to_string(&memory.scope).unwrap_or_else(|_| "[unavailable]".into());
+            let mut report = Report::new(format!("memory {}", memory.id))
+                .field(
+                    "type",
+                    format!("{:?}", memory.memory_type).to_ascii_lowercase(),
+                )
+                .field("scope", scope)
+                .field(
+                    "status",
+                    format!("{:?}", memory.status).to_ascii_lowercase(),
+                )
+                .field("source", format!("{:?}", memory.source_type))
+                .field("confidence", format!("{:.0}%", memory.confidence * 100.0))
+                .field("importance", format!("{:.0}%", memory.importance * 100.0))
+                .field("created", &memory.created_at)
+                .field("expires", memory.expires_at.as_deref().unwrap_or("never"));
+            if let Some(summary) = &memory.summary {
+                report = report.field("summary", summary);
+            }
+            report = report.header("content").line(memory.content.clone());
+            st.push_overlay(Overlay::Pager(Pager::new("memory detail", report)));
+        }
+        UiAction::SelectHarnessProfile(profile_id) => {
+            match app
+                .harness()
+                .execute(nexus_app::control_plane::HarnessAction::SelectProfile {
+                    session_id: session.as_ref().map(|id| id.as_str().to_string()),
+                    profile_id,
+                }) {
+                Ok(_) => {
+                    st.toast("profile activated", Sev::Ok);
+                    start_load(st, LoadRequest::Profile, app, ui_tx);
+                }
+                Err(error) => st.system_sev(format!("profile: {error}"), Sev::Err),
+            }
+        }
         UiAction::RolloverSummary {
             source_session,
             content,
@@ -2164,6 +2326,12 @@ fn handle_action(
 }
 
 fn action_changes_active_context(action: &UiAction) -> bool {
+    if let UiAction::RunDefaultCommand(line) = action {
+        return match nexus_app::classify(&format!("/{line}")) {
+            Ok(nexus_app::Input::Slash(command)) => command_changes_active_context(&command),
+            _ => false,
+        };
+    }
     matches!(
         action,
         UiAction::Confirmed(_)
@@ -2182,10 +2350,96 @@ fn action_changes_active_context(action: &UiAction) -> bool {
             | UiAction::RenameSession { .. }
             | UiAction::RolloverSummary { .. }
             | UiAction::PrepareCommit { .. }
+            | UiAction::SelectHarnessProfile(_)
     )
 }
 
 // --------------------------------------------------------------------- loads
+
+fn profile_cards_for_menu(app: &App, session_id: Option<&str>) -> nexus_core::Result<Menu> {
+    let harness = app.harness();
+    let context = harness.ensure_context(session_id)?;
+    let repository = harness.global_repository();
+    let profiles = repository.profiles(false)?;
+    let mut cards = Vec::with_capacity(profiles.len());
+    for profile in profiles.into_iter().take(500) {
+        let fact_count = repository.profile_facts(&profile.id, true)?.len();
+        let memory_count = repository
+            .list_memories(
+                &[nexus_core::harness::MemoryScope::profile(
+                    profile.id.clone(),
+                )],
+                true,
+                1_000,
+            )?
+            .len();
+        cards.push((profile, fact_count, memory_count));
+    }
+    let pending_conflicts = repository.identity_conflicts(true)?.len();
+    let mut menu =
+        menus::profile_cards_menu(&cards, context.profile_id.as_deref(), pending_conflicts);
+    menu.on_refresh = Some(UiAction::Load(LoadRequest::Profile));
+    Ok(menu)
+}
+
+fn push_memory_scope(
+    scopes: &mut Vec<nexus_core::harness::MemoryScope>,
+    scope: nexus_core::harness::MemoryScope,
+) {
+    if !scopes.contains(&scope) {
+        scopes.push(scope);
+    }
+}
+
+fn memory_dashboard_for_menu(app: &App, session_id: Option<&str>) -> nexus_core::Result<Menu> {
+    use nexus_core::harness::MemoryScope;
+
+    let harness = app.harness();
+    let context = harness.ensure_context(session_id)?;
+    let mut global_scopes = vec![MemoryScope::global()];
+    if let Some(profile_id) = &context.profile_id {
+        push_memory_scope(&mut global_scopes, MemoryScope::profile(profile_id.clone()));
+    }
+
+    let mut workspace_scopes = vec![MemoryScope::workspace(app.workspace_key.clone())];
+    let mut cumulative = MemoryScope::workspace(app.workspace_key.clone());
+    macro_rules! add_dimension {
+        ($field:ident, $value:expr) => {
+            if let Some(value) = $value {
+                let mut exact = MemoryScope::default();
+                exact.$field = Some(value.clone());
+                push_memory_scope(&mut workspace_scopes, exact);
+                cumulative.$field = Some(value.clone());
+                push_memory_scope(&mut workspace_scopes, cumulative.clone());
+            }
+        };
+    }
+    add_dimension!(session_id, context.session_id.as_ref());
+    add_dimension!(goal_id, context.goal_id.as_ref());
+    add_dimension!(plan_id, context.plan_id.as_ref());
+    add_dimension!(task_id, context.task_id.as_ref());
+    add_dimension!(agent_id, context.agent_id.as_ref());
+
+    let mut records = harness
+        .global_repository()
+        .list_memories(&global_scopes, true, 100)?;
+    records.extend(harness.workspace_repository().list_memories(
+        &workspace_scopes,
+        true,
+        200usize.saturating_sub(records.len()),
+    )?);
+    records.sort_by(|left, right| {
+        right
+            .importance
+            .partial_cmp(&left.importance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+    });
+    records.truncate(200);
+    let mut menu = menus::memory_dashboard(&records);
+    menu.on_refresh = Some(UiAction::Load(LoadRequest::Memory));
+    Ok(menu)
+}
 
 fn start_load(
     st: &mut State,
@@ -2199,13 +2453,13 @@ fn start_load(
             Ok(goals) if goals.is_empty() => {
                 st.system_sev("no goals yet — create one with /goal", Sev::Warn)
             }
-            Ok(goals) => st.push_overlay(Overlay::Menu(menus::goals_menu(&goals))),
+            Ok(goals) => push_menu(st, app, menus::goals_menu(&goals)),
             Err(e) => st.system_sev(format!("goals: {e}"), Sev::Err),
         },
         LoadRequest::GoalMenu => match app.goals().list(Some(&app.workspace_key)) {
             Ok(goals) => {
                 let active = nexus_app::services::active_goal_id(app);
-                st.push_overlay(Overlay::Menu(menus::goal_menu(&goals, active.as_deref())));
+                push_menu(st, app, menus::goal_menu(&goals, active.as_deref()));
             }
             Err(e) => st.system_sev(format!("goals: {e}"), Sev::Err),
         },
@@ -2223,88 +2477,104 @@ fn start_load(
         },
         LoadRequest::Sessions => match app.sessions().list(Some(&app.workspace_key), 30) {
             Ok(sessions) if sessions.is_empty() => st.system_sev("no sessions yet", Sev::Warn),
-            Ok(sessions) => st.push_overlay(Overlay::Menu(menus::sessions_menu(&sessions))),
+            Ok(sessions) => push_menu(st, app, menus::sessions_menu(&sessions)),
             Err(e) => st.system_sev(format!("sessions: {e}"), Sev::Err),
         },
         LoadRequest::Resume => match nexus_app::services::resume_candidates(app) {
             Ok(c) if c.is_empty() => {
                 st.system_sev("nothing to resume in this workspace", Sev::Warn)
             }
-            Ok(c) => st.push_overlay(Overlay::Menu(menus::resume_menu(&c))),
+            Ok(c) => push_menu(st, app, menus::resume_menu(&c)),
             Err(e) => st.system_sev(format!("resume: {e}"), Sev::Err),
         },
         LoadRequest::Agents => match app.agent_catalog() {
-            Ok(catalog) => st.push_overlay(Overlay::Menu(menus::agents_menu(
-                &app.active_agent(),
-                &catalog.list(),
-            ))),
+            Ok(catalog) => push_menu(
+                st,
+                app,
+                menus::agents_menu(&app.active_agent(), &catalog.list()),
+            ),
             Err(error) => st.system_sev(format!("agents: {error}"), Sev::Err),
         },
-        LoadRequest::Tasks => {
-            match nexus_app::services::tasks_report(app, st.session_id.as_deref()) {
-                Ok(report) => st.push_overlay(Overlay::Pager(
-                    Pager::new("tasks", report).refreshable(LoadRequest::Tasks),
-                )),
-                Err(error) => st.system_sev(format!("tasks: {error}"), Sev::Err),
+        LoadRequest::Plan => {
+            let work = st
+                .session_id
+                .as_deref()
+                .and_then(|session_id| app.orchestration().latest_plan(session_id).ok())
+                .flatten();
+            let mut menu = menus::plan_workspace(work.as_ref(), st.session_id.is_some());
+            menu.on_refresh = Some(UiAction::Load(LoadRequest::Plan));
+            replace_or_push_menu(st, app, menu);
+        }
+        LoadRequest::Tasks => match app.orchestration().tasks(st.session_id.as_deref(), true) {
+            Ok(tasks) => {
+                let mut menu = menus::tasks_menu(&tasks, st.session_id.is_some());
+                menu.on_refresh = Some(UiAction::Load(LoadRequest::Tasks));
+                replace_or_push_menu(st, app, menu);
+            }
+            Err(error) => st.system_sev(format!("tasks: {error}"), Sev::Err),
+        },
+        LoadRequest::Subagents => {
+            let runs = st
+                .session_id
+                .as_deref()
+                .map(|session_id| app.orchestration().agent_runs(session_id))
+                .transpose();
+            match runs {
+                Ok(runs) => {
+                    let mut menu = menus::subagents_menu(
+                        runs.as_deref().unwrap_or_default(),
+                        st.session_id.is_some(),
+                    );
+                    menu.on_refresh = Some(UiAction::Load(LoadRequest::Subagents));
+                    replace_or_push_menu(st, app, menu);
+                }
+                Err(error) => st.system_sev(format!("subagents: {error}"), Sev::Err),
             }
         }
-        LoadRequest::Subagents => match st.session_id.as_deref() {
-            Some(session_id) => match nexus_app::services::subagents_report(app, session_id) {
-                Ok(report) => st.push_overlay(Overlay::Pager(
-                    Pager::new("subagents", report).refreshable(LoadRequest::Subagents),
-                )),
-                Err(error) => st.system_sev(format!("subagents: {error}"), Sev::Err),
-            },
-            None => st.system_sev("no active session for subagents", Sev::Warn),
-        },
         LoadRequest::Persona => match app.personas().list() {
             Ok(personas) => {
                 let selected = app.read_ui_state(|state| state.selected_persona.clone());
-                st.push_overlay(Overlay::Menu(menus::personas_menu(
-                    &personas,
-                    selected.as_deref(),
-                )));
+                push_menu(
+                    st,
+                    app,
+                    menus::personas_menu(&personas, selected.as_deref()),
+                );
             }
             Err(e) => st.system_sev(format!("persona: {e}"), Sev::Err),
         },
-        LoadRequest::Profile => {
-            let profile = app.read_ui_state(|state| state.profile_name.clone());
-            match app.profiles().list(&profile, true) {
-                Ok(traits) => {
-                    st.push_overlay(Overlay::Menu(menus::profile_menu(&profile, &traits)))
-                }
-                Err(e) => st.system_sev(format!("profile: {e}"), Sev::Err),
-            }
-        }
+        LoadRequest::Profile => match profile_cards_for_menu(app, st.session_id.as_deref()) {
+            Ok(menu) => replace_or_push_menu(st, app, menu),
+            Err(error) => st.system_sev(format!("profile: {error}"), Sev::Err),
+        },
         LoadRequest::Theme => {
-            st.push_overlay(Overlay::Menu(menus::theme_menu(&st.theme_name)));
+            push_menu(st, app, menus::theme_menu(&st.theme_name));
         }
         LoadRequest::Thinking => {
-            st.push_overlay(Overlay::Menu(menus::thinking_menu(st.thinking_enabled)));
+            push_menu(st, app, menus::thinking_menu(st.thinking_enabled));
         }
         LoadRequest::Details => {
-            st.push_overlay(Overlay::Menu(menus::details_menu(st.detail_level)));
+            push_menu(st, app, menus::details_menu(st.detail_level));
         }
         LoadRequest::Transcript => {
-            st.push_overlay(Overlay::Menu(menus::transcript_menu(st.transcript_filter)));
+            push_menu(st, app, menus::transcript_menu(st.transcript_filter));
         }
         LoadRequest::Permissions => {
             let mode = nexus_app::services::permission_mode(&app.config.policy);
-            st.push_overlay(Overlay::Menu(menus::permissions_menu(mode)));
+            push_menu(st, app, menus::permissions_menu(mode));
         }
         LoadRequest::Sandbox => {
-            st.push_overlay(Overlay::Menu(menus::sandbox_menu(&app.config.sandbox)));
+            push_menu(st, app, menus::sandbox_menu(&app.config.sandbox));
         }
         LoadRequest::Init => {
             let plan = nexus_app::services::init_plan(app);
-            st.push_overlay(Overlay::Menu(menus::init_menu(&plan)));
+            push_menu(st, app, menus::init_menu(&plan));
         }
         LoadRequest::Config => {
-            st.push_overlay(Overlay::Menu(menus::config_menu()));
+            push_menu(st, app, menus::config_menu());
         }
         LoadRequest::Branch => match nexus_app::gitx::branches(&app.workspace) {
             Ok(branches) => {
-                st.push_overlay(Overlay::Menu(menus::branches_menu(&branches)));
+                push_menu(st, app, menus::branches_menu(&branches));
             }
             Err(e) => st.system_sev(format!("branch: {e}"), Sev::Err),
         },
@@ -2318,7 +2588,7 @@ fn start_load(
                 Sev::Warn,
             ),
             Ok(candidates) => {
-                st.push_overlay(Overlay::Menu(menus::connectors_menu(&candidates)));
+                push_menu(st, app, menus::connectors_menu(&candidates));
             }
             Err(e) => st.system_sev(format!("connector discovery: {e}"), Sev::Err),
         },
@@ -2328,12 +2598,13 @@ fn start_load(
                 Pager::new("tools", report).refreshable(LoadRequest::Tools),
             ));
         }
-        LoadRequest::Memory => match nexus_app::services::memory_report(app, None) {
-            Ok(report) => st.push_overlay(Overlay::Pager(
-                Pager::new("memory — /memory add|search|forget", report)
-                    .refreshable(LoadRequest::Memory),
-            )),
-            Err(e) => st.system_sev(format!("memory: {e}"), Sev::Err),
+        LoadRequest::Memory => match memory_dashboard_for_menu(app, st.session_id.as_deref()) {
+            Ok(menu) => replace_or_push_menu(st, app, menu),
+            Err(error) => st.system_sev(format!("memory: {error}"), Sev::Err),
+        },
+        LoadRequest::CommandMenu(name) => match nexus_app::registry::find(&name) {
+            Some(definition) => push_menu(st, app, menus::command_menu(definition)),
+            None => st.system_sev(format!("unknown command /{name}"), Sev::Err),
         },
         LoadRequest::Skills => match nexus_app::services::skills_report(app) {
             Ok(report) => st.push_overlay(Overlay::Pager(
@@ -2375,8 +2646,9 @@ fn start_load(
                 });
             });
         }
-        LoadRequest::Login | LoadRequest::Model => {
+        LoadRequest::Login | LoadRequest::Connect | LoadRequest::Model => {
             let is_login = req == LoadRequest::Login;
+            let is_connect = req == LoadRequest::Connect;
             let app2 = app.clone();
             let tx = ui_tx.clone();
             st.bump_generation();
@@ -2386,6 +2658,8 @@ fn start_load(
                 let entries = nexus_app::providers::catalog(&app2).await;
                 let data = if is_login {
                     Loaded::Login(entries)
+                } else if is_connect {
+                    Loaded::Connect(entries)
                 } else {
                     Loaded::Model(entries)
                 };
@@ -2417,35 +2691,187 @@ fn apply_loaded(st: &mut State, data: Loaded, app: &Arc<App>) {
                 Pager::new("status — r to refresh", report).refreshable(LoadRequest::Status),
             ));
         }
-        Loaded::Login(entries) => replace_or_push_menu(st, menus::login_menu(&entries)),
+        Loaded::Login(entries) => replace_or_push_menu(st, app, menus::login_menu(&entries)),
+        Loaded::Connect(entries) => replace_or_push_menu(st, app, menus::connect_menu(&entries)),
         Loaded::Model(entries) => {
             let active = app.any_model_name();
-            let configured: Vec<(String, String, String)> = app
+            let manager = nexus_models::ModelManager::from_config(&app.config).ok();
+            let configured: Vec<menus::ConfiguredModelCard> = app
                 .config
                 .models
                 .iter()
-                .map(|(n, m)| (n.clone(), m.provider.clone(), m.model.clone()))
+                .map(|(name, model)| {
+                    let entry = entries.iter().find(|entry| {
+                        entry
+                            .configured_models
+                            .iter()
+                            .any(|configured| configured == name)
+                            || entry.id == model.provider
+                    });
+                    let availability = entry.map_or_else(
+                        || "configured; provider status unavailable".to_string(),
+                        |entry| format!("{} · {}", entry.auth_state, entry.summary()),
+                    );
+                    menus::ConfiguredModelCard {
+                        name: name.clone(),
+                        provider: model.provider.clone(),
+                        model_id: model.model.clone(),
+                        capabilities: manager
+                            .as_ref()
+                            .and_then(|manager| manager.capabilities(name).ok()),
+                        availability,
+                    }
+                })
                 .collect();
-            replace_or_push_menu(st, menus::model_menu(&configured, &entries, &active));
+            replace_or_push_menu(st, app, menus::model_menu(&configured, &entries, &active));
         }
         Loaded::Provider { entry, configured } => {
-            st.push_overlay(Overlay::Menu(menus::provider_menu(&entry, &configured)));
+            push_menu(st, app, menus::provider_menu(&entry, &configured));
         }
     }
 }
 
-/// Refresh semantics: if the top overlay is a menu with the same title,
-/// replace its items and keep the cursor; otherwise push a new overlay.
-fn replace_or_push_menu(st: &mut State, menu: Menu) {
+const MENU_TEXT_CAP: usize = 256;
+const MENU_FILTER_CAP: usize = 8;
+
+fn safe_menu_text(app: &App, value: &str) -> Option<String> {
+    let sanitized = nexus_core::sanitize::sanitize_terminal(value);
+    if app.redactor.redact(&sanitized) != sanitized {
+        return None;
+    }
+    Some(sanitized.chars().take(MENU_TEXT_CAP).collect())
+}
+
+fn menu_state_for_persistence(
+    app: &App,
+    menu: &Menu,
+) -> Option<(String, nexus_app::uistate::PersistedMenuState)> {
+    let route = safe_menu_text(app, menu.route.trim())?;
+    if route.is_empty() || !route.starts_with('/') {
+        return None;
+    }
+    let selected_item_id = menu
+        .selected_item_id
+        .as_deref()
+        .and_then(|value| safe_menu_text(app, value));
+    let search_query = safe_menu_text(app, &menu.filter).unwrap_or_default();
+    let filters = menu
+        .filters
+        .iter()
+        .take(MENU_FILTER_CAP)
+        .filter_map(|(key, value)| Some((safe_menu_text(app, key)?, safe_menu_text(app, value)?)))
+        .collect();
+    let (sort_key, sort_descending) = menu.sort.as_ref().map_or((None, false), |sort| {
+        (
+            safe_menu_text(app, &sort.field),
+            sort.direction == MenuSortDirection::Descending,
+        )
+    });
+    let focused_region = match menu.focused_region {
+        MenuFocusRegion::Search => "search",
+        MenuFocusRegion::Items => "items",
+        MenuFocusRegion::Detail => "detail",
+        MenuFocusRegion::Actions => "actions",
+    }
+    .to_string();
+    Some((
+        route,
+        nexus_app::uistate::PersistedMenuState {
+            selected_item_id,
+            focused_region,
+            search_query,
+            filters,
+            sort_key,
+            sort_descending,
+        },
+    ))
+}
+
+fn apply_persisted_menu_state(menu: &mut Menu, state: &nexus_app::uistate::PersistedMenuState) {
+    menu.filter = state.search_query.clone();
+    menu.filters = state.filters.clone();
+    menu.focused_region = match state.focused_region.as_str() {
+        "search" => MenuFocusRegion::Search,
+        "detail" => MenuFocusRegion::Detail,
+        "actions" => MenuFocusRegion::Actions,
+        _ => MenuFocusRegion::Items,
+    };
+    menu.sort = state.sort_key.as_ref().and_then(|field| {
+        matches!(field.as_str(), "label" | "badge" | "detail" | "category").then(|| MenuSort {
+            field: field.clone(),
+            direction: if state.sort_descending {
+                MenuSortDirection::Descending
+            } else {
+                MenuSortDirection::Ascending
+            },
+        })
+    });
+    let visible = menu.visible();
+    menu.selected = state
+        .selected_item_id
+        .as_ref()
+        .and_then(|id| {
+            visible
+                .iter()
+                .position(|index| menu.items[*index].id == *id)
+        })
+        .unwrap_or(0)
+        .min(visible.len().saturating_sub(1));
+    menu.selected_item_id = visible
+        .get(menu.selected)
+        .map(|index| menu.items[*index].id.clone());
+}
+
+fn restore_menu_state(app: &App, menu: &mut Menu) {
+    let Some(route) = safe_menu_text(app, menu.route.trim()).filter(|route| !route.is_empty())
+    else {
+        return;
+    };
+    let Some(mut persisted) = app.read_ui_state(|state| state.menus.get(&route).cloned()) else {
+        return;
+    };
+    persisted.selected_item_id = persisted
+        .selected_item_id
+        .as_deref()
+        .and_then(|value| safe_menu_text(app, value));
+    persisted.search_query = safe_menu_text(app, &persisted.search_query).unwrap_or_default();
+    persisted.filters = persisted
+        .filters
+        .iter()
+        .take(MENU_FILTER_CAP)
+        .filter_map(|(key, value)| Some((safe_menu_text(app, key)?, safe_menu_text(app, value)?)))
+        .collect();
+    apply_persisted_menu_state(menu, &persisted);
+}
+
+fn persist_menu_state(app: &App, menu: &Menu) {
+    let Some((route, persisted)) = menu_state_for_persistence(app, menu) else {
+        return;
+    };
+    let _ = app.update_ui_state(move |state| state.remember_menu(route, persisted));
+}
+
+fn push_menu(st: &mut State, app: &App, mut menu: Menu) {
+    restore_menu_state(app, &mut menu);
+    st.push_overlay(Overlay::Menu(Box::new(menu)));
+}
+
+/// Refresh semantics: if the top overlay is the same structured menu route,
+/// replace its items and keep the persisted cursor; otherwise push a new overlay.
+fn replace_or_push_menu(st: &mut State, app: &App, mut menu: Menu) {
+    restore_menu_state(app, &mut menu);
     if let Some(Overlay::Menu(existing)) = st.overlays.last_mut() {
-        if existing.title == menu.title {
-            let selected = existing.selected.min(menu.items.len().saturating_sub(1));
-            *existing = menu;
-            existing.selected = selected;
+        let same_menu = if existing.menu_id.is_empty() || menu.menu_id.is_empty() {
+            existing.title == menu.title
+        } else {
+            existing.menu_id == menu.menu_id
+        };
+        if same_menu {
+            **existing = menu;
             return;
         }
     }
-    st.push_overlay(Overlay::Menu(menu));
+    st.push_overlay(Overlay::Menu(Box::new(menu)));
 }
 
 fn apply_device_event(st: &mut State, ev: DeviceLoginEvent) {
@@ -2479,7 +2905,8 @@ fn help_report() -> Report {
         .line("Enter send · Alt+Enter newline · ↑/↓ history · ←/→ cursor")
         .line("/ (empty input) or Ctrl+K command palette · ? this help")
         .line("PgUp/PgDn scroll transcript · End follow · Ctrl+C quit")
-        .line("in menus: ↑/↓ or j/k move · Enter select · Esc back · r refresh")
+        .line("in menus: ↑/↓ or j/k · Enter · Space toggle · / search")
+        .line("Tab/Shift+Tab focus · ? controls · Ctrl+R refresh · Esc back")
         .line("approvals: [y]es · [s]ession · [n]o (deny is the default)")
         .header("input modes")
         .line("plain text        message to the agent")
@@ -2518,9 +2945,9 @@ fn submit_objective(
     st: &mut State,
     app: &Arc<App>,
     session: &mut Option<SessionId>,
+    turn_id: TurnId,
     objective: String,
-    ev_tx: &mpsc::UnboundedSender<LoopEvent>,
-    done_tx: &mpsc::UnboundedSender<TurnDone>,
+    turn_tx: &mpsc::UnboundedSender<TurnMessage>,
     approver: &Arc<dyn ApprovalHandler>,
 ) {
     let role_name = session
@@ -2563,6 +2990,58 @@ fn submit_objective(
     }
     let session_id = session.clone().expect("session created above");
 
+    // Run the deterministic, scope-aware learning pass before compiling the
+    // runtime so an explicit identity or durable-memory request affects this
+    // very turn. This uses no model call and never stores raw secrets.
+    match app.harness().execute(
+        nexus_app::control_plane::HarnessAction::ObserveUserMessage {
+            session_id: session_id.as_str().to_string(),
+            text: objective.clone(),
+        },
+    ) {
+        Ok(nexus_app::control_plane::HarnessActionResult::Learning(outcome)) => {
+            for notice in outcome.notices {
+                let text = app
+                    .redactor
+                    .redact(&nexus_core::sanitize::sanitize_terminal(&notice));
+                let conflict = text.contains("IDENTITY CONFLICT");
+                st.push_local_event_for_turn(
+                    turn_id.clone(),
+                    if conflict {
+                        TimelineStatus::Waiting
+                    } else {
+                        TimelineStatus::Completed
+                    },
+                    text.lines()
+                        .next()
+                        .unwrap_or("profile/memory update")
+                        .to_string(),
+                    TimelineKind::Notice {
+                        text,
+                        severity: if conflict { "warning" } else { "info" }.into(),
+                    },
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let text = app
+                .redactor
+                .redact(&nexus_core::sanitize::sanitize_terminal(&format!(
+                    "profile/memory learning skipped: {error}"
+                )));
+            st.push_local_event_for_turn(
+                turn_id.clone(),
+                TimelineStatus::Waiting,
+                "profile/memory learning skipped".into(),
+                TimelineKind::Notice {
+                    text,
+                    severity: "warning".into(),
+                },
+            );
+        }
+    }
+
     let runtime = match app.runtime(Some(session_id.clone())) {
         Ok(r) => r,
         Err(e) => {
@@ -2572,12 +3051,32 @@ fn submit_objective(
     };
 
     st.mode = Mode::Running;
-    let ev_tx = ev_tx.clone();
-    let done_tx = done_tx.clone();
+    st.active_turn_id = Some(turn_id.clone());
+    let turn_tx = turn_tx.clone();
     let approver = approver.clone();
 
     let handle = tokio::spawn(async move {
-        let mut agent_loop = AgentLoop::new(runtime, role).with_events(ev_tx);
+        let (loop_tx, mut loop_rx) = mpsc::unbounded_channel::<LoopEvent>();
+        let event_tx = turn_tx.clone();
+        let event_turn_id = turn_id.clone();
+        let forwarder = tokio::spawn(async move {
+            let mut sequence = 0_u64;
+            while let Some(event) = loop_rx.recv().await {
+                sequence = sequence.saturating_add(1);
+                if event_tx
+                    .send(TurnMessage::Event {
+                        turn_id: event_turn_id.clone(),
+                        sequence,
+                        event: Box::new(event),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            sequence
+        });
+        let mut agent_loop = AgentLoop::new(runtime, role).with_events(loop_tx);
         if let Some(definition) = custom_agent {
             agent_loop = agent_loop.with_custom_agent(definition);
         }
@@ -2585,12 +3084,21 @@ fn submit_objective(
             .run(&session_id, &objective, approver)
             .await
             .map_err(|e| e.to_string());
-        let _ = done_tx.send(TurnDone { result });
+        // Dropping the loop closes its event sender. Awaiting the forwarder
+        // drains every loop event before the terminal metadata message.
+        drop(agent_loop);
+        let sequence = forwarder.await.unwrap_or_default().saturating_add(1);
+        let _ = turn_tx.send(TurnMessage::Done {
+            turn_id,
+            sequence,
+            result,
+        });
     });
     st.turn_abort = Some(handle.abort_handle());
 }
 
-fn apply_loop_event(st: &mut State, ev: LoopEvent) {
+fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
+    let turn_key = turn_id.as_str().to_string();
     match ev {
         LoopEvent::Classified {
             class,
@@ -2599,7 +3107,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
         } => {
             st.bar.model_label = model.clone();
             st.bar.agent = agent.clone();
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 TimelineStatus::Completed,
                 format!("classified {class} · {model} · {agent}"),
                 TimelineKind::Classification {
@@ -2609,8 +3118,26 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
                 },
             );
         }
+        LoopEvent::ModelFallback {
+            from_model,
+            to_model,
+            provider,
+            reason,
+        } => {
+            st.bar.model_label = to_model.clone();
+            st.push_local_event_for_turn(
+                turn_id.clone(),
+                TimelineStatus::Completed,
+                format!("model fallback · {from_model} → {to_model}"),
+                TimelineKind::ModelRouting {
+                    provider,
+                    model: to_model,
+                    reason: format!("fallback from {from_model}: {reason}"),
+                },
+            );
+        }
         LoopEvent::ReasoningSummary(t) if st.thinking_enabled => {
-            if let Some(id) = st.live_assistant_event.take() {
+            if let Some(id) = st.live_assistant_events.remove(&turn_key) {
                 st.update_event(
                     &id,
                     TimelineEventUpdate {
@@ -2623,7 +3150,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
                     },
                 );
             } else {
-                st.push_local_event(
+                st.push_local_event_for_turn(
+                    turn_id.clone(),
                     TimelineStatus::Completed,
                     "provider reasoning summary".into(),
                     TimelineKind::ReasoningSummary { text: t },
@@ -2631,7 +3159,7 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             }
         }
         LoopEvent::ReasoningSummary(t) => {
-            if let Some(id) = st.live_assistant_event.take() {
+            if let Some(id) = st.live_assistant_events.remove(&turn_key) {
                 st.update_event(
                     &id,
                     TimelineEventUpdate {
@@ -2646,7 +3174,10 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             }
         }
         LoopEvent::AssistantTextDelta(delta) => {
-            if let Some(id) = st.live_assistant_event.clone() {
+            if st.terminal_events.contains_key(&turn_key) {
+                return;
+            }
+            if let Some(id) = st.live_assistant_events.get(&turn_key).cloned() {
                 let mut text = st
                     .timeline
                     .iter()
@@ -2672,7 +3203,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
                     },
                 );
             } else {
-                let id = st.push_local_event(
+                let id = st.push_local_event_for_turn(
+                    turn_id.clone(),
                     TimelineStatus::Running,
                     delta.lines().next().unwrap_or("").to_string(),
                     TimelineKind::AssistantMessage {
@@ -2680,11 +3212,11 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
                         streaming: true,
                     },
                 );
-                st.live_assistant_event = Some(id);
+                st.live_assistant_events.insert(turn_key.clone(), id);
             }
         }
         LoopEvent::AssistantStreamFailed(reason) => {
-            if let Some(id) = st.live_assistant_event.take() {
+            if let Some(id) = st.live_assistant_events.remove(&turn_key) {
                 let text = st
                     .timeline
                     .iter()
@@ -2711,7 +3243,7 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             }
         }
         LoopEvent::FinalAnswer(text) => {
-            if let Some(id) = st.live_assistant_event.take() {
+            if let Some(id) = st.terminal_events.get(&turn_key).cloned() {
                 st.update_event(
                     &id,
                     TimelineEventUpdate {
@@ -2723,12 +3255,27 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
                         artifacts: Vec::new(),
                     },
                 );
+            } else if let Some(id) = st.live_assistant_events.remove(&turn_key) {
+                st.update_event(
+                    &id,
+                    TimelineEventUpdate {
+                        status: TimelineStatus::Completed,
+                        phase: LifecyclePhase::Completed,
+                        summary: Some(text.lines().next().unwrap_or("").to_string()),
+                        kind: TimelineKind::FinalAnswer { text },
+                        duration_ms: None,
+                        artifacts: Vec::new(),
+                    },
+                );
+                st.terminal_events.insert(turn_key, id);
             } else {
-                st.push_local_event(
+                let id = st.push_local_event_for_turn(
+                    turn_id.clone(),
                     TimelineStatus::Completed,
                     text.lines().next().unwrap_or("").to_string(),
                     TimelineKind::FinalAnswer { text },
                 );
+                st.terminal_events.insert(turn_key, id);
             }
         }
         LoopEvent::PlanPromoted {
@@ -2737,7 +3284,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             to,
             reason,
         } => {
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 if work.kind == nexus_core::orchestration::WorkBreakdownKind::Planned
                     && !work.approved
                 {
@@ -2756,7 +3304,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
                         && !work.approved,
                 },
             );
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 if work.approved {
                     TimelineStatus::Running
                 } else {
@@ -2776,7 +3325,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             approved,
             diff,
         } => {
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 if approved {
                     TimelineStatus::Completed
                 } else {
@@ -2804,7 +3354,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
                 .as_ref()
                 .and_then(|id| work.stages.iter().find(|stage| &stage.id == id))
             {
-                st.push_local_event(
+                st.push_local_event_for_turn(
+                    turn_id.clone(),
                     match stage.status {
                         nexus_core::orchestration::StageStatus::Pending => TimelineStatus::Pending,
                         nexus_core::orchestration::StageStatus::Running => TimelineStatus::Running,
@@ -2833,7 +3384,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             status,
             next_action,
         } => {
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 match status {
                     nexus_core::orchestration::StageStatus::Pending => TimelineStatus::Pending,
                     nexus_core::orchestration::StageStatus::Running => TimelineStatus::Running,
@@ -2858,7 +3410,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             risk,
             arguments,
         } => {
-            let id = st.push_local_event(
+            let id = st.push_local_event_for_turn(
+                turn_id.clone(),
                 TimelineStatus::Pending,
                 summary.clone(),
                 TimelineKind::ToolProposal {
@@ -2876,7 +3429,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             layer,
             reason,
         } => {
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 if decision == "deny" {
                     TimelineStatus::Blocked
                 } else {
@@ -2892,7 +3446,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             );
         }
         LoopEvent::ApprovalRequested { tool, summary } => {
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 TimelineStatus::Waiting,
                 format!("awaiting approval · {tool}"),
                 TimelineKind::Approval {
@@ -2981,7 +3536,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             }
         }
         LoopEvent::DiffProduced { tool, preview } => {
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 TimelineStatus::Completed,
                 format!("diff from {tool}"),
                 TimelineKind::Diff {
@@ -2997,7 +3553,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
             max,
             reason,
         } => {
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 TimelineStatus::Waiting,
                 format!("retry {attempt}/{max}"),
                 TimelineKind::Retry {
@@ -3009,7 +3566,8 @@ fn apply_loop_event(st: &mut State, ev: LoopEvent) {
         }
         LoopEvent::Error(e) => {
             st.last_error = Some(e.clone());
-            st.push_local_event(
+            st.push_local_event_for_turn(
+                turn_id.clone(),
                 TimelineStatus::Failed,
                 e.lines().next().unwrap_or("").to_string(),
                 TimelineKind::Error {
@@ -3059,11 +3617,11 @@ fn command_changes_active_context(cmd: &nexus_app::SlashCommand) -> bool {
         ),
         CommandId::Task => !matches!(
             cmd.args.first().map(String::as_str),
-            None | Some("list" | "show" | "logs" | "result")
+            None | Some("list" | "show" | "logs" | "result" | "graph" | "validate")
         ),
         CommandId::Subagents => !matches!(
             cmd.args.first().map(String::as_str),
-            None | Some("list" | "tree" | "show" | "wait" | "collect")
+            None | Some("list" | "tree" | "show" | "wait" | "collect" | "limits")
         ),
         CommandId::Auth => matches!(
             cmd.args.first().map(String::as_str),
@@ -3077,6 +3635,49 @@ fn command_changes_active_context(cmd: &nexus_app::SlashCommand) -> bool {
 mod tests {
     use super::*;
 
+    fn turn_test_state() -> State {
+        State::new(
+            "cyberpunk".into(),
+            theme::ColorSupport::None,
+            true,
+            StatusBar {
+                workspace: "/workspace".into(),
+                model_label: "mock / test".into(),
+                model_ok: true,
+                agent: "general".into(),
+                sandbox_level: "test".into(),
+                network: "off".into(),
+                git_branch: Some("main".into()),
+                tokens_in: 0,
+                tokens_out: 0,
+                permission_mode: "default".into(),
+            },
+            Vec::new(),
+            true,
+        )
+    }
+
+    fn outcome(message: &str) -> nexus_agent::LoopOutcome {
+        nexus_agent::LoopOutcome {
+            final_message: message.into(),
+            steps: 1,
+            tool_calls: 0,
+            stopped_reason: "complete".into(),
+            input_tokens: 3,
+            output_tokens: 5,
+        }
+    }
+
+    fn final_answers(st: &State) -> Vec<(&TurnId, &str)> {
+        st.timeline
+            .iter()
+            .filter_map(|event| match &event.kind {
+                TimelineKind::FinalAnswer { text } => Some((&event.turn_id, text.as_str())),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn model_label_variants() {
         // Exercised through App in integration tests; here we lock the
@@ -3084,6 +3685,114 @@ mod tests {
         let (label, ok) = ("Not configured".to_string(), false);
         assert_eq!(label, "Not configured");
         assert!(!ok);
+    }
+
+    #[test]
+    fn turn_done_never_creates_assistant_content() {
+        let mut state = turn_test_state();
+        let turn_id = TurnId::from("turn_done_first");
+        state.active_turn_id = Some(turn_id.clone());
+        state.mode = Mode::Running;
+
+        assert!(apply_turn_done(
+            &mut state,
+            &turn_id,
+            Ok(outcome("must come from FinalAnswer")),
+        ));
+        assert!(final_answers(&state).is_empty());
+
+        // Even if a test deliberately delivers completion before content, the
+        // later turn-scoped event produces one card rather than relying on a
+        // text scan in the completion handler.
+        apply_loop_event(
+            &mut state,
+            &turn_id,
+            LoopEvent::FinalAnswer("must come from FinalAnswer".into()),
+        );
+        assert_eq!(final_answers(&state).len(), 1);
+    }
+
+    #[test]
+    fn final_answer_is_idempotent_per_turn_but_not_across_turns() {
+        let mut state = turn_test_state();
+        let first = TurnId::from("turn_first");
+        let second = TurnId::from("turn_second");
+
+        apply_loop_event(
+            &mut state,
+            &first,
+            LoopEvent::FinalAnswer("same valid answer".into()),
+        );
+        apply_loop_event(
+            &mut state,
+            &first,
+            LoopEvent::FinalAnswer("same valid answer".into()),
+        );
+        assert_eq!(final_answers(&state).len(), 1);
+
+        apply_loop_event(
+            &mut state,
+            &second,
+            LoopEvent::FinalAnswer("same valid answer".into()),
+        );
+        let answers = final_answers(&state);
+        assert_eq!(answers.len(), 2);
+        assert_ne!(answers[0].0, answers[1].0);
+        assert_eq!(answers[0].1, answers[1].1);
+    }
+
+    #[test]
+    fn streaming_and_final_answer_share_one_turn_card() {
+        let mut state = turn_test_state();
+        let turn_id = TurnId::from("turn_stream");
+        apply_loop_event(
+            &mut state,
+            &turn_id,
+            LoopEvent::AssistantTextDelta("first ".into()),
+        );
+        apply_loop_event(
+            &mut state,
+            &turn_id,
+            LoopEvent::AssistantTextDelta("draft".into()),
+        );
+        let streaming_id = state
+            .live_assistant_events
+            .get(turn_id.as_str())
+            .cloned()
+            .expect("stream card");
+        apply_loop_event(
+            &mut state,
+            &turn_id,
+            LoopEvent::FinalAnswer("final answer".into()),
+        );
+        let answers = final_answers(&state);
+        assert_eq!(answers, vec![(&turn_id, "final answer")]);
+        assert_eq!(
+            state.terminal_events.get(turn_id.as_str()),
+            Some(&streaming_id)
+        );
+    }
+
+    #[test]
+    fn turn_envelopes_and_key_events_are_idempotent() {
+        let mut state = turn_test_state();
+        let turn_id = TurnId::from("turn_sequence");
+        assert!(accept_turn_sequence(&mut state, &turn_id, 1));
+        assert!(!accept_turn_sequence(&mut state, &turn_id, 1));
+        assert!(!accept_turn_sequence(&mut state, &turn_id, 0));
+        assert!(accept_turn_sequence(&mut state, &turn_id, 2));
+
+        let event = |kind| {
+            Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+                kind,
+                state: crossterm::event::KeyEventState::NONE,
+            })
+        };
+        assert!(pressed_key(event(KeyEventKind::Press)).is_some());
+        assert!(pressed_key(event(KeyEventKind::Repeat)).is_none());
+        assert!(pressed_key(event(KeyEventKind::Release)).is_none());
     }
 
     #[test]
@@ -3153,5 +3862,75 @@ mod tests {
         assert!(!action_changes_active_context(&UiAction::Load(
             LoadRequest::Status
         )));
+    }
+
+    #[test]
+    fn persisted_menu_state_restores_search_focus_sort_filter_and_selection() {
+        let mut menu = Menu::new(
+            "test",
+            vec![
+                views::MenuItem::new("Alpha", UiAction::RunCommand("alpha".into()))
+                    .id("alpha")
+                    .category("one"),
+                views::MenuItem::new("Beta", UiAction::RunCommand("beta".into()))
+                    .id("beta")
+                    .category("two"),
+            ],
+        )
+        .route("/test")
+        .searchable();
+        let persisted = nexus_app::uistate::PersistedMenuState {
+            selected_item_id: Some("beta".into()),
+            focused_region: "detail".into(),
+            search_query: "bet".into(),
+            filters: std::collections::BTreeMap::from([("category".into(), "two".into())]),
+            sort_key: Some("label".into()),
+            sort_descending: true,
+        };
+
+        apply_persisted_menu_state(&mut menu, &persisted);
+
+        assert_eq!(menu.selected_item_id.as_deref(), Some("beta"));
+        assert_eq!(menu.focused_region, MenuFocusRegion::Detail);
+        assert_eq!(menu.filter, "bet");
+        assert_eq!(
+            menu.filters.get("category").map(String::as_str),
+            Some("two")
+        );
+        assert_eq!(
+            menu.sort.as_ref().map(|sort| sort.direction),
+            Some(MenuSortDirection::Descending)
+        );
+    }
+
+    #[test]
+    fn session_bound_menu_actions_are_honestly_disabled_without_a_session() {
+        for menu in [
+            menus::plan_workspace(None, false),
+            menus::tasks_menu(&[], false),
+            menus::subagents_menu(&[], false),
+        ] {
+            assert!(
+                menu.items.iter().any(|item| item
+                    .disabled
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("start or attach a session"))),
+                "{} should explain its disabled session-bound actions",
+                menu.route
+            );
+        }
+    }
+
+    #[test]
+    fn onboarding_default_actions_do_not_reopen_their_own_menu() {
+        let menu = menus::welcome_menu();
+        assert!(matches!(
+            menu.items.first().and_then(|item| item.action.as_ref()),
+            Some(UiAction::RunDefaultCommand(command)) if command == "setup"
+        ));
+        assert!(matches!(
+            menu.items.get(2).and_then(|item| item.action.as_ref()),
+            Some(UiAction::RunDefaultCommand(command)) if command == "help"
+        ));
     }
 }

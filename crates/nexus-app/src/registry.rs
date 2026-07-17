@@ -23,6 +23,7 @@ pub enum CommandId {
     Model,
     Models,
     Login,
+    Connect,
     Logout,
     Auth,
     Agent,
@@ -44,6 +45,7 @@ pub enum CommandId {
     Export,
     Compact,
     Memory,
+    Improve,
     Skills,
     Mcp,
     Connector,
@@ -109,6 +111,14 @@ pub struct CommandDef {
     pub opens_view: bool,
     /// Destructive or irreversible: the TUI asks before executing.
     pub requires_confirmation: bool,
+}
+
+impl CommandDef {
+    /// Stable menu route for the bare interactive command. Every TUI command
+    /// must have one; typed arguments remain an advanced compatibility path.
+    pub fn menu_route(&self) -> Option<&'static str> {
+        self.interactive.then_some(self.name)
+    }
 }
 
 /// The single command table.
@@ -271,11 +281,23 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: CommandId::Login,
-        name: "connect",
-        aliases: &["login", "provider"],
-        summary: "Connect / authenticate a provider (interactive menu)",
+        name: "login",
+        aliases: &[],
+        summary: "Authenticate a hosted provider (interactive menu)",
         usage: "[provider]",
         category: CommandCategory::Auth,
+        interactive: true,
+        non_interactive: true,
+        opens_view: true,
+        requires_confirmation: false,
+    },
+    CommandDef {
+        id: CommandId::Connect,
+        name: "connect",
+        aliases: &["provider"],
+        summary: "Connect an endpoint or local runtime (interactive menu)",
+        usage: "[provider|endpoint]",
+        category: CommandCategory::Models,
         interactive: true,
         non_interactive: true,
         opens_view: true,
@@ -310,7 +332,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "agent",
         aliases: &[],
         summary: "Show or set the active agent role",
-        usage: "[role]",
+        usage: "[role] | show <role> | recommend <objective...>",
         category: CommandCategory::Session,
         interactive: true,
         non_interactive: true,
@@ -334,7 +356,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "persona",
         aliases: &[],
         summary: "Create, inherit, edit, and select agent personas",
-        usage: "[list|create|clone|edit|delete|select]",
+        usage: "[list|create|clone|edit|delete|select|show <id>|reset]",
         category: CommandCategory::Session,
         interactive: true,
         non_interactive: true,
@@ -346,7 +368,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "profile",
         aliases: &["preferences"],
         summary: "Approved workflow traits and review queue",
-        usage: "[list|review|select|add|approve|reject|delete|proposals|approve-proposal|reject-proposal]",
+        usage: "[list|review|select|add|approve|reject|delete|rename <name>|export [path]|proposals|approve-proposal|reject-proposal]",
         category: CommandCategory::Session,
         interactive: true,
         non_interactive: true,
@@ -358,7 +380,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "goal",
         aliases: &[],
         summary: "Create or manage a goal (fast path: /goal <objective>)",
-        usage: "[<objective> | show <id> | verify <id> | export <id>]",
+        usage: "[<objective> | show <id> | verify <id> | risks <id> | archive <id> | export <id>]",
         category: CommandCategory::Goals,
         interactive: true,
         non_interactive: true,
@@ -394,7 +416,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "task",
         aliases: &["tasks"],
         summary: "Create and manage persistent background tasks",
-        usage: "[create|list|show|logs|pause|resume|cancel|retry|attach|result|cleanup]",
+        usage: "[create|list|show|logs|graph|depend|validate|assign|pause|resume|cancel|retry|attach|result|cleanup]",
         category: CommandCategory::Goals,
         interactive: true,
         non_interactive: true,
@@ -406,7 +428,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "subagents",
         aliases: &["delegates"],
         summary: "Spawn, inspect, steer, wait for, collect, or cancel subagents",
-        usage: "[spawn|fanout|list|tree|show|steer|cancel|wait|collect|retry]",
+        usage: "[spawn|fanout|list|tree|limits|show|steer|cancel|wait|collect|retry]",
         category: CommandCategory::Session,
         interactive: true,
         non_interactive: true,
@@ -525,12 +547,24 @@ pub const COMMANDS: &[CommandDef] = &[
         id: CommandId::Memory,
         name: "memory",
         aliases: &[],
-        summary: "Long-term memory: list, search, add, forget",
-        usage: "[search <text> | add <text> | forget <id>]",
+        summary: "Layered scoped memory dashboard",
+        usage: "[show <id> | search <text> | add <text> | approve <id> | reject <id> | forget <id> | scopes | stats | candidates | contradictions | export [path]]",
         category: CommandCategory::Workspace,
         interactive: true,
         non_interactive: true,
         opens_view: true,
+        requires_confirmation: false,
+    },
+    CommandDef {
+        id: CommandId::Improve,
+        name: "improve",
+        aliases: &[],
+        summary: "Self-improvement proposals: review, apply, roll back",
+        usage: "[all | show <id> | approve <id> | reject <id> | apply <id> | rollback <id>]",
+        category: CommandCategory::Workspace,
+        interactive: true,
+        non_interactive: true,
+        opens_view: false,
         requires_confirmation: false,
     },
     CommandDef {
@@ -930,7 +964,6 @@ mod tests {
             "setup",
             "init",
             "connect",
-            "login", // alias of /connect
             "model",
             "models",
             "login",
@@ -974,6 +1007,18 @@ mod tests {
         ] {
             let def = find(name).unwrap_or_else(|| panic!("missing command {name}"));
             assert!(def.interactive, "{name} must be TUI-available");
+        }
+    }
+
+    #[test]
+    fn every_interactive_command_has_a_menu_route() {
+        for command in COMMANDS.iter().filter(|command| command.interactive) {
+            assert_eq!(
+                command.menu_route(),
+                Some(command.name),
+                "bare /{} must route to a structured menu",
+                command.name
+            );
         }
     }
 }

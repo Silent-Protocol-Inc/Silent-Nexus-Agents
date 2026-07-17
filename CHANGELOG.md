@@ -4,6 +4,67 @@ All notable changes to NEXUS are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 Semantic Versioning.
 
+## [1.1.0] — Unreleased
+
+Silent Nexus 1.1 is the adaptive-harness release line. Automated gates
+(fmt, clippy, tests, docs, audit, deny, secret scan), release packaging and
+archive validation, and live remote-Ollama scenarios recorded evidence on
+2026-07-17; see `docs/adaptive-harness-delivery-report.md`.
+
+### Added (completion session, 2026-07-17)
+
+- Background scheduler honors task dependencies: `background_task_dependencies`
+  (migration `0007_task_dependencies`) gates leasing, parks dependents of
+  failed/cancelled prerequisites as `blocked` with a diagnostic error, and
+  self-heals them back to `queued` once every dependency completes. Cycles and
+  self-edges are rejected transactionally.
+- Writer background tasks claim the git repository through
+  `harness_resource_claims` before creating a worktree; conflicting writers
+  are parked `blocked` instead of racing, and claims release on drop or lease
+  expiry.
+- `/resume` validates the latest checkpoint before reattaching: environment
+  fingerprint, per-file content hashes, model availability, and stale
+  assumptions are re-checked via `assess_recovery`, and the recovery report is
+  rendered in both the TUI attach flow and the CLI resume path.
+- Weak-model adaptation: `ModelCapabilities::constrained()` (small context,
+  no native tool calls, or no structured output) shrinks the planned
+  decomposition before the plan is recorded
+  (`WorkEstimate::constrained_for_weak_model`), truncates the tool surface,
+  and clamps per-turn step/repetition budgets.
+- `/agent show <role>` (capability card) and `/agent recommend <objective>`
+  (deterministic classifier-based suggestion; never auto-switches).
+- Command-surface completion: `/memory scopes|stats|candidates|contradictions|export`,
+  `/task graph|depend|validate|assign`, `/subagents limits`,
+  `/goal archive|risks`, `/persona show|reset`, `/profile rename|export`, and
+  a top-level `/improve` command (list/show/approve/reject/apply/rollback)
+  with status-gated apply/rollback over RSI proposals.
+
+### Fixed (validation session, 2026-07-17)
+
+- `snx memory forget` now accepts `--yes` so non-interactive runs can
+  authorize deletion, matching its own hint and `snx profile delete`.
+- Canonical memory retrieval ranks records with a deterministic
+  objective-overlap score (`canonical_memory_score`); the previous tree
+  referenced the function without defining it and did not compile.
+- Removed a parallel-test race on process-global `GIT_CONFIG_*` variables and
+  re-baselined the timeline render snapshots after visual inspection.
+
+### Release scope (validated 2026-07-17)
+
+- One bounded, persisted harness context linking profiles, scoped memory,
+  system-prompt personas, agents, goals, plans, task graphs, subagents,
+  provider/model selection, evaluation, checkpoints, and improvement
+  proposals.
+- Menu-first slash-command control surfaces backed by canonical domain
+  services rather than display-only actions.
+- Provider-neutral model request/response/reference contracts and normalized
+  capability, privacy, locality, cost, latency, and fallback metadata.
+- Duplicate prompt/answer and first-line rendering corrections, including
+  turn-scoped terminal-event idempotency.
+- Append-only `0006_adaptive_harness` and `0007_task_dependencies` migrations
+  while configuration schema version remains `1` throughout the compatible
+  1.x line.
+
 ## [1.0.0] — 2026-07-17
 
 First production-certified Silent Nexus release for

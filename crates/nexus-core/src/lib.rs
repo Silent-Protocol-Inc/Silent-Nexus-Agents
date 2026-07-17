@@ -16,6 +16,7 @@ pub mod error;
 pub mod events;
 pub mod git;
 pub mod gpu;
+pub mod harness;
 pub mod ids;
 pub mod instructions;
 pub mod maintenance;
@@ -30,6 +31,7 @@ pub mod timeline;
 pub mod workspace;
 
 pub use error::{NexusError, Result};
+pub use harness::HarnessRepository;
 pub use ids::*;
 pub use risk::{Decision, RiskLevel};
 pub use secret::SecretString;

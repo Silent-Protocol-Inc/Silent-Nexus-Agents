@@ -420,7 +420,11 @@ pub enum MemoryCmd {
     /// Approve a memory that required review.
     Approve { id: String },
     /// Delete a memory.
-    Forget { id: String },
+    Forget {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Delete expired memories.
     Prune,
     /// Export all memories as JSON.

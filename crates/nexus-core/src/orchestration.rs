@@ -10,7 +10,7 @@ use crate::{NexusError, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -284,6 +284,17 @@ impl WorkEstimate {
             needs_grounding,
             rationale,
         }
+    }
+
+    /// Shrink the decomposition for weak or compatibility-mode models: force
+    /// grounding and drop the predictability assumption so writing work runs
+    /// as smaller tracked stages instead of one direct leap.
+    pub fn constrained_for_weak_model(mut self) -> Self {
+        self.predictable = false;
+        self.needs_grounding = true;
+        self.rationale
+            .push("constrained model: smaller validated stages".into());
+        self
     }
 
     pub fn classify(&self) -> WorkBreakdownKind {
@@ -1590,6 +1601,121 @@ impl OrchestrationStore {
         })
     }
 
+    /// Link `task_id` so the scheduler leases it only after `depends_on`
+    /// completes. Rejects unknown tasks, self-dependencies, cross-session
+    /// edges, and edges that would create a cycle.
+    pub fn add_task_dependency(&self, task_id: &str, depends_on: &str) -> Result<()> {
+        if task_id == depends_on {
+            return Err(NexusError::Config("a task cannot depend on itself".into()));
+        }
+        self.store.with(|conn| {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let result = (|| -> Result<()> {
+                let session_of = |id: &str| -> Result<String> {
+                    conn.query_row(
+                        "SELECT session_id FROM background_tasks WHERE id=?1",
+                        [id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|_| NexusError::NotFound(format!("task `{id}`")))
+                };
+                let task_session = session_of(task_id)?;
+                let dep_session = session_of(depends_on)?;
+                if task_session != dep_session {
+                    return Err(NexusError::Config(
+                        "task dependencies must stay within one session".into(),
+                    ));
+                }
+                let mut edge_stmt = conn.prepare(
+                    "SELECT d.task_id, d.depends_on_task_id
+                     FROM background_task_dependencies d
+                     JOIN background_tasks t ON t.id = d.task_id
+                     WHERE t.session_id = ?1",
+                )?;
+                let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
+                for edge in edge_stmt.query_map([&task_session], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })? {
+                    let (from, to) = edge?;
+                    outgoing.entry(from).or_default().push(to);
+                }
+                // Adding task_id → depends_on creates a cycle iff task_id is
+                // already reachable from depends_on along dependency edges.
+                let mut stack = vec![depends_on.to_string()];
+                let mut seen = BTreeSet::new();
+                while let Some(node) = stack.pop() {
+                    if node == task_id {
+                        return Err(NexusError::Config("dependency would create a cycle".into()));
+                    }
+                    if seen.insert(node.clone()) {
+                        if let Some(next) = outgoing.get(&node) {
+                            stack.extend(next.iter().cloned());
+                        }
+                    }
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO background_task_dependencies
+                     (task_id, depends_on_task_id, created_at) VALUES (?1,?2,?3)",
+                    params![task_id, depends_on, crate::now_rfc3339()],
+                )?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(())
+                }
+                Err(error) => {
+                    conn.execute_batch("ROLLBACK")?;
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    /// Dependencies of one task as (dependency id, dependency status).
+    pub fn task_dependencies(&self, task_id: &str) -> Result<Vec<(String, TaskStatus)>> {
+        self.store.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT d.depends_on_task_id, dep.status
+                 FROM background_task_dependencies d
+                 JOIN background_tasks dep ON dep.id = d.depends_on_task_id
+                 WHERE d.task_id = ?1
+                 ORDER BY d.depends_on_task_id",
+            )?;
+            let mut out = Vec::new();
+            for row in stmt.query_map([task_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    TaskStatus::parse(&row.get::<_, String>(1)?),
+                ))
+            })? {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// All dependency edges for a session as (task_id, depends_on_task_id).
+    pub fn dependency_edges(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        self.store.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT d.task_id, d.depends_on_task_id
+                 FROM background_task_dependencies d
+                 JOIN background_tasks t ON t.id = d.task_id
+                 WHERE t.session_id = ?1
+                 ORDER BY d.task_id, d.depends_on_task_id",
+            )?;
+            let mut out = Vec::new();
+            for row in stmt.query_map([session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })? {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
     /// Claim one queued task with a SQLite lease. The worker supplies whether
     /// the single writer slot is available; reader concurrency is enforced by
     /// counting active read leases.
@@ -1603,6 +1729,36 @@ impl OrchestrationStore {
         self.store.with(|conn| {
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let result: rusqlite::Result<Option<String>> = (|| {
+                let now = crate::now_rfc3339();
+                // Dependency bookkeeping happens under the same lock as the
+                // lease so workers can never observe a half-updated graph.
+                // A queued task with a failed or cancelled dependency parks
+                // as 'blocked'; a scheduler-blocked task whose dependencies
+                // all completed (e.g. after a retry) re-queues itself.
+                conn.execute(
+                    "UPDATE background_tasks
+                     SET status='blocked',
+                         error='blocked: dependency failed or was cancelled',
+                         updated_at=?1
+                     WHERE status='queued' AND EXISTS (
+                         SELECT 1 FROM background_task_dependencies d
+                         JOIN background_tasks dep ON dep.id = d.depends_on_task_id
+                         WHERE d.task_id = background_tasks.id
+                           AND dep.status IN ('failed','cancelled'))",
+                    params![now],
+                )?;
+                conn.execute(
+                    "UPDATE background_tasks
+                     SET status='queued', error=NULL, updated_at=?1
+                     WHERE status='blocked'
+                       AND error LIKE 'blocked: dependency%'
+                       AND NOT EXISTS (
+                         SELECT 1 FROM background_task_dependencies d
+                         JOIN background_tasks dep ON dep.id = d.depends_on_task_id
+                         WHERE d.task_id = background_tasks.id
+                           AND dep.status <> 'completed')",
+                    params![now],
+                )?;
                 let running_readers: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM background_tasks
                      WHERE status='running' AND writer=0",
@@ -1622,13 +1778,17 @@ impl OrchestrationStore {
                         "SELECT id FROM background_tasks
                          WHERE status='queued'
                            AND ((writer=1 AND ?1=1) OR (writer=0 AND ?2=1))
+                           AND NOT EXISTS (
+                             SELECT 1 FROM background_task_dependencies d
+                             JOIN background_tasks dep ON dep.id = d.depends_on_task_id
+                             WHERE d.task_id = background_tasks.id
+                               AND dep.status <> 'completed')
                          ORDER BY writer DESC, created_at LIMIT 1",
                         params![i64::from(allow_writer), i64::from(allow_reader)],
                         |row| row.get(0),
                     )
                     .optional()?;
                 if let Some(task_id) = &task_id {
-                    let now = crate::now_rfc3339();
                     conn.execute(
                         "UPDATE background_tasks SET status='running',lease_owner=?1,
                          lease_expires_at=?2,heartbeat_at=?3,started_at=COALESCE(started_at,?3),
@@ -1729,6 +1889,33 @@ impl OrchestrationStore {
             if changed == 0 {
                 return Err(NexusError::NotFound(format!("task `{task_id}`")));
             }
+            Ok(())
+        })
+    }
+
+    /// Reassign a not-yet-running task to a different owner (agent role or
+    /// worker identity). Running and terminal tasks keep their owner so the
+    /// audit trail stays coherent with the lease that executed them.
+    pub fn assign_task(&self, task_id: &str, owner: &str) -> Result<()> {
+        let owner = owner.trim();
+        if owner.is_empty() {
+            return Err(NexusError::Config("task owner must be non-empty".into()));
+        }
+        let task = self.task(task_id)?;
+        if !matches!(
+            task.status,
+            TaskStatus::Queued | TaskStatus::Blocked | TaskStatus::Paused
+        ) {
+            return Err(NexusError::Other(format!(
+                "task `{task_id}` is {}, only queued/blocked/paused tasks can be reassigned",
+                task.status.as_str()
+            )));
+        }
+        self.store.with(|conn| {
+            conn.execute(
+                "UPDATE background_tasks SET owner=?1,updated_at=?2 WHERE id=?3",
+                params![owner, crate::now_rfc3339(), task_id],
+            )?;
             Ok(())
         })
     }
@@ -2537,5 +2724,172 @@ mod tests {
             classify_interruption(&invalid).kind,
             InterruptionKind::InvalidRequest
         );
+    }
+
+    #[test]
+    fn weak_model_constraint_shrinks_decomposition() {
+        let estimate = WorkEstimate {
+            predicted_actions: 1,
+            writes: true,
+            predictable: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            estimate.classify(),
+            WorkBreakdownKind::Direct,
+            "a strong model may take the direct path"
+        );
+        let constrained = estimate.constrained_for_weak_model();
+        assert_eq!(
+            constrained.classify(),
+            WorkBreakdownKind::Tracked,
+            "a constrained model must decompose the same write into tracked stages"
+        );
+        assert!(constrained.needs_grounding);
+        assert!(!constrained.predictable);
+    }
+
+    fn quick_task(
+        orchestration: &OrchestrationStore,
+        session: &str,
+        title: &str,
+    ) -> BackgroundTask {
+        orchestration
+            .create_task(
+                session,
+                title,
+                &format!("objective for {title}"),
+                "worker",
+                false,
+                None,
+                None,
+                WorkBudget::default(),
+            )
+            .expect("task")
+    }
+
+    #[test]
+    fn dependency_blocks_lease_until_completed() {
+        let (_store, orchestration, session) = orchestration_store();
+        let first = quick_task(&orchestration, &session, "first");
+        let second = quick_task(&orchestration, &session, "second");
+        orchestration
+            .add_task_dependency(second.id.as_str(), first.id.as_str())
+            .expect("dependency");
+
+        let leased = orchestration
+            .lease_next("w1", "2999-01-01T00:00:00Z", 3, true)
+            .expect("lease")
+            .expect("first is ready");
+        assert_eq!(leased.id, first.id, "only the dependency-free task leases");
+        assert!(
+            orchestration
+                .lease_next("w1", "2999-01-01T00:00:00Z", 3, true)
+                .expect("lease")
+                .is_none(),
+            "dependent task must not lease while its dependency runs"
+        );
+
+        orchestration
+            .set_task_status(first.id.as_str(), TaskStatus::Completed, None, None)
+            .expect("complete");
+        let unblocked = orchestration
+            .lease_next("w1", "2999-01-01T00:00:00Z", 3, true)
+            .expect("lease")
+            .expect("second is ready after completion");
+        assert_eq!(unblocked.id, second.id);
+    }
+
+    #[test]
+    fn failed_dependency_parks_dependent_until_retry_completes() {
+        let (_store, orchestration, session) = orchestration_store();
+        let first = quick_task(&orchestration, &session, "first");
+        let second = quick_task(&orchestration, &session, "second");
+        orchestration
+            .add_task_dependency(second.id.as_str(), first.id.as_str())
+            .expect("dependency");
+        orchestration
+            .set_task_status(first.id.as_str(), TaskStatus::Failed, None, Some("boom"))
+            .expect("fail");
+
+        assert!(
+            orchestration
+                .lease_next("w1", "2999-01-01T00:00:00Z", 3, true)
+                .expect("lease")
+                .is_none(),
+            "nothing is leasable with the dependency failed"
+        );
+        let parked = orchestration.task(second.id.as_str()).expect("task");
+        assert_eq!(parked.status, TaskStatus::Blocked);
+        assert!(parked.error.unwrap_or_default().starts_with("blocked:"));
+
+        // A retry that completes the dependency re-queues the dependent.
+        orchestration
+            .set_task_status(first.id.as_str(), TaskStatus::Completed, None, None)
+            .expect("complete");
+        let unblocked = orchestration
+            .lease_next("w1", "2999-01-01T00:00:00Z", 3, true)
+            .expect("lease")
+            .expect("dependent re-queued after dependency completion");
+        assert_eq!(unblocked.id, second.id);
+    }
+
+    #[test]
+    fn dependency_cycles_and_self_edges_are_rejected() {
+        let (_store, orchestration, session) = orchestration_store();
+        let first = quick_task(&orchestration, &session, "first");
+        let second = quick_task(&orchestration, &session, "second");
+        let third = quick_task(&orchestration, &session, "third");
+        assert!(orchestration
+            .add_task_dependency(first.id.as_str(), first.id.as_str())
+            .is_err());
+        orchestration
+            .add_task_dependency(second.id.as_str(), first.id.as_str())
+            .expect("edge");
+        orchestration
+            .add_task_dependency(third.id.as_str(), second.id.as_str())
+            .expect("edge");
+        assert!(
+            orchestration
+                .add_task_dependency(first.id.as_str(), third.id.as_str())
+                .is_err(),
+            "transitive cycle must be rejected"
+        );
+        let deps = orchestration
+            .task_dependencies(third.id.as_str())
+            .expect("deps");
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, second.id.as_str());
+        assert_eq!(
+            orchestration
+                .dependency_edges(&session)
+                .expect("edges")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn assign_task_only_touches_pending_work() {
+        let (_store, orchestration, session) = orchestration_store();
+        let task = quick_task(&orchestration, &session, "reassignable");
+        assert!(orchestration.assign_task(task.id.as_str(), "  ").is_err());
+        orchestration
+            .assign_task(task.id.as_str(), "researcher")
+            .expect("assign");
+        assert_eq!(
+            orchestration.task(task.id.as_str()).expect("task").owner,
+            "researcher"
+        );
+        orchestration
+            .set_task_status(task.id.as_str(), TaskStatus::Completed, None, None)
+            .expect("complete");
+        assert!(
+            orchestration
+                .assign_task(task.id.as_str(), "reviewer")
+                .is_err(),
+            "terminal tasks keep their owner"
+        );
+        assert!(orchestration.assign_task("t_missing", "reviewer").is_err());
     }
 }

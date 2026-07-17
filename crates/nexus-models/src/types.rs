@@ -85,8 +85,13 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
+/// Provider-neutral request accepted by every model adapter.
+///
+/// The selected model is carried separately as a [`ModelReference`] by the
+/// registry/manager. This keeps provider credentials and endpoint details out
+/// of the request payload that can be logged or persisted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CompletionRequest {
+pub struct ModelRequest {
     pub messages: Vec<ChatMessage>,
     /// Tools the model may call this turn (already filtered to a minimal set).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -108,14 +113,42 @@ pub struct Usage {
     pub completion_tokens: usize,
 }
 
+/// Provider-neutral response returned by every model adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Completion {
+pub struct ModelResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCallRequest>,
     pub usage: Usage,
     /// Provider's stated finish reason (`stop`, `length`, `tool_calls`, …).
     pub finish_reason: String,
 }
+
+/// Stable, serializable reference to a configured model.
+///
+/// This intentionally identifies a registry entry and model name only. It
+/// never contains an endpoint credential or provider-specific request data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelReference {
+    /// Configured provider/connection name in the NEXUS model registry.
+    pub provider: String,
+    /// Provider model identifier.
+    pub model: String,
+}
+
+impl ModelReference {
+    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+}
+
+/// Backward-compatible 1.x name for [`ModelRequest`].
+pub type CompletionRequest = ModelRequest;
+
+/// Backward-compatible 1.x name for [`ModelResponse`].
+pub type Completion = ModelResponse;
 
 /// Incremental streaming event.
 #[derive(Debug, Clone)]
@@ -134,6 +167,70 @@ pub enum StreamEvent {
     Done { usage: Usage, finish_reason: String },
 }
 
+/// Whether model inference happens on this host or across a network boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelLocality {
+    Local,
+    Remote,
+    Hybrid,
+    #[default]
+    Unknown,
+}
+
+/// Static data-handling posture advertised by a configured model endpoint.
+///
+/// Runtime policy remains authoritative: this metadata is descriptive and
+/// must never be treated as permission to disclose scoped context.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelPrivacy {
+    /// Inference is performed locally and request data does not leave the host.
+    LocalOnly,
+    /// A user-managed endpoint whose privacy terms are configured separately.
+    EndpointControlled,
+    /// A hosted provider processes request data under its own policy.
+    ProviderManaged,
+    #[default]
+    Unknown,
+}
+
+/// Coarse latency class for menu filtering and capability-aware routing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelLatencyClass {
+    Low,
+    Standard,
+    High,
+    #[default]
+    Unknown,
+}
+
+/// Coarse cost class; exact prices belong in provider configuration, not in
+/// the provider-neutral capability record.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCostClass {
+    Free,
+    Low,
+    Standard,
+    High,
+    #[default]
+    Unknown,
+}
+
+/// Static fallback suitability. A runtime privacy/policy check is still
+/// required even when a model is marked eligible.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackEligibility {
+    Eligible,
+    ApprovalRequired,
+    Ineligible,
+    #[default]
+    Unknown,
+}
+
 /// Static capabilities a provider declares for a configured model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -148,6 +245,15 @@ pub struct ModelCapabilities {
     pub max_output_tokens: usize,
     /// Reasoning-effort style controls, when the endpoint honors them.
     pub reasoning_controls: bool,
+    /// Whether the adapter preserves dedicated system-role instructions.
+    #[serde(default)]
+    pub system_prompt: bool,
+    /// Whether multiple tool calls may be requested in one model turn.
+    #[serde(default)]
+    pub parallel_tool_calls: bool,
+    /// Whether the adapter can enforce a supplied JSON Schema response.
+    #[serde(default)]
+    pub json_schema: bool,
     pub local: bool,
     /// Compute accelerator available for this model. For local providers this
     /// reflects host GPU detection: `Some("CUDA")`, `Some("Metal")`, … when a
@@ -155,6 +261,26 @@ pub struct ModelCapabilities {
     /// and `None` for remote endpoints (where the harness cannot know).
     #[serde(default)]
     pub accelerator: Option<String>,
+    #[serde(default)]
+    pub locality: ModelLocality,
+    #[serde(default)]
+    pub privacy: ModelPrivacy,
+    #[serde(default)]
+    pub latency_class: ModelLatencyClass,
+    #[serde(default)]
+    pub cost_class: ModelCostClass,
+    #[serde(default)]
+    pub fallback_eligibility: FallbackEligibility,
+}
+
+impl ModelCapabilities {
+    /// Whether the harness must treat this model as constrained: small
+    /// context window, no native tool calls, or no structured output.
+    /// Constrained models get smaller task bundles, fewer tools, tighter
+    /// context budgets, and shorter turn limits.
+    pub fn constrained(&self) -> bool {
+        self.context_window < 32_000 || !self.native_tool_calls || !self.structured_output
+    }
 }
 
 /// Result of a provider health probe.
@@ -186,5 +312,64 @@ impl TaskClass {
             TaskClass::Research => "research",
             TaskClass::Verification => "verification",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_capability_documents_receive_safe_metadata_defaults() {
+        let capabilities: ModelCapabilities = serde_json::from_value(serde_json::json!({
+            "model_id": "legacy-model",
+            "provider_kind": "legacy-provider",
+            "streaming": true,
+            "native_tool_calls": false,
+            "structured_output": false,
+            "image_input": false,
+            "embeddings": false,
+            "context_window": 4096,
+            "max_output_tokens": 512,
+            "reasoning_controls": false,
+            "local": false
+        }))
+        .expect("legacy capabilities deserialize");
+
+        assert!(!capabilities.system_prompt);
+        assert!(!capabilities.parallel_tool_calls);
+        assert!(!capabilities.json_schema);
+        assert_eq!(capabilities.locality, ModelLocality::Unknown);
+        assert_eq!(capabilities.privacy, ModelPrivacy::Unknown);
+        assert_eq!(capabilities.latency_class, ModelLatencyClass::Unknown);
+        assert_eq!(capabilities.cost_class, ModelCostClass::Unknown);
+        assert_eq!(
+            capabilities.fallback_eligibility,
+            FallbackEligibility::Unknown
+        );
+    }
+
+    #[test]
+    fn completion_names_remain_source_compatible_aliases() {
+        let request: CompletionRequest = ModelRequest::default();
+        let _: ModelRequest = request;
+
+        let response = ModelResponse {
+            content: "ok".into(),
+            tool_calls: Vec::new(),
+            usage: Usage::default(),
+            finish_reason: "stop".into(),
+        };
+        let legacy: Completion = response;
+        let _: ModelResponse = legacy;
+    }
+
+    #[test]
+    fn model_reference_contains_no_endpoint_or_credentials() {
+        let reference = ModelReference::new("primary", "model-a");
+        let serialized = serde_json::to_value(&reference).expect("serialize reference");
+        assert_eq!(serialized["provider"], "primary");
+        assert_eq!(serialized["model"], "model-a");
+        assert_eq!(serialized.as_object().map(|o| o.len()), Some(2));
     }
 }

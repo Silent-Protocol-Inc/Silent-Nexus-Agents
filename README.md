@@ -1,4 +1,4 @@
-# Silent Nexus 1.0
+# Silent Nexus 1.1
 
 ```
   ▚  N  E  X  U  S
@@ -58,16 +58,17 @@ does not depend on the model's competence or good faith.
 
 ## Install
 
-The certified 1.0.0 target is `x86_64-unknown-linux-gnu`. Rust development and
-source builds use the pinned `1.97.0` toolchain and the committed lockfile.
-Other operating systems and architectures remain experimental until they have
+The 1.1.0 packaging and release gates target `x86_64-unknown-linux-gnu`. Rust
+development and source builds use the pinned `1.97.0` toolchain and committed
+lockfile. Certification is established only by a completed release report;
+other operating systems and architectures remain experimental until they have
 independent release evidence.
 
 From source:
 
 ```sh
-git clone https://github.com/silent-protocol/silent-nexus.git
-cd silent-nexus
+git clone https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents.git
+cd Silent-Nexus-Agents
 scripts/install.sh --user
 snx doctor --deep
 ```
@@ -228,7 +229,7 @@ full rollback uses the backup made before upgrade.
 
 Workspace data lives under `<workspace>/.nexus/state`; user configuration and
 auth profiles use the platform configuration directory (on Linux,
-`~/.config/silent-nexus`, subject to `XDG_CONFIG_HOME`). Silent Nexus 1.0 never
+`~/.config/silent-nexus`, subject to `XDG_CONFIG_HOME`). Silent Nexus 1.x never
 automatically deletes transcripts, goals, plans, tasks, memories, or artifacts.
 
 ## Documentation
@@ -241,6 +242,7 @@ automatically deletes transcripts, goals, plans, tasks, memories, or artifacts.
 - [`docs/upgrade-0.2-to-1.0.md`](docs/upgrade-0.2-to-1.0.md) — migration checklist
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — diagnostic playbook
 - [`docs/release-process.md`](docs/release-process.md) — reproducible release gates
+- [`docs/adaptive-harness-delivery-report.md`](docs/adaptive-harness-delivery-report.md) — 1.1 architecture and evidence template
 - [`docs/support.md`](docs/support.md) and [`docs/governance.md`](docs/governance.md)
 
 ## License

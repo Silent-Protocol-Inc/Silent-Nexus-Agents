@@ -1,4 +1,4 @@
-.TH SNX 1 "2026-07-17" "Silent Nexus 1.0.0" "User Commands"
+.TH SNX 1 "2026-07-17" "Silent Nexus 1.1.0" "User Commands"
 .SH NAME
 snx \- local-first agentic CLI with controlled execution
 .SH SYNOPSIS
@@ -16,8 +16,9 @@ validates tool schemas, capabilities, workspace paths, policy, approvals,
 sandbox metadata, output limits, secret redaction, and audit records before
 and after execution.
 .PP
-The certified 1.0.0 platform is x86_64 GNU/Linux. Other platforms are
-experimental until independently tested.
+The 1.1.0 release tooling targets x86_64 GNU/Linux. Certification requires a
+completed release report; other platforms are experimental until independently
+tested.
 .SH COMMON COMMANDS
 .TP
 .B snx
@@ -64,7 +65,7 @@ Run the TUI without the alternate screen.
 .B -v, --verbose
 Increase log verbosity.
 .SH ISOLATION
-Container execution is strong isolation for the 1.0 contract: commands run as
+Container execution is strong isolation for the 1.x contract: commands run as
 the invoking UID/GID with a read-only root filesystem, per-action workspace
 access, private-path masks, network disabled by default, dropped capabilities,
 and resource limits.
@@ -95,7 +96,7 @@ escalation and Git commit, push, remote, alias, or unrecognized operations are
 denied. Use audited typed workflows.
 .PP
 Report vulnerabilities privately through:
-.UR https://github.com/silent-protocol/silent-nexus/security/advisories/new
+.UR https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/security/advisories/new
 .UE
 .SH SEE ALSO
 .BR git (1),

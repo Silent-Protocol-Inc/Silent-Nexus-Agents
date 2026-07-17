@@ -40,15 +40,32 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     pub fn new(runtime: AgentRuntime) -> Self {
+        let configured = usize::try_from(runtime.limits.max_subagents).unwrap_or(usize::MAX);
         Self {
             runtime,
-            max_concurrency: 3,
+            max_concurrency: 3.min(configured.max(1)),
         }
     }
 
     pub fn with_concurrency(mut self, n: usize) -> Self {
-        self.max_concurrency = n.max(1);
+        let configured = usize::try_from(self.runtime.limits.max_subagents).unwrap_or(usize::MAX);
+        self.max_concurrency = n.max(1).min(configured.max(1));
         self
+    }
+
+    fn validate_delegations(&self, count: usize) -> Result<()> {
+        validate_delegation_budget(
+            count,
+            self.runtime.limits.max_subagents,
+            self.runtime.recursion_depth,
+            self.runtime.limits.max_recursion_depth,
+        )
+    }
+
+    fn child_runtime(&self) -> AgentRuntime {
+        let mut runtime = self.runtime.clone();
+        runtime.recursion_depth = runtime.recursion_depth.saturating_add(1);
+        runtime
     }
 
     /// Run read-only delegations in parallel (bounded). Rejects any
@@ -59,6 +76,7 @@ impl Orchestrator {
         delegations: Vec<Delegation>,
         approver: Arc<dyn ApprovalHandler>,
     ) -> Result<Vec<DelegationResult>> {
+        self.validate_delegations(delegations.len())?;
         for d in &delegations {
             if d.role.can_write() {
                 return Err(nexus_core::NexusError::Other(format!(
@@ -71,7 +89,7 @@ impl Orchestrator {
         for chunk in delegations.chunks(self.max_concurrency) {
             let mut handles = Vec::new();
             for d in chunk {
-                let runtime = self.runtime.clone();
+                let runtime = self.child_runtime();
                 let approver = approver.clone();
                 let session = session.clone();
                 let d = d.clone();
@@ -102,6 +120,7 @@ impl Orchestrator {
         delegations: Vec<Delegation>,
         approver: Arc<dyn ApprovalHandler>,
     ) -> Result<Vec<DelegationResult>> {
+        self.validate_delegations(delegations.len())?;
         let mut results = Vec::new();
         for d in delegations {
             tracing::info!(
@@ -110,7 +129,7 @@ impl Orchestrator {
                 expected = %d.expected_output,
                 "spawning subagent"
             );
-            let agent = AgentLoop::new(self.runtime.clone(), d.role);
+            let agent = AgentLoop::new(self.child_runtime(), d.role);
             let outcome = agent.run(session, &d.objective, approver.clone()).await?;
             results.push(DelegationResult {
                 role: d.role,
@@ -119,5 +138,38 @@ impl Orchestrator {
             });
         }
         Ok(results)
+    }
+}
+
+fn validate_delegation_budget(
+    count: usize,
+    max_subagents: u32,
+    recursion_depth: u8,
+    max_recursion_depth: u8,
+) -> Result<()> {
+    let max_subagents = usize::try_from(max_subagents).unwrap_or(usize::MAX);
+    if count > max_subagents {
+        return Err(nexus_core::NexusError::BudgetExhausted(format!(
+            "subagent request {count} exceeds the configured limit {max_subagents}"
+        )));
+    }
+    if count > 0 && u32::from(recursion_depth) >= u32::from(max_recursion_depth) {
+        return Err(nexus_core::NexusError::BudgetExhausted(format!(
+            "delegation depth {recursion_depth} reached the configured recursion limit {max_recursion_depth}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_delegation_budget;
+
+    #[test]
+    fn delegation_count_and_recursion_are_hard_limits() {
+        assert!(validate_delegation_budget(2, 2, 0, 2).is_ok());
+        assert!(validate_delegation_budget(3, 2, 0, 2).is_err());
+        assert!(validate_delegation_budget(1, 2, 2, 2).is_err());
+        assert!(validate_delegation_budget(0, 0, 0, 0).is_ok());
     }
 }

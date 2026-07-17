@@ -30,6 +30,10 @@ pub struct App {
     pub workspace_key: String,
     pub config: Arc<Config>,
     pub paths: ConfigPaths,
+    /// Private cross-workspace store for profile cards, pure profile memory,
+    /// and non-sensitive global harness patterns. It uses the same schema and
+    /// migration runner as the workspace store.
+    pub global_store: Store,
     pub store: Store,
     pub redactor: Arc<Redactor>,
     pub guard: Arc<WorkspaceGuard>,
@@ -99,10 +103,10 @@ impl App {
             .clone()
             .filter(|m| config.models.contains_key(m));
         if let Some(pinned) = &pinned_model {
-            config.routing.simple = Some(pinned.clone());
-            config.routing.coding = Some(pinned.clone());
-            config.routing.planning = Some(pinned.clone());
-            config.routing.fallback = Some(pinned.clone());
+            prefer_model_routes(&mut config, pinned);
+            // A pin changes the preferred model, not the independently
+            // approved fallback. Collapsing both to the same entry silently
+            // disabled recovery for real sessions.
         }
 
         config.validate()?;
@@ -111,6 +115,9 @@ impl App {
         // State directory holds the database and artifacts for this workspace.
         nexus_core::permissions::repair_private_tree(&paths.state_dir)?;
         let store = Store::open(&paths.state_dir.join("nexus.db"))?;
+        let global_state_dir = paths.global_dir.join("state");
+        nexus_core::permissions::repair_private_tree(&global_state_dir)?;
+        let global_store = Store::open(&global_state_dir.join("nexus.db"))?;
 
         // Redactor learns every secret value the process can see so none of
         // them appear in logs, audit records, or terminal output.
@@ -159,6 +166,7 @@ impl App {
             workspace,
             config,
             paths,
+            global_store,
             store,
             redactor,
             guard,
@@ -192,10 +200,9 @@ impl App {
         if let Some(session_id) = session.as_ref() {
             if let Ok(meta) = self.sessions().get(session_id.as_str()) {
                 if runtime_config.models.contains_key(&meta.model) {
-                    runtime_config.routing.simple = Some(meta.model.clone());
-                    runtime_config.routing.coding = Some(meta.model.clone());
-                    runtime_config.routing.planning = Some(meta.model.clone());
-                    runtime_config.routing.fallback = Some(meta.model);
+                    prefer_model_routes(&mut runtime_config, &meta.model);
+                    // Preserve the configured fallback as a distinct policy
+                    // choice; the session model is only the preferred route.
                 }
             }
         }
@@ -227,12 +234,24 @@ impl App {
             audit,
             sessions,
             redactor: self.redactor.clone(),
+            global_store: self.global_store.clone(),
             store: self.store.clone(),
             limits: TurnLimits {
                 max_steps: self.config.limits.max_steps_per_turn,
                 max_retries: self.config.limits.max_retries,
                 max_repeated_calls: self.config.limits.max_repeated_calls,
+                max_model_calls: self.config.limits.max_model_calls_per_turn,
+                max_tool_calls: self.config.limits.max_tool_calls_per_turn,
+                max_failures: self.config.limits.max_failures_per_turn,
+                max_total_tokens: self.config.limits.max_tokens_per_turn,
+                max_cost_micros: self.config.limits.max_cost_micros_per_turn,
+                max_duration_ms: u64::from(self.config.limits.max_turn_runtime_min)
+                    .saturating_mul(60_000),
+                max_memory_writes: self.config.limits.max_memory_writes_per_turn,
+                max_subagents: self.config.limits.max_subagents_per_run,
+                max_recursion_depth: self.config.limits.max_recursion_depth,
             },
+            recursion_depth: 0,
         })
     }
 
@@ -253,6 +272,12 @@ impl App {
 
     pub fn audit(&self) -> AuditLog {
         AuditLog::new(self.store.clone(), self.redactor.clone())
+    }
+
+    /// Canonical adaptive-harness service used by menus and compatibility
+    /// commands. It routes global/profile and workspace records safely.
+    pub fn harness(&self) -> crate::control_plane::HarnessControlPlane<'_> {
+        crate::control_plane::HarnessControlPlane::new(self)
     }
 
     pub fn sessions(&self) -> SessionStore {
@@ -375,6 +400,12 @@ impl App {
     }
 }
 
+fn prefer_model_routes(config: &mut Config, model_name: &str) {
+    config.routing.simple = Some(model_name.to_string());
+    config.routing.coding = Some(model_name.to_string());
+    config.routing.planning = Some(model_name.to_string());
+}
+
 /// When no models are configured but a Codex session exists, install the
 /// default `codex` model so `snx` works out of the box after `codex login`.
 /// The model id comes from the account's cached plan listing (refreshed by
@@ -437,5 +468,24 @@ mod tests {
 
         assert!(!install_codex_default_model(&mut config, true));
         assert!(!config.models.contains_key("codex"));
+    }
+
+    #[test]
+    fn preferred_model_override_preserves_distinct_fallback_policy() {
+        let mut config = Config::default();
+        config.routing.fallback = Some("approved-fallback".into());
+
+        prefer_model_routes(&mut config, "session-preferred");
+
+        assert_eq!(config.routing.simple.as_deref(), Some("session-preferred"));
+        assert_eq!(config.routing.coding.as_deref(), Some("session-preferred"));
+        assert_eq!(
+            config.routing.planning.as_deref(),
+            Some("session-preferred")
+        );
+        assert_eq!(
+            config.routing.fallback.as_deref(),
+            Some("approved-fallback")
+        );
     }
 }

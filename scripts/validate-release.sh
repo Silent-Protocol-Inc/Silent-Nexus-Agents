@@ -3,7 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARCHIVE="${1:-$ROOT/dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz}"
+VERSION="$(python3 -c 'import pathlib,tomllib,sys; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["workspace"]["package"]["version"])' "$ROOT/Cargo.toml")"
+ARCHIVE="${1:-$ROOT/dist/silent-nexus-${VERSION}-x86_64-unknown-linux-gnu.tar.gz}"
 [[ -f "$ARCHIVE" ]] || { echo "error: archive not found: $ARCHIVE" >&2; exit 1; }
 
 if tar -tzf "$ARCHIVE" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
@@ -18,7 +19,7 @@ fi
 TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT
 tar -xzf "$ARCHIVE" -C "$TEMP"
-PACKAGE_ROOT="$(find "$TEMP" -mindepth 1 -maxdepth 1 -type d -name 'silent-nexus-1.0.0-*' -print -quit)"
+PACKAGE_ROOT="$(find "$TEMP" -mindepth 1 -maxdepth 1 -type d -name "silent-nexus-${VERSION}-*" -print -quit)"
 [[ -n "$PACKAGE_ROOT" ]] || { echo "error: package root missing" >&2; exit 1; }
 
 for required in \
@@ -36,7 +37,7 @@ done
   sha256sum -c SHA256SUMS
 )
 "$ROOT/scripts/validate-spdx.py" "$PACKAGE_ROOT/SBOM.spdx.json"
-"$PACKAGE_ROOT/snx" --version | grep -F "1.0.0" >/dev/null
+"$PACKAGE_ROOT/snx" --version | grep -F "$VERSION" >/dev/null
 "$PACKAGE_ROOT/snx" --no-color about --compact | grep -F "x86_64-unknown-linux-gnu" >/dev/null
 
 if [[ -f "$(dirname "$ARCHIVE")/SHA256SUMS" ]]; then

@@ -5,6 +5,11 @@ capability that can affect the world lives in Rust, on the harness side of a
 boundary the model cannot cross. This document describes the per-turn pipeline
 and the crate responsibilities that enforce it.
 
+The 1.1 adaptive control-plane architecture and its validation status are
+tracked in [`adaptive-harness-delivery-report.md`](adaptive-harness-delivery-report.md).
+That report is an evidence template, not a claim that an unvalidated release is
+complete.
+
 ## The controlled agent loop
 
 Each turn runs this pipeline (`nexus-agent`):

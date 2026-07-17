@@ -300,9 +300,12 @@ mod tests {
     #[test]
     fn dangerous_git_environment_is_removed() {
         let directory = repository();
-        std::env::set_var("GIT_CONFIG_COUNT", "1");
+        // Parallel tests spawn git processes that inherit this process env.
+        // GIT_CONFIG_COUNT must never be visible without its KEY/VALUE pair,
+        // or those spawns abort with "missing config key GIT_CONFIG_KEY_0".
         std::env::set_var("GIT_CONFIG_KEY_0", "alias.status");
         std::env::set_var("GIT_CONFIG_VALUE_0", "!exit 91");
+        std::env::set_var("GIT_CONFIG_COUNT", "1");
         let output = GitRunner::new(directory.path())
             .run(&["status", "--short"])
             .expect("run");

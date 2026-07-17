@@ -1638,11 +1638,12 @@ dependencies = [
 
 [[package]]
 name = "nexus-agent"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "hex",
  "nexus-context",
  "nexus-core",
  "nexus-goals",
@@ -1657,6 +1658,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "toml",
@@ -1665,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-app"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1702,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1737,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-context"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "nexus-core",
  "nexus-models",
@@ -1749,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1776,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-goals"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "nexus-core",
@@ -1790,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-index"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "hex",
  "ignore",
@@ -1806,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-mcp"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "nexus-core",
  "rusqlite",
@@ -1819,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-memory"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "nexus-core",
@@ -1833,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-models"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1853,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-observability"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "nexus-core",
@@ -1868,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-policy"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "nexus-core",
  "pretty_assertions",
@@ -1880,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-sandbox"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -1895,7 +1897,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-skills"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "nexus-core",
  "rusqlite",
@@ -1907,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-tools"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1940,7 +1942,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-tui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "crossterm",

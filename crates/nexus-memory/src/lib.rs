@@ -1037,6 +1037,31 @@ impl RsiStore {
         Ok(())
     }
 
+    /// Move an approved proposal to `applied`, or an applied one back to
+    /// `rolled_back`. The status precondition is part of the UPDATE so a
+    /// stale view can never skip the approval gate.
+    pub fn set_applied(&self, id: &str, applied: bool) -> Result<()> {
+        let (required, next) = if applied {
+            ("approved", "applied")
+        } else {
+            ("applied", "rolled_back")
+        };
+        let changed = self.store.with(|conn| {
+            Ok(conn.execute(
+                "UPDATE rsi_proposals SET status = ?1, reviewed_at = ?2
+                 WHERE id = ?3 AND status = ?4",
+                rusqlite::params![next, nexus_core::now_rfc3339(), id, required],
+            )?)
+        })?;
+        if changed == 0 {
+            let current = self.get(id)?.status;
+            return Err(NexusError::Config(format!(
+                "RSI proposal `{id}` is `{current}` — only `{required}` proposals can become `{next}`"
+            )));
+        }
+        Ok(())
+    }
+
     fn propose(
         &self,
         kind: &str,
@@ -1418,5 +1443,34 @@ mod tests {
         assert_eq!(focused.len(), 1);
         assert_eq!(focused[0].status, "approved");
         assert!(focused[0].trait_value.contains("concise"));
+    }
+
+    #[test]
+    fn rsi_apply_and_rollback_respect_the_status_gate() {
+        let db = Store::open_in_memory().expect("store");
+        db.with(|conn| {
+            conn.execute(
+                "INSERT INTO rsi_proposals (id, kind, title, body, risk, status, created_at)
+                 VALUES ('rsi_1', 'prompt', 'tighten summaries', '{}', 'review', 'pending', ?1)",
+                [nexus_core::now_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .expect("proposal");
+        let rsi = RsiStore::new(db, "/ws");
+
+        // Pending proposals can be neither applied nor rolled back.
+        assert!(rsi.set_applied("rsi_1", true).is_err());
+        assert!(rsi.set_applied("rsi_1", false).is_err());
+
+        rsi.review("rsi_1", true).expect("approve");
+        rsi.set_applied("rsi_1", true).expect("apply");
+        assert_eq!(rsi.get("rsi_1").expect("get").status, "applied");
+
+        // Applying twice is rejected; rollback returns it to rolled_back.
+        assert!(rsi.set_applied("rsi_1", true).is_err());
+        rsi.set_applied("rsi_1", false).expect("rollback");
+        assert_eq!(rsi.get("rsi_1").expect("get").status, "rolled_back");
+        assert!(rsi.set_applied("rsi_1", false).is_err());
     }
 }

@@ -26,7 +26,10 @@ pub use discovery::{
     list_openai_models_with_tls, validate_base_url, DiscoveredModel, ProbeError, ProbeFailure,
     ProbeOutcome,
 };
-pub use manager::{detect_local_models, detect_local_servers, LocalRuntime, ModelManager};
+pub use manager::{
+    detect_local_models, detect_local_servers, LocalRuntime, ModelManager, PreStreamFallback,
+    PreStreamFallbackReason, RoutedModelStream,
+};
 pub use provider::{collect_stream, ModelProvider};
 pub use types::*;
 
@@ -159,5 +162,38 @@ mod integration_tests {
             .expect("completion");
         assert_eq!(completion.content, "pong");
         assert_eq!(completion.usage.prompt_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn ollama_stream_parses_terminal_record_without_trailing_newline() {
+        let server = MockServer::start().await;
+        let body = concat!(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},",
+            "\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}"
+        );
+        assert!(!body.ends_with('\n'));
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/x-ndjson"))
+            .mount(&server)
+            .await;
+        let mut cfg = model_config(&server.uri());
+        cfg.provider = "ollama".into();
+        let provider = ollama::OllamaProvider::new(&cfg).expect("provider");
+        let response = collect_stream(
+            provider
+                .stream(ModelRequest {
+                    messages: vec![ChatMessage::user("ping")],
+                    ..Default::default()
+                })
+                .await
+                .expect("stream"),
+        )
+        .await
+        .expect("collect");
+        assert_eq!(response.content, "pong");
+        assert_eq!(response.usage.prompt_tokens, 5);
+        assert_eq!(response.usage.completion_tokens, 2);
+        assert_eq!(response.finish_reason, "stop");
     }
 }

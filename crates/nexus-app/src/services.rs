@@ -209,6 +209,7 @@ pub fn goal_create(app: &App, spec: GoalSpec) -> Result<String> {
         workspace: app.workspace_key.clone(),
     })?;
     let id = id.as_str().to_string();
+    app.harness().sync_legacy_goal(&id)?;
     app.update_ui_state(|s| s.active_goal = Some(id.clone()))?;
     Ok(id)
 }
@@ -228,7 +229,9 @@ pub fn goal_fast_create(app: &App, objective: &str) -> Result<String> {
 }
 
 pub fn goal_transition(app: &App, goal_id: &str, next: GoalStatus, reason: &str) -> Result<()> {
-    app.goals().transition(goal_id, next, reason)
+    app.goals().transition(goal_id, next, reason)?;
+    app.harness().sync_legacy_goal(goal_id)?;
+    Ok(())
 }
 
 /// Resolve which goal an argument-less `/pause`//`/cancel`//`/plan` targets.
@@ -367,6 +370,65 @@ pub fn goal_verify_report(app: &App, id: &str) -> Result<Report> {
     Ok(r)
 }
 
+/// Archive a finished goal: the legacy record must already be terminal, then
+/// the canonical harness card moves to `archived` so pickers stop showing it.
+pub fn goal_archive(app: &App, id: &str) -> Result<Report> {
+    let legacy = app.goals().get(id)?;
+    if !legacy.status.is_terminal() {
+        return Err(NexusError::Config(format!(
+            "goal `{id}` is {} — complete or cancel it before archiving",
+            legacy.status.as_str()
+        )));
+    }
+    let mut goal = app.harness().sync_legacy_goal(id)?;
+    goal.status = nexus_core::harness::GoalStatus::Archived;
+    goal.updated_at = nexus_core::now_rfc3339();
+    app.harness().workspace_repository().save_goal(&goal)?;
+    Ok(Report::untitled().ok(format!("archived goal {id}")))
+}
+
+/// Combined risk view for one goal: live blockers plus the risks recorded on
+/// the active plan version, so nothing hides in a single surface.
+pub fn goal_risks_report(app: &App, id: &str) -> Result<Report> {
+    let legacy = app.goals().get(id)?;
+    let goal = app.harness().sync_legacy_goal(id)?;
+    let mut report = Report::new(format!("goal risks — {}", legacy.title))
+        .field("id", id)
+        .field("status", legacy.status.as_str());
+    report = report.header("blockers");
+    if legacy.blockers.is_empty() {
+        report = report.line_sev("none recorded", Sev::Dim);
+    }
+    for blocker in &legacy.blockers {
+        report = report.line_sev(blocker, Sev::Warn);
+    }
+    report = report.header("plan risks");
+    let plan = match (goal.active_plan_id.as_deref(), goal.active_plan_version) {
+        (Some(plan_id), Some(version)) => app
+            .harness()
+            .workspace_repository()
+            .plan(plan_id, version)
+            .ok(),
+        _ => None,
+    };
+    match plan {
+        Some(plan) if !plan.risks.is_empty() => {
+            for risk in &plan.risks {
+                report = report.line_sev(
+                    format!(
+                        "{} (likelihood {}, impact {}) — mitigation: {}",
+                        risk.description, risk.likelihood, risk.impact, risk.mitigation
+                    ),
+                    Sev::Warn,
+                );
+            }
+        }
+        Some(_) => report = report.line_sev("active plan records no risks", Sev::Dim),
+        None => report = report.line_sev("no active plan attached", Sev::Dim),
+    }
+    Ok(report)
+}
+
 // --------------------------------------------------------------------- resume
 
 /// One resumable thing, ready for the `/resume` picker.
@@ -423,6 +485,72 @@ pub fn resume_candidates(app: &App) -> Result<Vec<ResumeCandidate>> {
         });
     }
     Ok(out)
+}
+
+/// Validate the latest checkpoint before a session is resumed: recompute the
+/// checkpointed file hashes with the loop's own recipe, check that the
+/// session's model is still configured, and render the harness recovery
+/// assessment. `None` when the session has no checkpoint to validate.
+pub fn resume_recovery_report(app: &App, session_id: &str) -> Result<Option<Report>> {
+    let harness = app.harness();
+    let repository = harness.workspace_repository();
+    let Some(checkpoint) = repository.latest_checkpoint(session_id)? else {
+        return Ok(None);
+    };
+    let mut current_hashes = std::collections::BTreeMap::new();
+    for path in checkpoint.file_hashes.keys() {
+        if let Some(hash) = nexus_core::harness::checkpoint_file_hash(&app.workspace.join(path)) {
+            current_hashes.insert(path.clone(), hash);
+        }
+    }
+    let model = app.sessions().get(session_id)?.model;
+    let model_available = app.config.models.contains_key(&model);
+    // The stored fingerprint folds workspace, model, provider, and file hashes
+    // together; reproduce its "unchanged" case exactly and mark any drift.
+    let current_fingerprint = if current_hashes == checkpoint.file_hashes && model_available {
+        checkpoint.environment_fingerprint.clone()
+    } else {
+        format!("drifted-from:{}", checkpoint.environment_fingerprint)
+    };
+    let assessment = repository.assess_recovery(
+        &checkpoint.id,
+        &current_fingerprint,
+        &current_hashes,
+        &checkpoint.assumptions,
+        model_available,
+        model_available,
+    )?;
+    let mut report = Report::new("resume check")
+        .field("checkpoint", &checkpoint.id)
+        .field("captured", &checkpoint.created_at)
+        .field("model", &model)
+        .field(
+            "strategy",
+            assessment.recommended_strategy.replace('_', " "),
+        );
+    if !model_available {
+        report = report.warn(format!(
+            "model `{model}` is no longer configured — pick one with /model before continuing"
+        ));
+    }
+    for path in &assessment.changed_files {
+        report = report.warn(format!("changed since checkpoint: {path}"));
+    }
+    for path in &assessment.missing_files {
+        report = report.warn(format!("missing since checkpoint: {path}"));
+    }
+    for assumption in &assessment.stale_assumptions {
+        report = report.warn(format!("stale assumption: {assumption}"));
+    }
+    report = if assessment.safe_to_resume_exactly {
+        report.ok("environment matches the checkpoint — safe to continue")
+    } else {
+        report.warn(
+            "environment drifted since the checkpoint — review the notes above; \
+             the agent will re-ground instead of replaying old steps",
+        )
+    };
+    Ok(Some(report))
 }
 
 pub fn resume_report(app: &App) -> Result<Report> {
@@ -483,6 +611,108 @@ pub fn model_clear(app: &App) -> Result<Report> {
 }
 
 // --------------------------------------------------------------------- agents
+
+/// Detail view for one built-in role or custom agent definition.
+pub fn agent_show_report(app: &App, name: &str) -> Result<Report> {
+    if let Some(role) = AgentRole::parse(name) {
+        return Ok(Report::new(format!("agent {}", role.as_str()))
+            .field(
+                "access",
+                if role.can_write() {
+                    "read-write"
+                } else {
+                    "read-only"
+                },
+            )
+            .field("task class", role.task_class().as_str())
+            .field("max risk", format!("{:?}", role.max_risk()))
+            .field(
+                "delegation",
+                if role.can_delegate() {
+                    "may spawn subagents"
+                } else {
+                    "no delegation"
+                },
+            )
+            .field(
+                "tools",
+                role.tool_categories()
+                    .iter()
+                    .map(|category| format!("{category:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+            .line(role.output_contract()));
+    }
+    let catalog = app.agent_catalog()?;
+    let Some(definition) = catalog
+        .list()
+        .into_iter()
+        .find(|definition| definition.name == name)
+    else {
+        return Err(NexusError::NotFound(format!("agent `{name}`")));
+    };
+    let mut report = Report::new(format!("agent {name}"))
+        .field("kind", format!("custom · {}", definition.scope))
+        .field("inherits", definition.base.to_string())
+        .field(
+            "access",
+            if definition.can_write()? {
+                "read-write"
+            } else {
+                "read-only"
+            },
+        );
+    if !definition.description.is_empty() {
+        report = report.line(definition.description.clone());
+    }
+    Ok(report)
+}
+
+/// Classifier-driven agent recommendation. Read-only by design: an agent
+/// switch can change permissions, so the harness only recommends and the
+/// operator confirms with `/agent <role>`.
+pub fn agent_recommend_report(app: &App, objective: &str) -> Result<Report> {
+    let class = nexus_agent::classify::classify(objective);
+    let recommended = match class {
+        nexus_models::types::TaskClass::Planning => Some(AgentRole::Planner),
+        nexus_models::types::TaskClass::Research => Some(AgentRole::Researcher),
+        nexus_models::types::TaskClass::Verification => Some(AgentRole::Reviewer),
+        nexus_models::types::TaskClass::Coding => Some(AgentRole::Implementer),
+        nexus_models::types::TaskClass::Simple => None,
+    };
+    let current = app.active_agent();
+    let mut report = Report::new("agent recommendation")
+        .field("objective class", class.as_str())
+        .field("current agent", &current);
+    match recommended {
+        None => {
+            report = report.ok("simple request — the current agent is fine");
+        }
+        Some(role) if role.as_str() == current => {
+            report = report.ok(format!(
+                "`{}` is already the right agent for this work",
+                role.as_str()
+            ));
+        }
+        Some(role) => {
+            report = report
+                .field("recommended", role.as_str())
+                .line(format!("switch with `/agent {}`", role.as_str()));
+            let widens = role.can_write()
+                && AgentRole::parse(&current)
+                    .map(|current| !current.can_write())
+                    .unwrap_or(false);
+            if widens {
+                report = report.warn(
+                    "switching widens permissions from read-only to read-write — \
+                     the harness never does this automatically",
+                );
+            }
+        }
+    }
+    Ok(report)
+}
 
 pub fn agents_report(app: &App) -> Result<Report> {
     let mut rows: Vec<Vec<String>> = AgentRole::all()
@@ -567,6 +797,7 @@ pub fn persona_create(
     let id = app
         .personas()
         .create(name, scope, parent, description, instructions)?;
+    app.harness().sync_persona(&id)?;
     Ok(Report::untitled().ok(format!("created persona `{name}` ({id})")))
 }
 
@@ -590,6 +821,7 @@ pub fn persona_select(app: &App, id_or_name: Option<&str>) -> Result<Report> {
 
 pub fn persona_clone(app: &App, source: &str, new_name: &str, scope: &str) -> Result<Report> {
     let id = app.personas().clone_persona(source, new_name, scope)?;
+    app.harness().sync_persona(&id)?;
     Ok(Report::untitled().ok(format!("cloned persona as `{new_name}` ({id})")))
 }
 
@@ -601,35 +833,91 @@ pub fn persona_edit(app: &App, id: &str, instructions: &str) -> Result<Report> {
         instructions,
         persona.parent_id.as_deref(),
     )?;
+    app.harness().sync_persona(&persona.id)?;
     Ok(Report::untitled().ok(format!("updated persona `{}`", persona.name)))
 }
 
-pub fn profile_report(app: &App, include_pending: bool) -> Result<Report> {
-    let profile = app.read_ui_state(|state| state.profile_name.clone());
-    let traits = app.profiles().list(&profile, include_pending)?;
-    let report = Report::new("profile").field("active profile", &profile);
-    if traits.is_empty() {
-        return Ok(report.warn("no profile traits yet — add one with /profile add <key> <value>"));
+/// Full detail for one persona, including the instructions actually composed
+/// into prompts (with inheritance resolved) — what you see is what runs.
+pub fn persona_show_report(app: &App, id_or_name: &str) -> Result<Report> {
+    let personas = app.personas();
+    let persona = personas.get(id_or_name)?;
+    let resolved = personas.resolved_instructions(&persona.id)?;
+    let selected = app.read_ui_state(|state| state.selected_persona.clone());
+    let mut report = Report::new(format!("persona {}", persona.name))
+        .field("id", &persona.id)
+        .field("scope", &persona.scope)
+        .field(
+            "selected",
+            if selected.as_deref() == Some(persona.id.as_str()) {
+                "yes (new sessions)"
+            } else {
+                "no"
+            },
+        );
+    if let Some(parent) = &persona.parent_id {
+        report = report.field("inherits", parent);
     }
-    let rows = traits
+    if !persona.description.is_empty() {
+        report = report.field("description", &persona.description);
+    }
+    Ok(report.header("resolved instructions").line(resolved))
+}
+
+pub fn profile_report(app: &App, include_pending: bool) -> Result<Report> {
+    let context = app.harness().ensure_context(None)?;
+    let profile_id = context
+        .profile_id
+        .ok_or_else(|| NexusError::NotFound("no active profile".into()))?;
+    let profile = app.harness().global_repository().profile(&profile_id)?;
+    let mut rows = app
+        .harness()
+        .global_repository()
+        .profile_facts(&profile_id, include_pending)?
         .into_iter()
-        .map(|record| {
+        .map(|fact| {
             vec![
-                record.id,
-                record.status,
-                record.trait_key,
-                record.trait_value,
-                format!("{:.0}%", record.confidence * 100.0),
-                record.sensitivity,
-                record.source_session.unwrap_or_default(),
+                fact.id,
+                format!("{:?}", fact.status).to_ascii_lowercase(),
+                fact.key,
+                fact.value.to_string().trim_matches('"').to_string(),
+                format!("{:.0}%", fact.confidence * 100.0),
+                fact.sensitivity,
+                fact.source_ref.unwrap_or_default(),
             ]
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    // Preserve visibility of pre-1.1 profile traits while the canonical
+    // records are populated incrementally through normal edits.
+    rows.extend(
+        app.profiles()
+            .list(&profile.display_name, include_pending)?
+            .into_iter()
+            .map(|record| {
+                vec![
+                    record.id,
+                    record.status,
+                    record.trait_key,
+                    record.trait_value,
+                    format!("{:.0}%", record.confidence * 100.0),
+                    record.sensitivity,
+                    record.source_session.unwrap_or_default(),
+                ]
+            }),
+    );
+    let report = Report::new("profile")
+        .field("active profile", &profile.display_name)
+        .field("profile id", profile.id)
+        .field("isolation", "profile-scoped canonical store");
+    if rows.is_empty() {
+        return Ok(report.warn("no profile facts yet — add one from the profile menu"));
+    }
     Ok(report.table(
         &[
             "id",
             "status",
-            "trait",
+            "fact",
             "value",
             "confidence",
             "sensitivity",
@@ -637,6 +925,85 @@ pub fn profile_report(app: &App, include_pending: bool) -> Result<Report> {
         ],
         rows,
     ))
+}
+
+pub fn profiles_report(app: &App) -> Result<Report> {
+    let context = app.harness().ensure_context(None)?;
+    let profiles = app.harness().global_repository().profiles(true)?;
+    if profiles.is_empty() {
+        return Ok(Report::new("profiles").warn("no profile cards"));
+    }
+    let rows = profiles
+        .into_iter()
+        .map(|profile| {
+            vec![
+                if context.profile_id.as_deref() == Some(profile.id.as_str()) {
+                    "active".into()
+                } else {
+                    String::new()
+                },
+                profile.id,
+                profile.display_name,
+                format!("{:?}", profile.status).to_ascii_lowercase(),
+                profile.last_seen_at.unwrap_or_default(),
+            ]
+        })
+        .collect();
+    Ok(Report::new("profile cards").table(&["", "id", "name", "status", "last active"], rows))
+}
+
+pub fn profile_conflicts_report(app: &App) -> Result<Report> {
+    let conflicts = app
+        .harness()
+        .global_repository()
+        .identity_conflicts(false)?;
+    if conflicts.is_empty() {
+        return Ok(Report::new("identity conflicts").ok("no identity conflicts"));
+    }
+    let rows = conflicts
+        .into_iter()
+        .map(|conflict| {
+            vec![
+                conflict.id,
+                format!("{:?}", conflict.status).to_ascii_lowercase(),
+                conflict.active_profile_id.unwrap_or_default(),
+                conflict.asserted_name,
+                conflict.matching_profile_ids.join(", "),
+                conflict.source_ref.unwrap_or_default(),
+            ]
+        })
+        .collect();
+    Ok(Report::new("identity conflicts").table(
+        &["id", "status", "active", "asserted", "matches", "source"],
+        rows,
+    ))
+}
+
+pub fn profile_resolve_conflict(
+    app: &App,
+    session_id: Option<&str>,
+    conflict_id: &str,
+    decision: nexus_core::harness::IdentityConflictDecision,
+) -> Result<Report> {
+    let resolution = app
+        .harness()
+        .resolve_identity_conflict(session_id, conflict_id, decision)?;
+    let mut report = Report::new("identity conflict resolved")
+        .field("conflict", resolution.conflict.id)
+        .field(
+            "resolution",
+            resolution
+                .conflict
+                .resolution
+                .as_deref()
+                .unwrap_or("dismissed"),
+        );
+    if let Some(profile) = resolution.selected_profile {
+        report = report
+            .field("active profile", profile.display_name)
+            .field("profile id", profile.id);
+    }
+    Ok(report.ok("identity decision saved with provenance"))
 }
 
 pub fn profile_add(
@@ -671,6 +1038,8 @@ pub fn profile_add(
         .as_ref()
         .map(|record| record.status.as_str())
         .unwrap_or("pending");
+    app.harness()
+        .add_profile_fact(source_session, key, value, explicit)?;
     Ok(Report::untitled().ok(format!("profile trait stored as {status} ({id})")))
 }
 
@@ -692,11 +1061,128 @@ pub fn profile_select(app: &App, profile_name: &str) -> Result<Report> {
 }
 
 pub fn profile_review(app: &App, id: &str, approve: bool) -> Result<Report> {
-    app.profiles().review(id, approve)?;
+    let context = app.harness().ensure_context(None)?;
+    let profile_id = context
+        .profile_id
+        .ok_or_else(|| NexusError::NotFound("no active profile".into()))?;
+    match app.harness().global_repository().set_profile_fact_status(
+        &profile_id,
+        id,
+        if approve {
+            nexus_core::harness::ProfileFactStatus::Active
+        } else {
+            nexus_core::harness::ProfileFactStatus::Rejected
+        },
+    ) {
+        Ok(_) => {}
+        Err(NexusError::NotFound(_)) => app.profiles().review(id, approve)?,
+        Err(error) => return Err(error),
+    }
     Ok(Report::untitled().ok(format!(
-        "{} profile trait {id}",
+        "{} profile fact {id}",
         if approve { "approved" } else { "rejected" }
     )))
+}
+
+pub fn profile_delete_fact(app: &App, id: &str) -> Result<Report> {
+    let context = app.harness().ensure_context(None)?;
+    let profile_id = context
+        .profile_id
+        .ok_or_else(|| NexusError::NotFound("no active profile".into()))?;
+    match app.harness().global_repository().set_profile_fact_status(
+        &profile_id,
+        id,
+        nexus_core::harness::ProfileFactStatus::Deleted,
+    ) {
+        Ok(_) => {}
+        Err(NexusError::NotFound(_)) => app.profiles().delete(id)?,
+        Err(error) => return Err(error),
+    }
+    Ok(Report::untitled().ok(format!("deleted profile fact {id}")))
+}
+
+pub fn profile_set_status(
+    app: &App,
+    profile_id: &str,
+    status: nexus_core::harness::ProfileStatus,
+) -> Result<Report> {
+    let context = app.harness().ensure_context(None)?;
+    if context.profile_id.as_deref() == Some(profile_id)
+        && status != nexus_core::harness::ProfileStatus::Active
+    {
+        return Err(NexusError::PolicyDenied(
+            "switch to another profile before archiving or deleting the active profile".into(),
+        ));
+    }
+    let profile = app
+        .harness()
+        .global_repository()
+        .set_profile_status(profile_id, status)?;
+    Ok(Report::untitled().ok(format!(
+        "profile `{}` → {}",
+        profile.display_name,
+        format!("{:?}", profile.status).to_ascii_lowercase()
+    )))
+}
+
+/// Rename the active profile card. Aliases keep the old name so recall by
+/// the previous name still resolves to the same person.
+pub fn profile_rename(app: &App, new_name: &str) -> Result<Report> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err(NexusError::Config("new profile name is required".into()));
+    }
+    let context = app.harness().ensure_context(None)?;
+    let profile_id = context
+        .profile_id
+        .ok_or_else(|| NexusError::NotFound("no active profile to rename".into()))?;
+    let harness = app.harness();
+    let repository = harness.global_repository();
+    let mut profile = repository.profile(&profile_id)?;
+    let old_name = profile.display_name.clone();
+    if old_name == new_name {
+        return Ok(Report::untitled().ok(format!("profile is already named `{new_name}`")));
+    }
+    if !profile.aliases.iter().any(|alias| alias == &old_name) {
+        profile.aliases.push(old_name.clone());
+    }
+    profile.display_name = new_name.to_string();
+    repository.update_profile(&profile)?;
+    Ok(Report::untitled().ok(format!(
+        "renamed profile `{old_name}` → `{new_name}` (old name kept as alias)"
+    )))
+}
+
+/// Export the active profile card and its approved facts as JSON. Candidate
+/// (unreviewed) facts stay out of the export by design.
+pub fn profile_export(app: &App, path: Option<&str>) -> Result<Report> {
+    let context = app.harness().ensure_context(None)?;
+    let profile_id = context
+        .profile_id
+        .ok_or_else(|| NexusError::NotFound("no active profile to export".into()))?;
+    let harness = app.harness();
+    let repository = harness.global_repository();
+    let profile = repository.profile(&profile_id)?;
+    let facts = repository.profile_facts(&profile_id, false)?;
+    let json = serde_json::to_string_pretty(&serde_json::json!({
+        "profile": profile,
+        "approved_facts": facts,
+    }))?;
+    match path {
+        Some(path) => {
+            std::fs::write(path, &json)
+                .map_err(|error| NexusError::Other(format!("write `{path}`: {error}")))?;
+            Ok(Report::new("profile export").ok(format!(
+                "exported profile `{}` with {} approved fact(s) to {path}",
+                profile.display_name,
+                facts.len()
+            )))
+        }
+        None => Ok(Report::new("profile export")
+            .field("profile", profile.display_name.clone())
+            .field("approved facts", facts.len().to_string())
+            .line(json)),
+    }
 }
 
 pub fn rsi_report(app: &App, include_reviewed: bool) -> Result<Report> {
@@ -743,6 +1229,59 @@ pub fn rsi_review(app: &App, id: &str, approve: bool) -> Result<Report> {
     )))
 }
 
+pub fn improve_show_report(app: &App, id: &str) -> Result<Report> {
+    let proposal = app.rsi().get(id)?;
+    let mut report = Report::new(format!("improvement {}", proposal.id))
+        .field("kind", &proposal.kind)
+        .field("status", &proposal.status)
+        .field("title", &proposal.title)
+        .field("risk", &proposal.risk)
+        .field("created", &proposal.created_at);
+    if let Some(session) = &proposal.source_session {
+        report = report.field("source session", session);
+    }
+    if let Some(reviewed) = &proposal.reviewed_at {
+        report = report.field("reviewed", reviewed);
+    }
+    Ok(report.header("proposed change").line(proposal.body))
+}
+
+/// Apply an approved improvement proposal, or roll an applied one back.
+/// Skill proposals are the only kind with an automatic side effect: apply
+/// enables the stored (disabled) skill, rollback disables it again. Every
+/// other kind is a recorded operator decision with the change made manually.
+pub fn improve_set_applied(app: &App, id: &str, applied: bool) -> Result<Report> {
+    let proposal = app.rsi().get(id)?;
+    let required = if applied { "approved" } else { "applied" };
+    if proposal.status != required {
+        return Err(NexusError::Config(format!(
+            "RSI proposal `{id}` is `{}` — only `{required}` proposals can be {}",
+            proposal.status,
+            if applied { "applied" } else { "rolled back" }
+        )));
+    }
+    let mut skill_note = "";
+    if proposal.kind == "skill" {
+        let manifest: nexus_skills::SkillManifest =
+            serde_json::from_str(&proposal.body).map_err(|error| {
+                NexusError::Other(format!(
+                    "stored skill proposal is not a valid manifest: {error}"
+                ))
+            })?;
+        skill_set_enabled(app, &manifest.name, applied)?;
+        skill_note = if applied {
+            " (skill enabled)"
+        } else {
+            " (skill disabled)"
+        };
+    }
+    app.rsi().set_applied(id, applied)?;
+    Ok(Report::untitled().ok(format!(
+        "{} improvement {id}{skill_note}",
+        if applied { "applied" } else { "rolled back" }
+    )))
+}
+
 pub fn agent_set(app: &App, role: &str) -> Result<Report> {
     let (base, custom) = app.resolve_agent(role).map_err(|_| {
         NexusError::Config(format!(
@@ -766,11 +1305,17 @@ pub fn agent_set(app: &App, role: &str) -> Result<Report> {
 // --------------------------------------------------------------------- memory
 
 pub fn memory_report(app: &App, query: Option<&str>) -> Result<Report> {
-    let mem = app.memory();
-    let list = match query {
-        Some(q) => mem.search(q, 30)?,
-        None => mem.list(true, 100)?,
-    };
+    memory_report_for_context(app, None, query)
+}
+
+pub fn memory_report_for_context(
+    app: &App,
+    session_id: Option<&str>,
+    query: Option<&str>,
+) -> Result<Report> {
+    let list = app
+        .harness()
+        .memories(session_id, query, query.is_none(), 100)?;
     if list.is_empty() {
         return Ok(Report::new("memory").warn(match query {
             Some(_) => "no matches",
@@ -781,37 +1326,274 @@ pub fn memory_report(app: &App, query: Option<&str>) -> Result<Report> {
         .iter()
         .map(|r| {
             vec![
-                r.id.as_str().to_string(),
-                r.kind.as_str().to_string(),
-                if r.approved {
-                    "✓".into()
-                } else {
-                    "pending".into()
-                },
+                r.id.clone(),
+                format!("{:?}", r.memory_type).to_ascii_lowercase(),
+                format!("{:?}", r.status).to_ascii_lowercase(),
+                memory_scope_label(&r.scope),
                 r.content.clone(),
             ]
         })
         .collect();
-    Ok(Report::new("memory").table(&["id", "kind", "approved", "content"], rows))
+    Ok(Report::new("memory").table(&["id", "type", "status", "scope", "content"], rows))
 }
 
 pub fn memory_add(app: &App, content: &str, source: &str) -> Result<Report> {
-    let id = app.memory().add(nexus_memory::NewMemory {
-        kind: nexus_memory::MemoryKind::ProjectFact,
-        content: content.to_string(),
-        source: source.to_string(),
-        confidence: 1.0,
-        scope: "project".into(),
-        sensitivity: "normal".into(),
-        requires_approval: false,
-        ttl_days: None,
-    })?;
-    Ok(Report::untitled().ok(format!("stored memory {}", id.as_str())))
+    memory_add_for_context(app, None, content, source)
+}
+
+pub fn memory_add_for_context(
+    app: &App,
+    session_id: Option<&str>,
+    content: &str,
+    source: &str,
+) -> Result<Report> {
+    let id = app
+        .harness()
+        .save_operator_memory(session_id, content, source)?;
+    Ok(Report::untitled().ok(format!("stored scoped memory {id}")))
+}
+
+pub fn memory_show_report(app: &App, id: &str) -> Result<Report> {
+    memory_show_report_for_context(app, None, id)
+}
+
+pub fn memory_show_report_for_context(
+    app: &App,
+    session_id: Option<&str>,
+    id: &str,
+) -> Result<Report> {
+    let memory = app.harness().memory(session_id, id)?;
+    Ok(Report::new(format!("memory {}", memory.id))
+        .field(
+            "type",
+            format!("{:?}", memory.memory_type).to_ascii_lowercase(),
+        )
+        .field("scope", memory_scope_label(&memory.scope))
+        .field(
+            "source",
+            format!("{:?}", memory.source_type).to_ascii_lowercase(),
+        )
+        .field("confidence", format!("{:.2}", memory.confidence))
+        .field("importance", format!("{:.2}", memory.importance))
+        .field(
+            "status",
+            format!("{:?}", memory.status).to_ascii_lowercase(),
+        )
+        .field("sensitivity", memory.sensitivity)
+        .field("provenance", memory.source_refs.join(", "))
+        .field("created", memory.created_at)
+        .field(
+            "last accessed",
+            memory.last_accessed_at.unwrap_or_else(|| "never".into()),
+        )
+        .field(
+            "expires",
+            memory.expires_at.unwrap_or_else(|| "never".into()),
+        )
+        .line(memory.content))
+}
+
+pub fn memory_approve(app: &App, id: &str) -> Result<Report> {
+    memory_set_status(app, None, id, nexus_core::harness::MemoryStatus::Active)?;
+    Ok(Report::untitled().ok(format!("approved memory {id}")))
+}
+
+pub fn memory_approve_for_context(app: &App, session_id: Option<&str>, id: &str) -> Result<Report> {
+    memory_set_status(
+        app,
+        session_id,
+        id,
+        nexus_core::harness::MemoryStatus::Active,
+    )?;
+    Ok(Report::untitled().ok(format!("approved memory {id}")))
+}
+
+pub fn memory_reject_for_context(app: &App, session_id: Option<&str>, id: &str) -> Result<Report> {
+    memory_set_status(
+        app,
+        session_id,
+        id,
+        nexus_core::harness::MemoryStatus::Rejected,
+    )?;
+    Ok(Report::untitled().ok(format!("rejected memory {id}")))
 }
 
 pub fn memory_forget(app: &App, id: &str) -> Result<Report> {
-    app.memory().forget(id)?;
+    memory_set_status(app, None, id, nexus_core::harness::MemoryStatus::Deleted)?;
     Ok(Report::untitled().ok(format!("forgot {id}")))
+}
+
+fn memory_set_status(
+    app: &App,
+    session_id: Option<&str>,
+    id: &str,
+    status: nexus_core::harness::MemoryStatus,
+) -> Result<()> {
+    app.harness()
+        .set_memory_status_for_context(session_id, id, status)
+}
+
+fn memory_scope_label(scope: &nexus_core::harness::MemoryScope) -> String {
+    if scope.global {
+        return "global".into();
+    }
+    [
+        ("profile", scope.profile_id.as_deref()),
+        ("workspace", scope.workspace_id.as_deref()),
+        ("project", scope.project_id.as_deref()),
+        ("session", scope.session_id.as_deref()),
+        ("goal", scope.goal_id.as_deref()),
+        ("plan", scope.plan_id.as_deref()),
+        ("task", scope.task_id.as_deref()),
+        ("agent", scope.agent_id.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(kind, value)| value.map(|value| format!("{kind}:{value}")))
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+pub fn memory_scopes_report(app: &App, session_id: Option<&str>) -> Result<Report> {
+    let (global_scopes, workspace_scopes) = app.harness().active_memory_scopes(session_id)?;
+    let mut report = Report::new("memory scopes").header("workspace store");
+    if workspace_scopes.is_empty() {
+        report = report.line_sev("no workspace scopes authorized", Sev::Dim);
+    }
+    for scope in &workspace_scopes {
+        report = report.line(memory_scope_label(scope));
+    }
+    report = report.header("global store");
+    if global_scopes.is_empty() {
+        report = report.line_sev("global recall disabled or not authorized", Sev::Dim);
+    }
+    for scope in &global_scopes {
+        report = report.line(memory_scope_label(scope));
+    }
+    Ok(report)
+}
+
+pub fn memory_stats_report(app: &App, session_id: Option<&str>) -> Result<Report> {
+    let records = app.harness().memories(session_id, None, true, 10_000)?;
+    if records.is_empty() {
+        return Ok(Report::new("memory stats").warn("no memories stored"));
+    }
+    let mut by_type: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut by_status: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut by_scope: std::collections::BTreeMap<String, usize> = Default::default();
+    for record in &records {
+        *by_type
+            .entry(format!("{:?}", record.memory_type).to_ascii_lowercase())
+            .or_default() += 1;
+        *by_status
+            .entry(format!("{:?}", record.status).to_ascii_lowercase())
+            .or_default() += 1;
+        let scope = memory_scope_label(&record.scope);
+        let kind = scope.split(':').next().unwrap_or("global").to_string();
+        *by_scope.entry(kind).or_default() += 1;
+    }
+    let mut report = Report::new("memory stats").field("total", records.len().to_string());
+    for (title, counts) in [
+        ("by type", by_type),
+        ("by status", by_status),
+        ("by scope", by_scope),
+    ] {
+        report = report.header(title);
+        for (key, count) in counts {
+            report = report.line(format!("{key}: {count}"));
+        }
+    }
+    Ok(report)
+}
+
+pub fn memory_candidates_report(app: &App, session_id: Option<&str>) -> Result<Report> {
+    let records = app.harness().memories(session_id, None, true, 10_000)?;
+    let rows: Vec<Vec<String>> = records
+        .iter()
+        .filter(|r| r.status == nexus_core::harness::MemoryStatus::Candidate)
+        .map(|r| {
+            vec![
+                r.id.clone(),
+                format!("{:?}", r.memory_type).to_ascii_lowercase(),
+                memory_scope_label(&r.scope),
+                r.content.clone(),
+            ]
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(Report::new("memory candidates").ok("no candidates awaiting review"));
+    }
+    Ok(Report::new("memory candidates")
+        .table(&["id", "type", "scope", "content"], rows)
+        .line_sev(
+            "approve with /memory approve <id>, reject with /memory reject <id>",
+            Sev::Dim,
+        ))
+}
+
+/// Contradiction surface: memories that supersede an earlier statement plus
+/// unresolved identity conflicts. Nothing is auto-resolved here — the report
+/// only names what needs an operator decision.
+pub fn memory_contradictions_report(app: &App, session_id: Option<&str>) -> Result<Report> {
+    let records = app.harness().memories(session_id, None, true, 10_000)?;
+    let rows: Vec<Vec<String>> = records
+        .iter()
+        .filter_map(|r| {
+            r.supersedes_id.as_ref().map(|old| {
+                vec![
+                    r.id.clone(),
+                    old.clone(),
+                    format!("{:?}", r.status).to_ascii_lowercase(),
+                    r.content.clone(),
+                ]
+            })
+        })
+        .collect();
+    let conflicts = app.harness().global_repository().identity_conflicts(true)?;
+    let mut report = Report::new("memory contradictions");
+    if rows.is_empty() && conflicts.is_empty() {
+        return Ok(report.ok("no superseded memories or pending identity conflicts"));
+    }
+    if !rows.is_empty() {
+        report = report
+            .header("superseding memories")
+            .table(&["id", "supersedes", "status", "content"], rows);
+    }
+    if !conflicts.is_empty() {
+        report = report.header("pending identity conflicts");
+        for conflict in conflicts {
+            report = report.line_sev(
+                format!(
+                    "{} — `{}` matches {} (resolve with /profile resolve {} …)",
+                    conflict.id,
+                    conflict.asserted_name,
+                    conflict.matching_profile_ids.join(", "),
+                    conflict.id,
+                ),
+                Sev::Warn,
+            );
+        }
+    }
+    Ok(report)
+}
+
+/// Export in-scope memories as JSON, to stdout or a file. The store refuses
+/// secret-like content at write time, so the export inherits that guarantee.
+pub fn memory_export(app: &App, path: Option<&str>) -> Result<Report> {
+    let json = app.memory().export()?;
+    let count = serde_json::from_str::<serde_json::Value>(&json)
+        .ok()
+        .and_then(|value| value.as_array().map(Vec::len))
+        .unwrap_or(0);
+    match path {
+        Some(path) => {
+            std::fs::write(path, &json)
+                .map_err(|error| NexusError::Other(format!("write `{path}`: {error}")))?;
+            Ok(Report::new("memory export").ok(format!("exported {count} memories to {path}")))
+        }
+        None => Ok(Report::new("memory export")
+            .field("memories", count.to_string())
+            .line(json)),
+    }
 }
 
 // --------------------------------------------------------------------- skills
@@ -1514,6 +2296,7 @@ pub fn plan_create(app: &App, session_id: &str, objective: &str) -> Result<Repor
         },
         "operator",
     )?;
+    app.harness().sync_work_breakdown(session_id, &work)?;
     plan_report(app, &work.id.to_string(), Some(work.version))
 }
 
@@ -1616,6 +2399,7 @@ pub fn plan_revise(
     if !diff.requires_approval() {
         app.orchestration()
             .save_plan(session_id, &revised, "approved", "operator")?;
+        app.harness().sync_work_breakdown(session_id, &revised)?;
     }
     Ok((revised, diff))
 }
@@ -1630,6 +2414,36 @@ pub fn plan_set_paused(app: &App, session_id: &str, paused: bool) -> Result<Repo
         if paused { "paused" } else { "active" },
         "operator",
     )?;
+    // The canonical plan version is immutable. Phase/task status changes are
+    // represented by their linked task records, while the 1.0 plan remains
+    // the compatibility source for pause/resume rendering.
+    if let Ok(plan) = app
+        .harness()
+        .workspace_repository()
+        .plan(work.id.as_str(), work.version)
+    {
+        for mut task in app
+            .harness()
+            .workspace_repository()
+            .plan_tasks(work.id.as_str(), work.version)?
+        {
+            if !matches!(
+                task.status,
+                nexus_core::harness::TaskStatus::Completed
+                    | nexus_core::harness::TaskStatus::Cancelled
+                    | nexus_core::harness::TaskStatus::Superseded
+            ) {
+                task.status = if paused {
+                    nexus_core::harness::TaskStatus::Paused
+                } else {
+                    nexus_core::harness::TaskStatus::Ready
+                };
+                task.updated_at = nexus_core::now_rfc3339();
+                app.harness().workspace_repository().save_task(&task)?;
+            }
+        }
+        let _ = plan;
+    }
     Ok(Report::untitled().ok(format!(
         "{} plan {} v{}",
         if paused { "paused" } else { "resumed" },
@@ -1707,6 +2521,7 @@ pub fn task_create(
         work.as_ref().and_then(|work| work.current_stage.as_deref()),
         nexus_core::orchestration::WorkBudget::default(),
     )?;
+    app.harness().sync_background_task(&task)?;
     let worker_started = crate::worker::ensure_started(app)?;
     Ok(Report::new("task created")
         .field("id", task.id.to_string())
@@ -1765,6 +2580,8 @@ pub fn task_set_status(
 ) -> Result<Report> {
     app.orchestration()
         .set_task_status(task_id, status, None, None)?;
+    let task = app.orchestration().task(task_id)?;
+    app.harness().sync_background_task(&task)?;
     if status == nexus_core::orchestration::TaskStatus::Queued {
         let _ = crate::worker::ensure_started(app)?;
     }
@@ -1773,6 +2590,8 @@ pub fn task_set_status(
 
 pub fn task_retry(app: &App, task_id: &str) -> Result<Report> {
     app.orchestration().retry_task(task_id)?;
+    let task = app.orchestration().task(task_id)?;
+    app.harness().sync_background_task(&task)?;
     let _ = crate::worker::ensure_started(app)?;
     Ok(Report::untitled().ok(format!("task {task_id} queued for retry")))
 }
@@ -1812,6 +2631,100 @@ pub fn pause_tasks_for_provider(app: &App, provider: &str) -> Result<usize> {
     Ok(paused)
 }
 
+/// Render the session's background-task dependency graph: every task with
+/// what it waits on. Tasks without edges are listed as independent.
+pub fn task_graph_report(app: &App, session_id: &str) -> Result<Report> {
+    let orchestration = app.orchestration();
+    let tasks = orchestration.tasks(Some(session_id), true)?;
+    if tasks.is_empty() {
+        return Ok(Report::new("task graph").warn("no persistent tasks in this session"));
+    }
+    let edges = orchestration.dependency_edges(session_id)?;
+    let mut report = Report::new("task graph")
+        .field("tasks", tasks.len().to_string())
+        .field("dependency edges", edges.len().to_string());
+    for task in &tasks {
+        let deps = orchestration.task_dependencies(task.id.as_str())?;
+        let sev = match task.status {
+            nexus_core::orchestration::TaskStatus::Failed
+            | nexus_core::orchestration::TaskStatus::Cancelled => Sev::Err,
+            nexus_core::orchestration::TaskStatus::Blocked => Sev::Warn,
+            _ => Sev::Info,
+        };
+        report = report.line_sev(
+            format!("{} [{}] {}", task.id, task.status.as_str(), task.title),
+            sev,
+        );
+        for (dep_id, dep_status) in deps {
+            report = report.line_sev(
+                format!("  └─ waits on {dep_id} [{}]", dep_status.as_str()),
+                Sev::Dim,
+            );
+        }
+    }
+    Ok(report)
+}
+
+/// Add a dependency edge: `task_id` will not lease until `depends_on`
+/// completes. Cycles and cross-session edges are rejected by the store.
+pub fn task_depend(app: &App, task_id: &str, depends_on: &str) -> Result<Report> {
+    app.orchestration()
+        .add_task_dependency(task_id, depends_on)?;
+    Ok(Report::untitled().ok(format!("task {task_id} now waits on {depends_on}")))
+}
+
+/// Evidence-gated validation of one task: a completed task only validates
+/// when its result envelope actually carries evidence.
+pub fn task_validate_report(app: &App, task_id: &str) -> Result<Report> {
+    let task = app.orchestration().task(task_id)?;
+    let mut report = Report::new(format!("task validation {}", task.id))
+        .field("status", task.status.as_str())
+        .field("title", task.title.clone());
+    let deps = app.orchestration().task_dependencies(task_id)?;
+    for (dep_id, dep_status) in &deps {
+        report = report.field(format!("dependency {dep_id}"), dep_status.as_str());
+    }
+    match task.status {
+        nexus_core::orchestration::TaskStatus::Completed => match &task.result {
+            Some(result) if !result.evidence.is_empty() => {
+                report = report.field("summary", result.summary.clone());
+                for item in &result.evidence {
+                    report = report.line_sev(format!("evidence: {item}"), Sev::Dim);
+                }
+                Ok(report.ok(format!(
+                    "validated — completed with {} evidence item(s)",
+                    result.evidence.len()
+                )))
+            }
+            Some(result) => {
+                report = report.field("summary", result.summary.clone());
+                Ok(report
+                    .warn("completed WITHOUT evidence — result is unverified; treat as a claim"))
+            }
+            None => Ok(report.warn("completed without a result envelope — nothing to validate")),
+        },
+        nexus_core::orchestration::TaskStatus::Failed
+        | nexus_core::orchestration::TaskStatus::Cancelled => {
+            if let Some(error) = &task.error {
+                report = report.field_sev("error", error.clone(), Sev::Err);
+            }
+            Ok(report.warn("terminal without success — retry with /task retry <id>"))
+        }
+        _ => Ok(report.line_sev(
+            "not terminal yet — validation runs once the task completes",
+            Sev::Dim,
+        )),
+    }
+}
+
+/// Reassign a queued/blocked/paused task to a different owner role.
+pub fn task_assign(app: &App, task_id: &str, owner: &str) -> Result<Report> {
+    app.orchestration().assign_task(task_id, owner)?;
+    let task = app.orchestration().task(task_id)?;
+    app.harness().sync_background_task(&task)?;
+    Ok(Report::untitled().ok(format!("task {task_id} assigned to `{owner}`")))
+}
+
 pub fn task_attach(app: &App, task_id: &str, session_id: &str) -> Result<Report> {
     app.sessions().get(session_id)?;
     app.store.with(|conn| {
@@ -1824,7 +2737,26 @@ pub fn task_attach(app: &App, task_id: &str, session_id: &str) -> Result<Report>
         }
         Ok(())
     })?;
+    let task = app.orchestration().task(task_id)?;
+    app.harness().sync_background_task(&task)?;
     Ok(Report::untitled().ok(format!("task {task_id} attached to session {session_id}")))
+}
+
+pub fn approve_plan_work(
+    app: &App,
+    session_id: &str,
+    work: &nexus_core::orchestration::WorkBreakdown,
+    diff: &nexus_core::orchestration::PlanScopeDiff,
+) -> Result<()> {
+    let mut work = work.clone();
+    let approval = app.orchestration().request_plan_approval(&work, diff)?;
+    app.orchestration()
+        .resolve_plan_approval(&approval.id, true, "operator")?;
+    work.approve();
+    app.orchestration()
+        .save_plan(session_id, &work, "approved", "operator")?;
+    app.harness().sync_work_breakdown(session_id, &work)?;
+    Ok(())
 }
 
 pub fn task_logs_report(app: &App, task_id: &str) -> Result<Report> {
@@ -1874,6 +2806,41 @@ pub fn subagents_report(app: &App, session_id: &str) -> Result<Report> {
         &["id", "parent", "depth", "role", "status", "objective"],
         rows,
     ))
+}
+
+/// Configured delegation ceilings next to what the session actually uses,
+/// so an operator can see headroom before a fanout.
+pub fn subagent_limits_report(app: &App, session_id: &str) -> Result<Report> {
+    let limits = &app.config.limits;
+    let runs = app.orchestration().agent_runs(session_id)?;
+    let active = runs.iter().filter(|run| !run.status.terminal()).count();
+    let max_depth_used = runs.iter().map(|run| run.depth).max().unwrap_or(0);
+    Ok(Report::new("subagent limits")
+        .field(
+            "subagents per run",
+            format!("{active} active / {} max", limits.max_subagents_per_run),
+        )
+        .field(
+            "recursion depth",
+            format!("{max_depth_used} used / {} max", limits.max_recursion_depth),
+        )
+        .field("total runs this session", runs.len().to_string())
+        .field(
+            "steps per turn",
+            limits.max_steps_per_turn.to_string(),
+        )
+        .field(
+            "tool calls per turn",
+            limits.max_tool_calls_per_turn.to_string(),
+        )
+        .field(
+            "tokens per turn",
+            limits.max_tokens_per_turn.to_string(),
+        )
+        .line_sev(
+            "limits come from [limits] in config; constrained models are clamped further at runtime",
+            Sev::Dim,
+        ))
 }
 
 pub fn subagent_spawn(

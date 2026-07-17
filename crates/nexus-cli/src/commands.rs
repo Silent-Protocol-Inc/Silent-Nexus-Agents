@@ -177,6 +177,21 @@ fn print_event(ui: &Ui, ev: &LoopEvent) {
                 ui.violet(agent)
             );
         }
+        LoopEvent::ModelFallback {
+            from_model,
+            to_model,
+            provider,
+            reason,
+        } => {
+            println!(
+                "{} {} → {} · provider {} · {}",
+                ui.yellow("pre-stream fallback"),
+                ui.safe(from_model),
+                ui.safe(to_model),
+                ui.safe(provider),
+                ui.safe(reason)
+            );
+        }
         LoopEvent::ReasoningSummary(t) => {
             println!("{} {}", ui.dim("reasoning"), ui.safe(t))
         }
@@ -384,6 +399,9 @@ pub async fn resume(app: &App, id: Option<String>, json: bool) -> Result<()> {
         }
         Some(id) => {
             if app.sessions().get(&id).is_ok() {
+                if let Some(report) = services::resume_recovery_report(app, &id)? {
+                    ui.render_report(&report);
+                }
                 ui.ok(&format!("session `{id}` exists — continue it with:"));
                 println!("  snx run --session {id} \"<your next objective>\"");
             } else if app.goals().get(&id).is_ok() {
@@ -878,9 +896,9 @@ pub async fn memory(app: &App, cmd: MemoryCmd, json: bool) -> Result<()> {
             mem.approve(&id)?;
             ui.ok("approved");
         }
-        MemoryCmd::Forget { id } => {
+        MemoryCmd::Forget { id, yes } => {
             let action = nexus_app::ConfirmedAction::ForgetMemory(id);
-            if confirm(&ui, &action.prompt(), false)? {
+            if confirm(&ui, &action.prompt(), yes)? {
                 ui.render_report(&nexus_app::apply_confirmed(app, &action)?);
             }
         }
@@ -1924,7 +1942,8 @@ pub async fn doctor(app: &App, args: DoctorArgs, json: bool) -> Result<()> {
         ));
         checks.push((
             "release metadata".into(),
-            brand::VERSION == "1.0.0" && brand::BUILD_TARGET == "x86_64-unknown-linux-gnu",
+            brand::VERSION == env!("CARGO_PKG_VERSION")
+                && brand::BUILD_TARGET == "x86_64-unknown-linux-gnu",
             format!(
                 "{} · {} · {} · commit {} · epoch {}",
                 brand::VERSION,

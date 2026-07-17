@@ -8,7 +8,8 @@
 
 use crate::provider::{collect_stream, ModelProvider};
 use crate::types::{
-    Completion, CompletionRequest, ModelCapabilities, ProviderHealth, Role, StreamEvent, Usage,
+    Completion, CompletionRequest, FallbackEligibility, ModelCapabilities, ModelCostClass,
+    ModelLatencyClass, ModelLocality, ModelPrivacy, ProviderHealth, Role, StreamEvent, Usage,
 };
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -107,8 +108,18 @@ impl ModelProvider for ClaudePlanProvider {
             context_window: self.config.context_window,
             max_output_tokens: self.config.max_output_tokens,
             reasoning_controls: true,
+            // The CLI receives one serialized prompt rather than a dedicated
+            // system channel, so callers must use compatibility prompting.
+            system_prompt: false,
+            parallel_tool_calls: false,
+            json_schema: false,
             local: false,
             accelerator: None,
+            locality: ModelLocality::Remote,
+            privacy: ModelPrivacy::ProviderManaged,
+            latency_class: ModelLatencyClass::Unknown,
+            cost_class: ModelCostClass::Unknown,
+            fallback_eligibility: FallbackEligibility::ApprovalRequired,
         }
     }
 

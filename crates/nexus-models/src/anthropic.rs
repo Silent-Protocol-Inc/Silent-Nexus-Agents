@@ -220,8 +220,16 @@ impl ModelProvider for AnthropicProvider {
             context_window: self.config.context_window,
             max_output_tokens: self.config.max_output_tokens,
             reasoning_controls: false,
+            system_prompt: true,
+            parallel_tool_calls: self.config.native_tool_calls.unwrap_or(true),
+            json_schema: false,
             local: false,
             accelerator: None,
+            locality: ModelLocality::Remote,
+            privacy: ModelPrivacy::ProviderManaged,
+            latency_class: ModelLatencyClass::Unknown,
+            cost_class: ModelCostClass::Unknown,
+            fallback_eligibility: FallbackEligibility::ApprovalRequired,
         }
     }
 

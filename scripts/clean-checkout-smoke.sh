@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+VERSION="$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])' </dev/null)"
 
 git diff --quiet
 git diff --cached --quiet
@@ -32,7 +33,7 @@ export SOURCE_DATE_EPOCH="$EPOCH"
 )
 
 BIN="$CARGO_TARGET_DIR/release/snx"
-"$BIN" --version | grep -F "1.0.0" >/dev/null
+"$BIN" --version | grep -F "$VERSION" >/dev/null
 "$BIN" --no-color about --compact | grep -F "$COMMIT" >/dev/null
 test ! -e "$SOURCE/.nexus"
 (
@@ -88,6 +89,6 @@ grep -F "mock script exhausted" "$TEMP/mock-flow.json" >/dev/null
 
 OUT_DIR="$ROOT/dist/clean-checkout" "$SOURCE/scripts/package-release.sh"
 "$SOURCE/scripts/validate-release.sh" \
-  "$ROOT/dist/clean-checkout/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz"
+  "$ROOT/dist/clean-checkout/silent-nexus-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 
 echo "clean-checkout smoke: tests, release build, diagnostics, completions, and mock flow passed"

@@ -8,9 +8,10 @@
 
 use nexus_core::{NexusError, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const UI_STATE_VERSION: u32 = 4;
+pub const UI_STATE_VERSION: u32 = 5;
 const HISTORY_CAP: usize = 200;
 const RECENT_COMMANDS_CAP: usize = 12;
 
@@ -47,6 +48,21 @@ pub struct UiState {
     pub selected_persona: Option<String>,
     /// Approved profile-trait collection selected for new sessions.
     pub profile_name: String,
+    /// Presentation-only state for menu routes. Domain selections live in the
+    /// SQLite ActiveHarnessContext and are mirrored into legacy fields only
+    /// for 1.x compatibility.
+    pub menus: BTreeMap<String, PersistedMenuState>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PersistedMenuState {
+    pub selected_item_id: Option<String>,
+    pub focused_region: String,
+    pub search_query: String,
+    pub filters: BTreeMap<String, String>,
+    pub sort_key: Option<String>,
+    pub sort_descending: bool,
 }
 
 impl Default for UiState {
@@ -66,6 +82,7 @@ impl Default for UiState {
             thinking_enabled: true,
             selected_persona: None,
             profile_name: "default".into(),
+            menus: BTreeMap::new(),
         }
     }
 }
@@ -96,6 +113,9 @@ impl UiState {
         if self.version < 4 {
             self.claude_use_existing = false;
         }
+        if self.version < 5 {
+            self.menus.clear();
+        }
         self.version = UI_STATE_VERSION;
     }
 
@@ -125,6 +145,21 @@ impl UiState {
         self.recent_commands.retain(|c| c != name);
         self.recent_commands.insert(0, name.to_string());
         self.recent_commands.truncate(RECENT_COMMANDS_CAP);
+    }
+
+    pub fn remember_menu(&mut self, route: impl Into<String>, state: PersistedMenuState) {
+        // Menu state is presentation-only and intentionally uses a bounded,
+        // deterministic route map. Once full, the lexicographically earliest
+        // route is evicted; no timestamps or user content are needed merely
+        // to manage this cache.
+        const MENU_STATE_CAP: usize = 64;
+        self.menus.insert(route.into(), state);
+        while self.menus.len() > MENU_STATE_CAP {
+            let Some(first_key) = self.menus.keys().next().cloned() else {
+                break;
+            };
+            self.menus.remove(&first_key);
+        }
     }
 }
 
@@ -201,6 +236,20 @@ mod tests {
     }
 
     #[test]
+    fn v4_state_migrates_with_empty_menu_state() {
+        let raw = r#"{
+            "version": 4,
+            "profile_name": "Sans",
+            "thinking_enabled": true
+        }"#;
+        let mut state: UiState = serde_json::from_str(raw).expect("legacy state");
+        state.migrate();
+        assert_eq!(state.version, 5);
+        assert_eq!(state.profile_name, "Sans");
+        assert!(state.menus.is_empty());
+    }
+
+    #[test]
     fn save_replaces_the_file_without_leaving_a_temp_artifact() {
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("ui-state.json");
@@ -221,5 +270,22 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "temporary state files leaked");
+    }
+
+    #[test]
+    fn menu_state_cache_is_bounded_and_deterministic() {
+        let mut state = UiState::default();
+        for index in 0..70 {
+            state.remember_menu(
+                format!("/route-{index:02}"),
+                PersistedMenuState {
+                    selected_item_id: Some(format!("item-{index}")),
+                    ..PersistedMenuState::default()
+                },
+            );
+        }
+        assert_eq!(state.menus.len(), 64);
+        assert!(!state.menus.contains_key("/route-00"));
+        assert!(state.menus.contains_key("/route-69"));
     }
 }

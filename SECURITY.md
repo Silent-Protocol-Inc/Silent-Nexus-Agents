@@ -42,7 +42,7 @@ logging. See [`docs/threat-model.md`](docs/threat-model.md).
 ## Reporting a vulnerability
 
 Report suspected vulnerabilities through the repository's
-[private vulnerability reporting channel](https://github.com/silent-protocol/silent-nexus/security/advisories/new).
+[private vulnerability reporting channel](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/security/advisories/new).
 Include a reproduction, impact, and the affected version (`snx --version`).
 Please do not open public issues for undisclosed vulnerabilities.
 

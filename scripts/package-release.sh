@@ -12,8 +12,8 @@ fi
 VERSION="$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])' </dev/null)"
 TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 
-if [[ "$VERSION" != "1.0.0" ]]; then
-  echo "error: release package expects version 1.0.0, found $VERSION" >&2
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+  echo "error: invalid workspace package version in Cargo.toml: $VERSION" >&2
   exit 1
 fi
 if [[ "$TARGET" != "x86_64-unknown-linux-gnu" ]]; then

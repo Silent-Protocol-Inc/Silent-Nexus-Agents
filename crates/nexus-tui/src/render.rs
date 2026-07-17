@@ -406,7 +406,26 @@ fn event_lines(
         Span::styled(format!("{glyph} {status_label:<9}"), header_style),
         Span::styled(format!(" {label}{meta}"), t.muted()),
     ])];
-    push_wrapped(&mut lines, &event.summary, width, t.text());
+    // Message-like events use `summary` as searchable/indexed metadata (often
+    // the first body line). Rendering both fields duplicated one-line messages
+    // and repeated the first line of multiline messages. The body is the sole
+    // display source; summary is only a fallback when that body is empty.
+    let has_primary_body = match &event.kind {
+        TimelineKind::UserMessage { text }
+        | TimelineKind::AssistantMessage { text, .. }
+        | TimelineKind::FinalAnswer { text }
+        | TimelineKind::ReasoningSummary { text }
+        | TimelineKind::Notice { text, .. } => !text.trim().is_empty(),
+        TimelineKind::Error { message, .. }
+        | TimelineKind::Retry {
+            reason: message, ..
+        }
+        | TimelineKind::ProviderLimit { message, .. } => !message.trim().is_empty(),
+        _ => false,
+    };
+    if !has_primary_body {
+        push_wrapped(&mut lines, &event.summary, width, t.text());
+    }
 
     match &event.kind {
         TimelineKind::UserMessage { text } => {
@@ -426,7 +445,7 @@ fn event_lines(
                 "dim" => t.muted(),
                 _ => t.text(),
             };
-            if text != &event.summary {
+            if !text.trim().is_empty() {
                 push_wrapped(&mut lines, text, width, style);
             }
         }
@@ -1090,11 +1109,19 @@ fn draw_menu(f: &mut Frame, area: Rect, m: &Menu, t: &Theme) {
         .as_ref()
         .map(|lockup| lockup.height.saturating_add(1))
         .unwrap_or(0);
-    let body_rows: u16 = visible.iter().map(|&i| menu_item_height(&m.items[i])).sum();
+    let body_rows: u16 = if m.loading || m.error.is_some() || visible.is_empty() {
+        1
+    } else {
+        visible.iter().map(|&i| menu_item_height(&m.items[i])).sum()
+    };
     let search_rows = u16::from(m.searchable);
+    let state_rows = u16::from(!m.filters.is_empty() || m.sort.is_some())
+        .saturating_add(u16::from(m.detail_preview.is_some()))
+        .saturating_add(if m.help_visible { 3 } else { 0 });
     let wanted_height = body_rows
         .saturating_add(brand_rows)
         .saturating_add(search_rows)
+        .saturating_add(state_rows)
         .saturating_add(4);
     let max_height = area.height.saturating_sub(2).max(1);
     let height = wanted_height.min(max_height).max(1);
@@ -1111,17 +1138,62 @@ fn draw_menu(f: &mut Frame, area: Rect, m: &Menu, t: &Theme) {
     }
     if m.searchable {
         lines.push(Line::from(vec![
-            Span::styled("filter ", t.muted()),
+            Span::styled(
+                if m.focused_region == crate::views::MenuFocusRegion::Search {
+                    "search▸ "
+                } else {
+                    "search  "
+                },
+                t.muted(),
+            ),
             Span::styled(m.filter.clone(), t.text()),
-            Span::styled("▏", t.primary()),
+            Span::styled(if m.search_mode { "▏" } else { "" }, t.primary()),
         ]));
     }
+    if !m.filters.is_empty() || m.sort.is_some() {
+        let filters = m
+            .filters
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sort = m.sort.as_ref().map_or_else(String::new, |sort| {
+            format!("sort={} {:?}", sort.field, sort.direction)
+        });
+        lines.push(Line::from(Span::styled(
+            [filters, sort]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · "),
+            t.secondary(),
+        )));
+    }
     let width = rect.width.saturating_sub(4) as usize;
-    let fixed_rows = brand_rows.saturating_add(search_rows).saturating_add(2);
+    let fixed_rows = brand_rows
+        .saturating_add(search_rows)
+        .saturating_add(state_rows)
+        .saturating_add(2);
     let item_budget = rect.height.saturating_sub(2).saturating_sub(fixed_rows) as usize;
     let (first, last) = menu_viewport(m, &visible, item_budget);
     let mut remaining_rows = item_budget;
-    for (position, &idx) in visible.iter().enumerate().take(last).skip(first) {
+    if m.loading {
+        lines.push(Line::from(Span::styled("  loading…", t.primary())));
+        remaining_rows = remaining_rows.saturating_sub(1);
+    } else if let Some(error) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  error: {error}"),
+            t.failure(),
+        )));
+        remaining_rows = remaining_rows.saturating_sub(1);
+    }
+    for (position, &idx) in visible
+        .iter()
+        .enumerate()
+        .take(last)
+        .skip(first)
+        .filter(|_| !m.loading && m.error.is_none())
+    {
         if remaining_rows == 0 {
             break;
         }
@@ -1134,7 +1206,13 @@ fn draw_menu(f: &mut Frame, area: Rect, m: &Menu, t: &Theme) {
         } else {
             t.text()
         };
-        let marker = if selected { "▸ " } else { "  " };
+        let toggled = m.toggled_item_ids.contains(&item.id);
+        let marker = match (selected, toggled) {
+            (true, true) => "▸✓",
+            (true, false) => "▸ ",
+            (false, true) => " ✓",
+            (false, false) => "  ",
+        };
         let badge = if let Some(reason) = &item.disabled {
             format!("[{reason}]")
         } else {
@@ -1170,14 +1248,51 @@ fn draw_menu(f: &mut Frame, area: Rect, m: &Menu, t: &Theme) {
             remaining_rows -= 1;
         }
     }
-    if visible.is_empty() {
-        lines.push(Line::from(Span::styled("  nothing matches", t.muted())));
+    if visible.is_empty() && !m.loading && m.error.is_none() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", m.empty_message),
+            t.muted(),
+        )));
+    }
+    if let Some(preview) = &m.detail_preview {
+        lines.push(Line::from(Span::styled(
+            format!(
+                " detail: {}",
+                truncate_width(preview, width.saturating_sub(9))
+            ),
+            if m.focused_region == crate::views::MenuFocusRegion::Detail {
+                t.selection()
+            } else {
+                t.muted()
+            },
+        )));
+    }
+    if m.help_visible {
+        lines.push(Line::from(Span::styled(
+            " ↑/↓ j/k navigate · Enter select · Space toggle",
+            t.muted(),
+        )));
+        lines.push(Line::from(Span::styled(
+            " / search · Tab/Shift+Tab focus · Ctrl+R refresh",
+            t.muted(),
+        )));
+        lines.push(Line::from(Span::styled(
+            " Esc clear/back · ? close controls",
+            t.muted(),
+        )));
     }
     let hint = if m.hint.is_empty() {
-        "↑/↓ or j/k · Enter select · Esc back".to_string()
+        format!(
+            "↑/↓ j/k · Enter · / search · Tab focus:{} · ? · Esc",
+            m.focused_region.label()
+        )
     } else {
         m.hint.clone()
     };
+    let hint = m
+        .parent_route
+        .as_ref()
+        .map_or(hint.clone(), |parent| format!("{hint} · back:{parent}"));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(format!(" {hint}"), t.muted())));
     f.render_widget(
@@ -1786,9 +1901,84 @@ mod tests {
     use crate::theme::ColorSupport;
     use crate::views::{MenuItem, UiAction};
     use nexus_core::orchestration::{StageStatus, ValidationEvidence, WorkBreakdown, WorkEstimate};
-    use nexus_core::timeline::{TimelineKind, TimelineStatus};
+    use nexus_core::timeline::{LifecyclePhase, TimelineKind, TimelineStatus, TranscriptDetail};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn message_event(summary: &str, kind: TimelineKind) -> nexus_core::timeline::TimelineEvent {
+        nexus_core::timeline::TimelineEvent::new(
+            nexus_core::SessionId::from("sess_render"),
+            nexus_core::TurnId::from("turn_render"),
+            nexus_core::TraceId::from("trace_render"),
+            nexus_core::SpanId::from("span_render"),
+            None,
+            LifecyclePhase::Message,
+            TimelineStatus::Completed,
+            summary,
+            kind,
+        )
+    }
+
+    #[test]
+    fn one_line_prompt_and_answer_render_once() {
+        let theme = Theme::new("cyberpunk", ColorSupport::None);
+        for event in [
+            message_event(
+                "prompt appears once",
+                TimelineKind::UserMessage {
+                    text: "prompt appears once".into(),
+                },
+            ),
+            message_event(
+                "answer appears once",
+                TimelineKind::FinalAnswer {
+                    text: "answer appears once".into(),
+                },
+            ),
+        ] {
+            let text = event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(text.matches(&event.summary).count(), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn multiline_prompt_and_answer_do_not_repeat_first_line() {
+        let theme = Theme::new("cyberpunk", ColorSupport::None);
+        for event in [
+            message_event(
+                "prompt first line",
+                TimelineKind::UserMessage {
+                    text: "prompt first line\nprompt second line".into(),
+                },
+            ),
+            message_event(
+                "answer first line",
+                TimelineKind::AssistantMessage {
+                    text: "answer first line\nanswer second line".into(),
+                    streaming: false,
+                },
+            ),
+        ] {
+            let text = event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(text.matches(&event.summary).count(), 1, "{text}");
+            assert!(text.contains("second line"), "{text}");
+        }
+    }
 
     #[test]
     fn menu_viewport_keeps_selected_row_visible() {
@@ -1854,7 +2044,7 @@ mod tests {
                 vec![],
                 true,
             );
-            state.push_overlay(Overlay::Menu(
+            state.push_overlay(Overlay::Menu(Box::new(
                 Menu::new(
                     "responsive menu",
                     (0..24)
@@ -1868,7 +2058,7 @@ mod tests {
                         .collect(),
                 )
                 .searchable(),
-            ));
+            )));
             if let Some(Overlay::Menu(menu)) = state.overlays.last_mut() {
                 menu.selected = 20;
             }
@@ -2027,11 +2217,11 @@ mod tests {
             .map(|(width, height)| (width, height, fnv1a64(&rendered_text(width, height))))
             .collect();
         let expected = [
-            (60, 20, 2_468_489_370_746_786_139),
-            (80, 24, 14_081_812_276_202_335_441),
-            (100, 30, 18_372_343_820_622_957_908),
-            (120, 40, 3_339_358_300_467_670_496),
-            (160, 50, 4_274_527_342_362_157_938),
+            (60, 20, 79_688_150_447_093_718),
+            (80, 24, 15_835_664_293_227_740_923),
+            (100, 30, 10_022_091_956_940_501_711),
+            (120, 40, 9_210_262_804_388_401_044),
+            (160, 50, 13_979_991_942_712_635_246),
         ];
         assert_eq!(actual, expected);
     }

@@ -15,5 +15,5 @@ Do not post secrets, auth profiles, private provider payloads, `.nexus` state,
 or unredacted logs publicly.
 
 Security vulnerabilities must use the
-[private vulnerability reporting channel](https://github.com/silent-protocol/silent-nexus/security/advisories/new),
+[private vulnerability reporting channel](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/security/advisories/new),
 not a public issue.

@@ -293,24 +293,55 @@ impl ModelProvider for OpenAiCompatProvider {
     }
 
     fn capabilities(&self) -> ModelCapabilities {
+        let native_tool_calls = self
+            .config
+            .native_tool_calls
+            .unwrap_or(self.kind != "llamacpp");
         ModelCapabilities {
             model_id: self.model.clone(),
             provider_kind: self.kind.to_string(),
             streaming: true,
             // llama.cpp's OpenAI layer supports tools for many templates but
             // not all; config can override in either direction.
-            native_tool_calls: self
-                .config
-                .native_tool_calls
-                .unwrap_or(self.kind != "llamacpp"),
+            native_tool_calls,
             structured_output: true,
             image_input: false,
             embeddings: false,
             context_window: self.config.context_window,
             max_output_tokens: self.config.max_output_tokens,
             reasoning_controls: false,
+            system_prompt: true,
+            // Only the dedicated OpenAI adapter has a contract strong enough
+            // to advertise parallel calls. Generic compatible endpoints vary.
+            parallel_tool_calls: native_tool_calls && self.kind == "openai",
+            // This adapter currently supports JSON-object mode, not an
+            // arbitrary caller-supplied response schema.
+            json_schema: false,
             local: self.local,
             accelerator: self.accelerator.clone(),
+            locality: if self.local {
+                ModelLocality::Local
+            } else {
+                ModelLocality::Remote
+            },
+            privacy: if self.local {
+                ModelPrivacy::LocalOnly
+            } else if self.kind == "openai" {
+                ModelPrivacy::ProviderManaged
+            } else {
+                ModelPrivacy::EndpointControlled
+            },
+            latency_class: ModelLatencyClass::Unknown,
+            cost_class: if self.local {
+                ModelCostClass::Free
+            } else {
+                ModelCostClass::Unknown
+            },
+            fallback_eligibility: if self.local {
+                FallbackEligibility::Eligible
+            } else {
+                FallbackEligibility::ApprovalRequired
+            },
         }
     }
 

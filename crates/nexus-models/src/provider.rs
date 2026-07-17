@@ -1,6 +1,6 @@
 //! The [`ModelProvider`] trait implemented by every backend.
 
-use crate::types::{Completion, CompletionRequest, ModelCapabilities, ProviderHealth, StreamEvent};
+use crate::types::{ModelCapabilities, ModelRequest, ModelResponse, ProviderHealth, StreamEvent};
 use futures::stream::BoxStream;
 use nexus_core::Result;
 
@@ -13,24 +13,24 @@ pub trait ModelProvider: Send + Sync {
     fn capabilities(&self) -> ModelCapabilities;
 
     /// Non-streaming completion.
-    async fn complete(&self, request: CompletionRequest) -> Result<Completion>;
+    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse>;
 
     /// Streaming completion. Providers without streaming support return a
     /// stream that yields the whole completion as one delta then `Done`.
     async fn stream(
         &self,
-        request: CompletionRequest,
+        request: ModelRequest,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>>;
 
     /// Probe endpoint reachability. Must be cheap and never mutate state.
     async fn health(&self) -> ProviderHealth;
 }
 
-/// Assemble a [`Completion`] by draining a stream (used by providers that
+/// Assemble a [`ModelResponse`] by draining a stream (used by providers that
 /// implement only `stream`, and by tests).
 pub async fn collect_stream(
     mut stream: BoxStream<'static, Result<StreamEvent>>,
-) -> Result<Completion> {
+) -> Result<ModelResponse> {
     use crate::types::{ToolCallRequest, Usage};
     use futures::StreamExt;
 
@@ -78,7 +78,7 @@ pub async fn collect_stream(
             arguments,
         })
         .collect();
-    Ok(Completion {
+    Ok(ModelResponse {
         content,
         tool_calls,
         usage,

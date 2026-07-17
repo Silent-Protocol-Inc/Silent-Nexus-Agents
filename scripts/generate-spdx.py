@@ -52,6 +52,9 @@ def main() -> int:
     output = pathlib.Path(sys.argv[1])
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    with (ROOT / "Cargo.toml").open("rb") as handle:
+        workspace_version = str(tomllib.load(handle)["workspace"]["package"]["version"])
+
     metadata = json.loads(
         subprocess.check_output(
             [
@@ -147,14 +150,14 @@ def main() -> int:
                 )
 
     namespace_seed = hashlib.sha256(
-        f"silent-nexus-1.0.0-{commit}".encode()
+        f"silent-nexus-{workspace_version}-{commit}".encode()
     ).hexdigest()
     document = {
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
-        "name": "Silent-Nexus-1.0.0",
-        "documentNamespace": f"https://github.com/silent-protocol/silent-nexus/spdx/{namespace_seed}",
+        "name": f"Silent-Nexus-{workspace_version}",
+        "documentNamespace": f"https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/spdx/{namespace_seed}",
         "creationInfo": {
             "created": created,
             "creators": ["Organization: Silent Protocol", "Tool: generate-spdx.py"],

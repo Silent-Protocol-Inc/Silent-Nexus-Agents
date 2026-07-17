@@ -35,17 +35,27 @@ pub enum MockScript {
 
 pub struct MockProvider {
     script: Mutex<VecDeque<MockScript>>,
+    provider_kind: &'static str,
     /// Capability toggle so the tool-call compatibility layer can be tested.
     pub native_tool_calls: bool,
+    pub system_prompt: bool,
+    pub structured_output: bool,
+    pub locality: ModelLocality,
+    pub privacy: ModelPrivacy,
     pub context_window: usize,
-    calls: Mutex<Vec<CompletionRequest>>,
+    calls: Mutex<Vec<ModelRequest>>,
 }
 
 impl MockProvider {
     pub fn new(script: Vec<MockScript>) -> Self {
         Self {
             script: Mutex::new(script.into()),
+            provider_kind: "mock",
             native_tool_calls: true,
+            system_prompt: true,
+            structured_output: true,
+            locality: ModelLocality::Local,
+            privacy: ModelPrivacy::LocalOnly,
             context_window: 8192,
             calls: Mutex::new(Vec::new()),
         }
@@ -56,17 +66,38 @@ impl MockProvider {
         self
     }
 
+    pub fn with_provider_kind(mut self, provider_kind: &'static str) -> Self {
+        self.provider_kind = provider_kind;
+        self
+    }
+
+    pub fn without_system_prompt(mut self) -> Self {
+        self.system_prompt = false;
+        self
+    }
+
+    pub fn without_structured_output(mut self) -> Self {
+        self.structured_output = false;
+        self
+    }
+
+    pub fn with_remote_endpoint(mut self) -> Self {
+        self.locality = ModelLocality::Remote;
+        self.privacy = ModelPrivacy::ProviderManaged;
+        self
+    }
+
     pub fn with_context_window(mut self, n: usize) -> Self {
         self.context_window = n;
         self
     }
 
     /// Requests received so far (for assertions).
-    pub fn recorded_requests(&self) -> Vec<CompletionRequest> {
+    pub fn recorded_requests(&self) -> Vec<ModelRequest> {
         self.calls.lock().map(|c| c.clone()).unwrap_or_default()
     }
 
-    fn next_script(&self, request: &CompletionRequest) -> MockScript {
+    fn next_script(&self, request: &ModelRequest) -> MockScript {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(request.clone());
         }
@@ -77,19 +108,19 @@ impl MockProvider {
             .unwrap_or(MockScript::Text("mock script exhausted".into()))
     }
 
-    fn to_completion(script: MockScript) -> Result<Completion> {
+    fn to_completion(script: MockScript) -> Result<ModelResponse> {
         let usage = Usage {
             prompt_tokens: 10,
             completion_tokens: 10,
         };
         match script {
-            MockScript::Text(t) => Ok(Completion {
+            MockScript::Text(t) => Ok(ModelResponse {
                 content: t,
                 tool_calls: vec![],
                 usage,
                 finish_reason: "stop".into(),
             }),
-            MockScript::ToolCall { name, arguments } => Ok(Completion {
+            MockScript::ToolCall { name, arguments } => Ok(ModelResponse {
                 content: String::new(),
                 tool_calls: vec![ToolCallRequest {
                     id: format!("call_{}", uuid_ish()),
@@ -103,7 +134,7 @@ impl MockProvider {
                 text,
                 name,
                 arguments,
-            } => Ok(Completion {
+            } => Ok(ModelResponse {
                 content: text,
                 tool_calls: vec![ToolCallRequest {
                     id: format!("call_{}", uuid_ish()),
@@ -140,33 +171,49 @@ fn uuid_ish() -> String {
 #[async_trait::async_trait]
 impl ModelProvider for MockProvider {
     fn kind(&self) -> &'static str {
-        "mock"
+        self.provider_kind
     }
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "mock".into(),
-            provider_kind: "mock".into(),
+            model_id: format!("mock-{}", self.provider_kind),
+            provider_kind: self.provider_kind.into(),
             streaming: true,
             native_tool_calls: self.native_tool_calls,
-            structured_output: true,
+            structured_output: self.structured_output,
             image_input: false,
             embeddings: false,
             context_window: self.context_window,
             max_output_tokens: 2048,
             reasoning_controls: false,
-            local: true,
+            system_prompt: self.system_prompt,
+            parallel_tool_calls: self.native_tool_calls,
+            json_schema: true,
+            local: self.locality == ModelLocality::Local,
             accelerator: None,
+            locality: self.locality,
+            privacy: self.privacy,
+            latency_class: ModelLatencyClass::Low,
+            cost_class: if self.locality == ModelLocality::Local {
+                ModelCostClass::Free
+            } else {
+                ModelCostClass::Unknown
+            },
+            fallback_eligibility: if self.locality == ModelLocality::Local {
+                FallbackEligibility::Eligible
+            } else {
+                FallbackEligibility::ApprovalRequired
+            },
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<Completion> {
+    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
         Self::to_completion(self.next_script(&request))
     }
 
     async fn stream(
         &self,
-        request: CompletionRequest,
+        request: ModelRequest,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
         let script = self.next_script(&request);
         // Partial stream failure: emit some text deltas, then an error.

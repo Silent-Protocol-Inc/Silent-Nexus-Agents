@@ -36,11 +36,13 @@ pub enum View {
     GoalMenu,
     GoalDetail(String),
     GoalForm,
+    Plan,
     Tasks,
     Subagents,
     Resume,
     Sessions,
     Login,
+    Connect,
     Model,
     Agents,
     Persona,
@@ -62,6 +64,46 @@ pub enum View {
     Config,
     Branch,
     Commit,
+    CommandMenu(String),
+}
+
+/// Resolve every bare interactive slash command to a menu/view without
+/// executing its default behavior. Commands without a dedicated workspace use
+/// a generic action menu whose default action re-enters execution with
+/// `interactive=false`, preventing recursive menu reopening.
+fn bare_interactive_view(def: &registry::CommandDef) -> Option<View> {
+    if !def.interactive {
+        return None;
+    }
+    Some(match def.id {
+        CommandId::Setup | CommandId::Welcome => View::Welcome,
+        CommandId::Init => View::Init,
+        CommandId::Model | CommandId::Models => View::Model,
+        CommandId::Login => View::Login,
+        CommandId::Connect => View::Connect,
+        CommandId::Agent | CommandId::Agents => View::Agents,
+        CommandId::Persona => View::Persona,
+        CommandId::Profile => View::Profile,
+        CommandId::Goal => View::GoalMenu,
+        CommandId::Goals => View::Goals,
+        CommandId::Plan => View::Plan,
+        CommandId::Task => View::Tasks,
+        CommandId::Subagents => View::Subagents,
+        CommandId::Resume => View::Resume,
+        CommandId::Sessions => View::Sessions,
+        CommandId::Details => View::Details,
+        CommandId::Transcript => View::Transcript,
+        CommandId::Memory => View::Memory,
+        CommandId::Connector => View::Connector,
+        CommandId::Permissions => View::Permissions,
+        CommandId::Sandbox => View::Sandbox,
+        CommandId::Branch => View::Branch,
+        CommandId::Commit => View::Commit,
+        CommandId::Config => View::Config,
+        CommandId::Theme => View::Theme,
+        CommandId::Thinking => View::Thinking,
+        _ => View::CommandMenu(def.name.to_string()),
+    })
 }
 
 /// Destructive actions that need a confirmation step first. The TUI shows a
@@ -83,6 +125,10 @@ pub enum ConfirmedAction {
     ForgetMemory(String),
     DeletePersona(String),
     DeleteProfileTrait(String),
+    SetProfileStatus {
+        profile_id: String,
+        status: nexus_core::harness::ProfileStatus,
+    },
     WriteStarterInstructions,
     InitializeGit,
     SwitchBranch(String),
@@ -155,6 +201,10 @@ impl ConfirmedAction {
             ConfirmedAction::DeleteProfileTrait(id) => {
                 format!("Permanently delete profile trait {id}?")
             }
+            ConfirmedAction::SetProfileStatus { profile_id, status } => format!(
+                "Set profile {profile_id} to {}? Active-profile and default-profile safety checks remain enforced.",
+                format!("{status:?}").to_ascii_lowercase()
+            ),
             ConfirmedAction::WriteStarterInstructions => {
                 "Write the previewed canonical AGENTS.md starter? If an empty or unreadable \
                  AGENTS.md exists, it will be replaced."
@@ -277,6 +327,11 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             def.name
         ))));
     }
+    if ctx.interactive && cmd.args.is_empty() {
+        return Ok(Effect::View(
+            bare_interactive_view(def).expect("interactive command has a menu route"),
+        ));
+    }
 
     let args: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
     let view_or = |view: View, report: Report| -> Effect {
@@ -383,6 +438,17 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             }
             ["use", name] | [name] => {
                 let report = services::model_select(app, name)?;
+                let provider_id = app
+                    .config
+                    .models
+                    .get(*name)
+                    .map(|model| model.provider.clone());
+                app.harness()
+                    .execute(crate::control_plane::HarnessAction::SelectModel {
+                        session_id: ctx.session_id.clone(),
+                        provider_id,
+                        model_id: name.to_string(),
+                    })?;
                 if let Some(session_id) = ctx.session_id.as_deref() {
                     app.sessions().set_model(session_id, name)?;
                     app.sessions().set_status(session_id, "active")?;
@@ -399,6 +465,18 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
         CommandId::Login => match args.as_slice() {
             [] => view_or(View::Login, login_report(app).await),
             ["claude-plan"] | ["claude"] => Effect::Confirm(ConfirmedAction::UseExistingClaude),
+            _ => usage(def),
+        },
+        CommandId::Connect => match args.as_slice() {
+            [] => view_or(View::Connect, login_report(app).await),
+            // Preserve the 1.0 advanced compatibility form. Bare /connect is
+            // now the endpoint/runtime manager; hosted auth belongs to /login.
+            ["codex"] | ["openai"] | ["anthropic"] | ["claude-plan"] | ["claude"] => {
+                Effect::Report(Report::new("provider authentication moved").line(format!(
+                    "use `/login {}` for hosted authentication",
+                    args[0]
+                )))
+            }
             _ => usage(def),
         },
         CommandId::Logout => match args.as_slice() {
@@ -436,8 +514,25 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
         },
 
         CommandId::Agent => match args.first() {
+            Some(sub) if *sub == "show" => match args.get(1) {
+                Some(name) => Effect::Report(services::agent_show_report(app, name)?),
+                None => usage(registry::find("agent").expect("agent registered")),
+            },
+            Some(sub) if *sub == "recommend" => {
+                let objective = args[1..].join(" ");
+                if objective.trim().is_empty() {
+                    usage(registry::find("agent").expect("agent registered"))
+                } else {
+                    Effect::Report(services::agent_recommend_report(app, &objective)?)
+                }
+            }
             Some(role) => {
                 let report = services::agent_set(app, role)?;
+                app.harness()
+                    .execute(crate::control_plane::HarnessAction::SelectAgent {
+                        session_id: ctx.session_id.clone(),
+                        agent_id: role.to_string(),
+                    })?;
                 if let Some(session_id) = ctx.session_id.as_deref() {
                     app.sessions().set_agent(session_id, role)?;
                 }
@@ -449,13 +544,26 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
         CommandId::Persona => match args.as_slice() {
             [] => view_or(View::Persona, services::personas_report(app)?),
             ["list"] => Effect::Report(services::personas_report(app)?),
-            ["select"] | ["select", "none"] => {
+            ["show", id] => Effect::Report(services::persona_show_report(app, id)?),
+            ["select"] | ["select", "none"] | ["reset"] => {
                 let report = services::persona_select(app, None)?;
+                app.harness()
+                    .execute(crate::control_plane::HarnessAction::SelectPersona {
+                        session_id: ctx.session_id.clone(),
+                        persona_id: None,
+                        version: None,
+                    })?;
                 sync_session_persona_profile(app, ctx.session_id.as_deref())?;
                 Effect::Report(report)
             }
             ["select", id] => {
                 let report = services::persona_select(app, Some(id))?;
+                app.harness()
+                    .execute(crate::control_plane::HarnessAction::SelectPersona {
+                        session_id: ctx.session_id.clone(),
+                        persona_id: Some(id.to_string()),
+                        version: None,
+                    })?;
                 sync_session_persona_profile(app, ctx.session_id.as_deref())?;
                 Effect::Report(report)
             }
@@ -476,8 +584,50 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
         },
         CommandId::Profile => match args.as_slice() {
             [] => view_or(View::Profile, services::profile_report(app, true)?),
-            ["list"] => Effect::Report(services::profile_report(app, false)?),
+            ["list"] | ["profiles"] => Effect::Report(services::profiles_report(app)?),
+            ["facts"] => Effect::Report(services::profile_report(app, false)?),
             ["review"] => Effect::Report(services::profile_report(app, true)?),
+            ["conflicts"] => Effect::Report(services::profile_conflicts_report(app)?),
+            ["resolve", conflict_id, "switch", profile_id] => {
+                Effect::Report(services::profile_resolve_conflict(
+                    app,
+                    ctx.session_id.as_deref(),
+                    conflict_id,
+                    nexus_core::harness::IdentityConflictDecision::SwitchExisting(
+                        profile_id.to_string(),
+                    ),
+                )?)
+            }
+            ["resolve", conflict_id, "create"] => {
+                Effect::Report(services::profile_resolve_conflict(
+                    app,
+                    ctx.session_id.as_deref(),
+                    conflict_id,
+                    nexus_core::harness::IdentityConflictDecision::CreateSeparate,
+                )?)
+            }
+            ["resolve", conflict_id, "keep"] => Effect::Report(services::profile_resolve_conflict(
+                app,
+                ctx.session_id.as_deref(),
+                conflict_id,
+                nexus_core::harness::IdentityConflictDecision::KeepActive,
+            )?),
+            ["resolve", conflict_id, "temporary"] => {
+                Effect::Report(services::profile_resolve_conflict(
+                    app,
+                    ctx.session_id.as_deref(),
+                    conflict_id,
+                    nexus_core::harness::IdentityConflictDecision::TemporaryContext,
+                )?)
+            }
+            ["resolve", conflict_id, "dismiss"] => {
+                Effect::Report(services::profile_resolve_conflict(
+                    app,
+                    ctx.session_id.as_deref(),
+                    conflict_id,
+                    nexus_core::harness::IdentityConflictDecision::Dismiss,
+                )?)
+            }
             ["add", key, rest @ ..] if !rest.is_empty() => Effect::Report(services::profile_add(
                 app,
                 key,
@@ -487,12 +637,35 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             )?),
             ["select", name] => {
                 let report = services::profile_select(app, name)?;
+                app.harness()
+                    .execute(crate::control_plane::HarnessAction::SelectProfileName {
+                        session_id: ctx.session_id.clone(),
+                        display_name: name.to_string(),
+                    })?;
                 sync_session_persona_profile(app, ctx.session_id.as_deref())?;
                 Effect::Report(report)
             }
             ["approve", id] => Effect::Report(services::profile_review(app, id, true)?),
             ["reject", id] => Effect::Report(services::profile_review(app, id, false)?),
             ["delete", id] => Effect::Confirm(ConfirmedAction::DeleteProfileTrait(id.to_string())),
+            ["archive", profile_id] => Effect::Confirm(ConfirmedAction::SetProfileStatus {
+                profile_id: profile_id.to_string(),
+                status: nexus_core::harness::ProfileStatus::Archived,
+            }),
+            ["restore", profile_id] => Effect::Report(services::profile_set_status(
+                app,
+                profile_id,
+                nexus_core::harness::ProfileStatus::Active,
+            )?),
+            ["delete-profile", profile_id] => Effect::Confirm(ConfirmedAction::SetProfileStatus {
+                profile_id: profile_id.to_string(),
+                status: nexus_core::harness::ProfileStatus::Deleted,
+            }),
+            ["rename", rest @ ..] if !rest.is_empty() => {
+                Effect::Report(services::profile_rename(app, &rest.join(" "))?)
+            }
+            ["export"] => Effect::Report(services::profile_export(app, None)?),
+            ["export", path] => Effect::Report(services::profile_export(app, Some(path))?),
             ["proposals"] => Effect::Report(services::rsi_report(app, false)?),
             ["approve-proposal", id] => Effect::Report(services::rsi_review(app, id, true)?),
             ["reject-proposal", id] => Effect::Report(services::rsi_review(app, id, false)?),
@@ -503,6 +676,8 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             [] => view_or(View::GoalMenu, services::goals_report(app)?),
             ["show", id] => Effect::Report(services::goal_show_report(app, id)?),
             ["verify", id] => Effect::Report(services::goal_verify_report(app, id)?),
+            ["archive", id] => Effect::Report(services::goal_archive(app, id)?),
+            ["risks", id] => Effect::Report(services::goal_risks_report(app, id)?),
             ["export", id] => {
                 Effect::Report(Report::new("goal export").line(app.goals().export(id)?))
             }
@@ -512,6 +687,14 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                 if let Some(session_id) = ctx.session_id.as_deref() {
                     services::attach_goal_to_session(app, &id, session_id)?;
                 }
+                app.harness()
+                    .execute(crate::control_plane::HarnessAction::ActivateWork {
+                        session_id: ctx.session_id.clone(),
+                        goal_id: Some(id.clone()),
+                        plan_id: None,
+                        plan_version: None,
+                        task_id: None,
+                    })?;
                 if ctx.interactive {
                     // Show the fast-created goal for editing.
                     return Ok(Effect::View(View::GoalDetail(id)));
@@ -628,6 +811,17 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                 }
             }
             ["show", id] | ["result", id] => Effect::Report(services::task_show_report(app, id)?),
+            ["graph"] => {
+                let session_id = ctx.session_id.as_deref().ok_or_else(|| {
+                    NexusError::NotFound("no active session for the task graph".into())
+                })?;
+                Effect::Report(services::task_graph_report(app, session_id)?)
+            }
+            ["depend", id, depends_on] => {
+                Effect::Report(services::task_depend(app, id, depends_on)?)
+            }
+            ["validate", id] => Effect::Report(services::task_validate_report(app, id)?),
+            ["assign", id, owner] => Effect::Report(services::task_assign(app, id, owner)?),
             ["logs", id] => Effect::Report(services::task_logs_report(app, id)?),
             ["pause", id] => Effect::Report(services::task_set_status(
                 app,
@@ -665,6 +859,7 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                 [] | ["list"] | ["tree"] => {
                     Effect::Report(services::subagents_report(app, session_id)?)
                 }
+                ["limits"] => Effect::Report(services::subagent_limits_report(app, session_id)?),
                 ["spawn", role, rest @ ..] if !rest.is_empty() => Effect::Report(
                     services::subagent_spawn(app, session_id, role, &rest.join(" "), None)?,
                 ),
@@ -780,14 +975,69 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
         }
 
         CommandId::Memory => match args.as_slice() {
-            [] => view_or(View::Memory, services::memory_report(app, None)?),
+            [] => view_or(
+                View::Memory,
+                services::memory_report_for_context(app, ctx.session_id.as_deref(), None)?,
+            ),
+            ["show", id] => Effect::Report(services::memory_show_report_for_context(
+                app,
+                ctx.session_id.as_deref(),
+                id,
+            )?),
+            ["approve", id] => Effect::Report(services::memory_approve_for_context(
+                app,
+                ctx.session_id.as_deref(),
+                id,
+            )?),
+            ["reject", id] => Effect::Report(services::memory_reject_for_context(
+                app,
+                ctx.session_id.as_deref(),
+                id,
+            )?),
             ["search", rest @ ..] if !rest.is_empty() => {
-                Effect::Report(services::memory_report(app, Some(&rest.join(" ")))?)
+                Effect::Report(services::memory_report_for_context(
+                    app,
+                    ctx.session_id.as_deref(),
+                    Some(&rest.join(" ")),
+                )?)
             }
             ["add", rest @ ..] if !rest.is_empty() => {
-                Effect::Report(services::memory_add(app, &rest.join(" "), "operator")?)
+                Effect::Report(services::memory_add_for_context(
+                    app,
+                    ctx.session_id.as_deref(),
+                    &rest.join(" "),
+                    "operator",
+                )?)
             }
             ["forget", id] => Effect::Confirm(ConfirmedAction::ForgetMemory(id.to_string())),
+            ["scopes"] => Effect::Report(services::memory_scopes_report(
+                app,
+                ctx.session_id.as_deref(),
+            )?),
+            ["stats"] => Effect::Report(services::memory_stats_report(
+                app,
+                ctx.session_id.as_deref(),
+            )?),
+            ["candidates"] => Effect::Report(services::memory_candidates_report(
+                app,
+                ctx.session_id.as_deref(),
+            )?),
+            ["contradictions"] => Effect::Report(services::memory_contradictions_report(
+                app,
+                ctx.session_id.as_deref(),
+            )?),
+            ["export"] => Effect::Report(services::memory_export(app, None)?),
+            ["export", path] => Effect::Report(services::memory_export(app, Some(path))?),
+            _ => usage(def),
+        },
+        CommandId::Improve => match args.as_slice() {
+            [] | ["list"] => Effect::Report(services::rsi_report(app, false)?),
+            ["all"] => Effect::Report(services::rsi_report(app, true)?),
+            ["show", id] => Effect::Report(services::improve_show_report(app, id)?),
+            ["approve", id] => Effect::Report(services::rsi_review(app, id, true)?),
+            ["reject", id] => Effect::Report(services::rsi_review(app, id, false)?),
+            ["apply", id] => Effect::Report(services::improve_set_applied(app, id, true)?),
+            ["rollback", id] => Effect::Report(services::improve_set_applied(app, id, false)?),
             _ => usage(def),
         },
         CommandId::Skills => match args.as_slice() {
@@ -1110,9 +1360,9 @@ pub fn apply_confirmed(app: &App, action: &ConfirmedAction) -> Result<Report> {
             }
             Ok(Report::untitled().ok(format!("deleted persona {id}")))
         }
-        ConfirmedAction::DeleteProfileTrait(id) => {
-            app.profiles().delete(id)?;
-            Ok(Report::untitled().ok(format!("deleted profile trait {id}")))
+        ConfirmedAction::DeleteProfileTrait(id) => services::profile_delete_fact(app, id),
+        ConfirmedAction::SetProfileStatus { profile_id, status } => {
+            services::profile_set_status(app, profile_id, *status)
         }
         ConfirmedAction::WriteStarterInstructions => services::init_write(app, true),
         ConfirmedAction::InitializeGit => services::init_git(app),
@@ -1140,13 +1390,7 @@ pub fn apply_confirmed(app: &App, action: &ConfirmedAction) -> Result<Report> {
             work,
             diff,
         } => {
-            let mut work = work.clone();
-            let approval = app.orchestration().request_plan_approval(&work, diff)?;
-            app.orchestration()
-                .resolve_plan_approval(&approval.id, true, "operator")?;
-            work.approve();
-            app.orchestration()
-                .save_plan(session_id, &work, "approved", "operator")?;
+            services::approve_plan_work(app, session_id, work, diff)?;
             Ok(Report::untitled().ok(format!("approved plan {} v{}", work.id, work.version)))
         }
         ConfirmedAction::CancelTask(id) => {
@@ -1327,4 +1571,26 @@ async fn mcp_tools_report(app: &App, name: &str) -> Result<Report> {
         .map(|t| vec![t.name, t.description])
         .collect();
     Ok(Report::new(format!("{name} tools")).table(&["tool", "description"], rows))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_bare_interactive_command_resolves_to_a_view() {
+        for def in registry::COMMANDS.iter().filter(|def| def.interactive) {
+            let view = bare_interactive_view(def);
+            assert!(view.is_some(), "/{} has no bare menu route", def.name);
+        }
+    }
+
+    #[test]
+    fn generic_command_routes_carry_the_canonical_name() {
+        let def = registry::find("status").expect("status command");
+        assert_eq!(
+            bare_interactive_view(def),
+            Some(View::CommandMenu("status".into()))
+        );
+    }
 }
