@@ -523,6 +523,28 @@ fn event_lines(
                 }
             }
         }
+        TimelineKind::Diff {
+            path,
+            insertions,
+            deletions,
+            preview,
+        } => {
+            let header = match path {
+                Some(path) => format!("▸ {path}  (+{insertions} −{deletions})"),
+                None => format!("(+{insertions} −{deletions})"),
+            };
+            lines.push(Line::from(Span::styled(header, t.secondary())));
+            let cap = if expanded { 400 } else { 40 };
+            for source_line in preview.lines().take(cap) {
+                let style = match source_line.as_bytes().first() {
+                    Some(b'+') => t.success(),
+                    Some(b'-') => t.failure(),
+                    Some(b'@') if source_line.starts_with("@@") => t.primary(),
+                    _ => t.muted(),
+                };
+                push_wrapped(&mut lines, source_line, width, style);
+            }
+        }
         _ => {}
     }
 
@@ -1978,6 +2000,40 @@ mod tests {
             assert_eq!(text.matches(&event.summary).count(), 1, "{text}");
             assert!(text.contains("second line"), "{text}");
         }
+    }
+
+    #[test]
+    fn diff_card_shows_path_header_and_colorized_lines() {
+        let theme = Theme::new("nexus-dark", ColorSupport::TrueColor);
+        let event = message_event(
+            "diff · page.html",
+            TimelineKind::Diff {
+                path: Some("page.html".into()),
+                insertions: 2,
+                deletions: 1,
+                preview: "-old line\n+new line\n+another".into(),
+            },
+        );
+        let lines = event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        // Path header with counts is present.
+        assert!(text.contains("page.html"), "{text}");
+        assert!(text.contains("+2"), "{text}");
+        assert!(text.contains("−1"), "{text}");
+        // Added/removed lines are rendered in the body.
+        assert!(text.contains("+new line"), "{text}");
+        assert!(text.contains("-old line"), "{text}");
+        // Added lines use the success color; removed lines the failure color.
+        let added = lines
+            .iter()
+            .find(|line| line_text(line).starts_with("+new line"))
+            .expect("added line");
+        assert_eq!(added.spans[0].style.fg, theme.success().fg);
+        let removed = lines
+            .iter()
+            .find(|line| line_text(line).starts_with("-old line"))
+            .expect("removed line");
+        assert_eq!(removed.spans[0].style.fg, theme.failure().fg);
     }
 
     #[test]

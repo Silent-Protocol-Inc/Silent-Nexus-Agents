@@ -4,6 +4,33 @@ All notable changes to NEXUS are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 Semantic Versioning.
 
+## [1.1.2] — 2026-07-18
+
+Patch release. Makes file changes visible in the timeline: file-mutating tool
+calls now render a diff card with the file path and highlighted `+`/`-` lines.
+No schema changes, no new commands.
+
+### Fixed
+
+- Creating a file (`fs.create_file`) now shows a timeline diff card with the
+  file path as a header and every new line highlighted as an added (`+`) line.
+  Previously the timeline only showed a one-line "wrote …" summary with no diff
+  and no path, because a diff card was emitted solely when the tool name
+  contained "diff" or the output was a git patch.
+- `fs.patch_file` shows the replaced text as removed (`-`) and the new text as
+  added (`+`); `fs.delete` shows the removed file's contents as `-` lines; and
+  `fs.move` shows the destination path. Each card carries insertion/deletion
+  counts.
+- The timeline diff card now renders the file path and colorizes `+`/`-`/`@@`
+  lines in every surface (TUI transcript and CLI run output). Previously the
+  `TimelineKind::Diff` body had no renderer and only appeared as raw JSON when a
+  card was expanded, so git-diff cards also showed no path or colors.
+
+### Changed
+
+- Structured tool diffs travel in tool-output metadata (never in the
+  model-facing content), so richer diff cards add no model-context cost.
+
 ## [1.1.1] — 2026-07-18
 
 Patch release from a post-1.1.0 stability audit (eight-angle diff review with

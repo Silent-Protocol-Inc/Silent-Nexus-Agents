@@ -287,13 +287,29 @@ fn print_event(ui: &Ui, ev: &LoopEvent) {
                 duration_ms
             );
         }
-        LoopEvent::DiffProduced { tool, preview } => {
+        LoopEvent::DiffProduced {
+            tool,
+            path,
+            insertions,
+            deletions,
+            preview,
+        } => {
+            let target = path.as_deref().unwrap_or(tool.as_str());
             println!(
                 "  {} {} {}",
                 ui.cyan("diff"),
-                tool,
-                ui.dim(&ui.safe(preview))
+                target,
+                ui.dim(&format!("(+{insertions} -{deletions})"))
             );
+            for line in preview.lines() {
+                let rendered = ui.safe(line);
+                let styled = match line.as_bytes().first() {
+                    Some(b'+') => ui.green(&rendered),
+                    Some(b'-') => ui.red(&rendered),
+                    _ => ui.dim(&rendered),
+                };
+                println!("    {styled}");
+            }
         }
         LoopEvent::Retry {
             attempt,

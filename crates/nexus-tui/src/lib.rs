@@ -3535,15 +3535,25 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
                 );
             }
         }
-        LoopEvent::DiffProduced { tool, preview } => {
+        LoopEvent::DiffProduced {
+            tool,
+            path,
+            insertions,
+            deletions,
+            preview,
+        } => {
+            let summary = match &path {
+                Some(path) => format!("diff · {path}"),
+                None => format!("diff from {tool}"),
+            };
             st.push_local_event_for_turn(
                 turn_id.clone(),
                 TimelineStatus::Completed,
-                format!("diff from {tool}"),
+                summary,
                 TimelineKind::Diff {
-                    path: None,
-                    insertions: 0,
-                    deletions: 0,
+                    path,
+                    insertions,
+                    deletions,
                     preview,
                 },
             );

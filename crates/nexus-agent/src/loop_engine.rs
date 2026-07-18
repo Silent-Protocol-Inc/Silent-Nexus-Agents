@@ -179,6 +179,9 @@ pub enum LoopEvent {
     },
     DiffProduced {
         tool: String,
+        path: Option<String>,
+        insertions: usize,
+        deletions: usize,
         preview: String,
     },
     Retry {
@@ -809,20 +812,30 @@ impl TurnTimeline {
                     self.store.update(&timeline_event)?;
                 }
             }
-            LoopEvent::DiffProduced { tool, preview } => {
+            LoopEvent::DiffProduced {
+                tool,
+                path,
+                insertions,
+                deletions,
+                preview,
+            } => {
                 let parent = self
                     .tool_cards
                     .lock()
                     .ok()
                     .and_then(|cards| cards.get(tool).map(|card| card.span_id.clone()));
+                let summary = match path {
+                    Some(path) => format!("diff · {path}"),
+                    None => format!("diff from {tool}"),
+                };
                 self.append(
                     LifecyclePhase::Completed,
                     TimelineStatus::Completed,
-                    format!("diff from {tool}"),
+                    summary,
                     TimelineKind::Diff {
-                        path: None,
-                        insertions: 0,
-                        deletions: 0,
+                        path: path.clone(),
+                        insertions: *insertions,
+                        deletions: *deletions,
                         preview: preview.clone(),
                     },
                     parent,
@@ -3060,9 +3073,37 @@ impl AgentLoop {
             stage_changes.extend(work.transition_to(target));
         }
         self.persist_work_update(session_id, work, stage_changes)?;
-        if call.name.contains("diff") || output.contains("diff --git") {
+        // Prefer a structured diff attached by the tool (fs mutations carry the
+        // file path + `+/-` preview in metadata); fall back to git unified-diff
+        // output. Structured diffs never reach the model — only `output` does.
+        if let Some(diff) = result
+            .as_ref()
+            .ok()
+            .and_then(|out| out.metadata.get("diff"))
+            .filter(|value| value.is_object())
+        {
             self.emit(LoopEvent::DiffProduced {
                 tool: call.name.clone(),
+                path: diff
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+                insertions: diff.get("insertions").and_then(Value::as_u64).unwrap_or(0) as usize,
+                deletions: diff.get("deletions").and_then(Value::as_u64).unwrap_or(0) as usize,
+                preview: diff
+                    .get("preview")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        } else if call.name.contains("diff") || output.contains("diff --git") {
+            let (path, insertions, deletions) = parse_git_diff_stats(&output);
+            self.emit(LoopEvent::DiffProduced {
+                tool: call.name.clone(),
+                path,
+                insertions,
+                deletions,
                 preview: output.chars().take(500).collect(),
             });
         }
@@ -3870,6 +3911,30 @@ fn summarize(text: &str, max_chars: usize) -> String {
         summary.push('…');
     }
     summary
+}
+
+/// Best-effort path + insertion/deletion counts from git unified-diff text.
+/// Returns `(path, insertions, deletions)`; the path prefers the `+++ b/<path>`
+/// header and counts exclude the `+++`/`---` file markers.
+fn parse_git_diff_stats(diff: &str) -> (Option<String>, usize, usize) {
+    let mut path = None;
+    let mut insertions = 0;
+    let mut deletions = 0;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            let name = rest.strip_prefix("b/").unwrap_or(rest).trim();
+            if !name.is_empty() && name != "/dev/null" {
+                path = Some(name.to_string());
+            }
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        } else if line.starts_with('+') {
+            insertions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+    (path, insertions, deletions)
 }
 
 fn tool_reasoning_summary(content: &str, native_tool_calls: bool) -> String {

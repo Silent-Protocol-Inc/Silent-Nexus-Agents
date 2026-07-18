@@ -539,14 +539,19 @@ fn execute_sync(
                     ),
                 });
             }
+            let prior = if path.exists() {
+                std::fs::read_to_string(&path).unwrap_or_default()
+            } else {
+                String::new()
+            };
             nexus_core::atomic::atomic_write(&path, content.as_bytes(), file_mode(&path))?;
+            let rel_display = guard.display_relative(&path);
             Ok((
-                format!(
-                    "wrote {} ({} bytes)",
-                    guard.display_relative(&path),
-                    content.len()
-                ),
-                json!({"bytes": content.len()}),
+                format!("wrote {} ({} bytes)", rel_display, content.len()),
+                json!({
+                    "bytes": content.len(),
+                    "diff": mutation_diff(&rel_display, &prior, content),
+                }),
             ))
         }
         FsOp::PatchFile => {
@@ -588,10 +593,11 @@ fn execute_sync(
                 content.replacen(old_text, new_text, 1)
             };
             nexus_core::atomic::atomic_write(&path, updated.as_bytes(), file_mode(&path))?;
+            let rel_display = guard.display_relative(&path);
             Ok((
                 format!(
                     "patched {} ({} replacement{})",
-                    guard.display_relative(&path),
+                    rel_display,
                     occurrences.min(if replace_all { occurrences } else { 1 }),
                     if replace_all && occurrences > 1 {
                         "s"
@@ -599,7 +605,10 @@ fn execute_sync(
                         ""
                     }
                 ),
-                json!({"replacements": if replace_all { occurrences } else { 1 }}),
+                json!({
+                    "replacements": if replace_all { occurrences } else { 1 },
+                    "diff": mutation_diff(&rel_display, old_text, new_text),
+                }),
             ))
         }
         FsOp::Move => {
@@ -611,13 +620,17 @@ fn execute_sync(
             }
             let to = guard.resolve_for_write(destination)?;
             std::fs::rename(&from, &to)?;
+            let to_display = guard.display_relative(&to);
             Ok((
-                format!(
-                    "moved {} → {}",
-                    guard.display_relative(&from),
-                    guard.display_relative(&to)
-                ),
-                Value::Null,
+                format!("moved {} → {}", guard.display_relative(&from), to_display),
+                json!({
+                    "diff": {
+                        "path": to_display,
+                        "insertions": 0,
+                        "deletions": 0,
+                        "preview": "",
+                    }
+                }),
             ))
         }
         FsOp::Copy => {
@@ -653,6 +666,14 @@ fn execute_sync(
                     "refusing to delete the workspace root".into(),
                 ));
             }
+            // Capture text content before removal so the timeline can show the
+            // removed lines (`-`). Best-effort: directories and unreadable/binary
+            // files simply produce a path-only diff card.
+            let removed = if path.is_dir() {
+                String::new()
+            } else {
+                std::fs::read_to_string(&path).unwrap_or_default()
+            };
             if path.is_dir() {
                 if recursive {
                     std::fs::remove_dir_all(&path)?;
@@ -667,9 +688,10 @@ fn execute_sync(
             } else {
                 std::fs::remove_file(&path)?;
             }
+            let rel_display = guard.display_relative(&path);
             Ok((
-                format!("deleted {}", guard.display_relative(&path)),
-                Value::Null,
+                format!("deleted {}", rel_display),
+                json!({"diff": mutation_diff(&rel_display, &removed, "")}),
             ))
         }
         FsOp::Mkdir => {
@@ -681,6 +703,43 @@ fn execute_sync(
             ))
         }
     }
+}
+
+/// UI-only change summary attached to a mutating op's metadata.
+///
+/// Represents `old` → `new` as removed (`-`) then added (`+`) lines so the
+/// timeline can render a highlighted diff and the file path even for a freshly
+/// created file (all `+`) or a deleted one (all `-`). This never reaches the
+/// model — only `ToolOutput.content` does.
+fn mutation_diff(path_rel: &str, old: &str, new: &str) -> Value {
+    const MAX_LINES: usize = 200;
+    let insertions = if new.is_empty() {
+        0
+    } else {
+        new.lines().count()
+    };
+    let deletions = if old.is_empty() {
+        0
+    } else {
+        old.lines().count()
+    };
+    let mut preview = String::new();
+    for line in old.lines().take(MAX_LINES) {
+        preview.push('-');
+        preview.push_str(line);
+        preview.push('\n');
+    }
+    for line in new.lines().take(MAX_LINES) {
+        preview.push('+');
+        preview.push_str(line);
+        preview.push('\n');
+    }
+    json!({
+        "path": path_rel,
+        "insertions": insertions,
+        "deletions": deletions,
+        "preview": preview.trim_end(),
+    })
 }
 
 fn file_mode(path: &std::path::Path) -> u32 {
@@ -893,5 +952,90 @@ mod tests {
             .expect("action");
         assert_eq!(req.risk, RiskLevel::Destructive);
         assert!(req.summary.contains("recursive"));
+    }
+
+    #[tokio::test]
+    async fn create_file_emits_added_lines_diff() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = context(dir.path());
+        let r = registry();
+        let out = run(
+            &ctx,
+            &r,
+            "fs.create_file",
+            json!({"path": "page.html", "content": "<html>\n<body>hi</body>\n</html>\n"}),
+        )
+        .await
+        .expect("create");
+        let diff = out.metadata.get("diff").expect("diff metadata");
+        assert_eq!(diff.get("path").and_then(Value::as_str), Some("page.html"));
+        assert_eq!(diff.get("insertions").and_then(Value::as_u64), Some(3));
+        assert_eq!(diff.get("deletions").and_then(Value::as_u64), Some(0));
+        let preview = diff
+            .get("preview")
+            .and_then(Value::as_str)
+            .expect("preview");
+        assert!(preview.lines().all(|line| line.starts_with('+')));
+        assert!(preview.contains("+<body>hi</body>"));
+    }
+
+    #[tokio::test]
+    async fn patch_file_emits_removed_and_added_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = context(dir.path());
+        let r = registry();
+        run(
+            &ctx,
+            &r,
+            "fs.create_file",
+            json!({"path": "c.txt", "content": "alpha\n"}),
+        )
+        .await
+        .expect("create");
+        let out = run(
+            &ctx,
+            &r,
+            "fs.patch_file",
+            json!({"path": "c.txt", "old_text": "alpha", "new_text": "beta"}),
+        )
+        .await
+        .expect("patch");
+        let diff = out.metadata.get("diff").expect("diff metadata");
+        assert_eq!(diff.get("insertions").and_then(Value::as_u64), Some(1));
+        assert_eq!(diff.get("deletions").and_then(Value::as_u64), Some(1));
+        let preview = diff
+            .get("preview")
+            .and_then(Value::as_str)
+            .expect("preview");
+        assert!(preview.contains("-alpha"));
+        assert!(preview.contains("+beta"));
+    }
+
+    #[tokio::test]
+    async fn delete_emits_removed_lines_diff() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = context(dir.path());
+        let r = registry();
+        run(
+            &ctx,
+            &r,
+            "fs.create_file",
+            json!({"path": "gone.html", "content": "one\ntwo\n"}),
+        )
+        .await
+        .expect("create");
+        let out = run(&ctx, &r, "fs.delete", json!({"path": "gone.html"}))
+            .await
+            .expect("delete");
+        let diff = out.metadata.get("diff").expect("diff metadata");
+        assert_eq!(diff.get("path").and_then(Value::as_str), Some("gone.html"));
+        assert_eq!(diff.get("insertions").and_then(Value::as_u64), Some(0));
+        assert_eq!(diff.get("deletions").and_then(Value::as_u64), Some(2));
+        let preview = diff
+            .get("preview")
+            .and_then(Value::as_str)
+            .expect("preview");
+        assert!(preview.lines().all(|line| line.starts_with('-')));
+        assert!(preview.contains("-two"));
     }
 }
