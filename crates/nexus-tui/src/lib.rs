@@ -3607,6 +3607,12 @@ fn command_changes_active_context(cmd: &nexus_app::SlashCommand) -> bool {
         CommandId::Model | CommandId::Agent | CommandId::Persona | CommandId::Profile => {
             !cmd.args.is_empty()
         }
+        CommandId::Memory => !matches!(
+            cmd.args.first().map(String::as_str),
+            None | Some(
+                "show" | "search" | "scopes" | "stats" | "candidates" | "contradictions" | "export"
+            )
+        ),
         CommandId::Goal => !matches!(
             cmd.args.first().map(String::as_str),
             None | Some("show" | "verify" | "export")
@@ -3824,6 +3830,10 @@ mod tests {
             "branch stage src/lib.rs",
             "connector import mcp:test",
             "profile select focused",
+            "memory approve mem_1",
+            "memory reject mem_1",
+            "memory forget mem_1",
+            "memory add remember this",
         ] {
             assert!(
                 command_changes_active_context(&command(line)),
@@ -3839,6 +3849,9 @@ mod tests {
             "connector show mcp:test",
             "theme cyberpunk",
             "btw what changed",
+            "memory search todo",
+            "memory show mem_1",
+            "memory stats",
         ] {
             assert!(
                 !command_changes_active_context(&command(line)),

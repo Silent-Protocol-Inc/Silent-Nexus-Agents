@@ -4,7 +4,54 @@ All notable changes to NEXUS are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 Semantic Versioning.
 
-## [1.1.0] — Unreleased
+## [1.1.1] — 2026-07-18
+
+Patch release from a post-1.1.0 stability audit (eight-angle diff review with
+per-finding verification). Fixes ten confirmed correctness, privacy, and
+convention issues; no schema changes, no new commands.
+
+### Fixed
+
+- `/memory show <id>` no longer returns the content of a forgotten memory.
+  `forget` soft-deletes (status `deleted`) so the legacy-import dedup can still
+  see the row, but the by-id lookup now rejects deleted rows instead of
+  rendering their full payload — a privacy regression versus 1.0's hard delete.
+- `/plan pause` and `/plan resume` no longer clobber non-runnable task states.
+  Only `Draft`/`Pending`/`Ready`/`Running` tasks pause, and only `Paused` tasks
+  resume, so pause/resume can no longer resurrect a `Failed` task or bypass a
+  `Waiting`-on-approval gate.
+- `/improve apply|rollback` on a skill proposal now takes the atomic status
+  transition before toggling the skill, and restores the prior status if the
+  skill toggle fails, so concurrent apply/rollback can no longer leave the
+  skill's enabled state decoupled from the recorded proposal status.
+- `/memory approve` and `/memory reject` are now blocked while a turn is active,
+  matching the other memory mutations, so they cannot race the running turn's
+  own memory writes. Read-only memory subcommands still run mid-turn.
+- `/profile` operations (report, review, delete-fact, rename, export) resolve
+  the canonical profile on demand when a background turn established the session
+  context before a profile was set, instead of failing with "no active
+  profile". Resolution does not rewrite the turn context, so prompt composition
+  is unchanged.
+- `/resume` distinguishes provider availability from model availability: a
+  configured model whose provider credential is missing/revoked now recommends
+  re-authentication or a model/provider switch instead of reporting the
+  environment as an exact match. (Still a synchronous credential check, not a
+  live reachability probe.)
+- Non-interactive `/connect` now reports local runtimes and configured
+  endpoints (matching the interactive menu) instead of the hosted-auth catalog
+  that belongs to `/login`.
+- A dependency-parked background task (`blocked`) is no longer mislabeled as
+  `waiting_approval` in session snapshots and continuation checkpoints; it
+  re-queues itself once its dependency clears.
+- Dependency-block detection shares a single sentinel constant between the
+  writer and the auto-requeue matcher, and `retry_task` now accepts `blocked`
+  tasks so an operator has a manual escape hatch if a task is ever stranded.
+- `/memory export` and `/profile export` write via
+  `nexus_core::atomic::atomic_write_private` (O_NOFOLLOW, same-directory atomic
+  replace, `0600`) per the AGENTS.md write discipline, instead of a bare
+  `std::fs::write` that followed symlinks and left default permissions.
+
+## [1.1.0] — 2026-07-17
 
 Silent Nexus 1.1 is the adaptive-harness release line. Automated gates
 (fmt, clippy, tests, docs, audit, deny, secret scan), release packaging and

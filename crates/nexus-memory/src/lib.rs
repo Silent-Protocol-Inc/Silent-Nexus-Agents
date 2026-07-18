@@ -1062,6 +1062,19 @@ impl RsiStore {
         Ok(())
     }
 
+    /// Force a proposal back to a known prior status. Only used to compensate
+    /// when a side effect fails after [`Self::set_applied`] already advanced the
+    /// row, so the recorded status stays consistent with the world.
+    pub fn restore_status(&self, id: &str, status: &str) -> Result<()> {
+        self.store.with(|conn| {
+            Ok(conn.execute(
+                "UPDATE rsi_proposals SET status = ?1, reviewed_at = ?2 WHERE id = ?3",
+                rusqlite::params![status, nexus_core::now_rfc3339(), id],
+            )?)
+        })?;
+        Ok(())
+    }
+
     fn propose(
         &self,
         kind: &str,

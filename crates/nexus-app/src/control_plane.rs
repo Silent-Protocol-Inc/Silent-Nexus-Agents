@@ -222,6 +222,35 @@ impl<'a> HarnessControlPlane<'a> {
         }
     }
 
+    /// Resolve the profile id a `/profile` operation should act on. Prefers the
+    /// active context's profile, but when a turn established the context before
+    /// any profile was resolved (leaving `profile_id` null), it falls back to
+    /// the canonical profile named by the operator's current selection —
+    /// creating it if absent — instead of failing with "no active profile".
+    /// It deliberately does not rewrite the turn context, so prompt composition
+    /// (which treats a null `profile_id` as "use the legacy profile prompt") is
+    /// left untouched.
+    pub fn active_profile_id(&self, session_id: Option<&str>) -> Result<String> {
+        if let Some(profile_id) = self.ensure_context(session_id)?.profile_id {
+            return Ok(profile_id);
+        }
+        let legacy = self.app.read_ui_state(|state| state.profile_name.clone());
+        let profile = match self.global.profiles_named(&legacy)?.first().cloned() {
+            Some(profile) => profile,
+            None => {
+                let mut profile = UserProfile::new(&legacy)?;
+                if legacy.eq_ignore_ascii_case("default") {
+                    profile
+                        .metadata
+                        .insert("is_default".into(), serde_json::Value::Bool(true));
+                }
+                self.global.create_profile(&profile)?;
+                profile
+            }
+        };
+        Ok(profile.id)
+    }
+
     pub fn ensure_context(&self, session_id: Option<&str>) -> Result<ActiveHarnessContext> {
         if let Some(context) = self
             .workspace
@@ -559,14 +588,22 @@ impl<'a> HarnessControlPlane<'a> {
     pub fn memory(&self, session_id: Option<&str>, memory_id: &str) -> Result<MemoryRecord> {
         self.import_legacy_memories()?;
         let (global_scopes, workspace_scopes) = self.active_memory_scopes(session_id)?;
-        match self
+        let memory = match self
             .workspace
             .memory_in_scopes(memory_id, &workspace_scopes)
         {
-            Ok(memory) => Ok(memory),
-            Err(NexusError::NotFound(_)) => self.global.memory_in_scopes(memory_id, &global_scopes),
-            Err(error) => Err(error),
+            Ok(memory) => memory,
+            Err(NexusError::NotFound(_)) => {
+                self.global.memory_in_scopes(memory_id, &global_scopes)?
+            }
+            Err(error) => return Err(error),
+        };
+        // Forgotten rows stay on disk so the legacy-import dedup can see them,
+        // but they must never be retrievable by id after the operator deletes.
+        if memory.status == MemoryStatus::Deleted {
+            return Err(NexusError::NotFound(format!("memory `{memory_id}`")));
         }
+        Ok(memory)
     }
 
     /// Store an explicit operator memory in both representations. The

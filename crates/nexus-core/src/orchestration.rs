@@ -1126,6 +1126,24 @@ impl TaskStatus {
     }
 }
 
+/// Error text stamped on a background task parked because a dependency failed
+/// or was cancelled. Shared between the writer and the auto-requeue matcher so
+/// the two can never drift apart, and used by consumers to tell a
+/// dependency-block apart from an approval/policy block on the same
+/// [`TaskStatus::Blocked`] status.
+pub const DEPENDENCY_BLOCK_ERROR: &str = "blocked: dependency failed or was cancelled";
+
+/// LIKE/`starts_with` prefix identifying any dependency-block error.
+pub const DEPENDENCY_BLOCK_PREFIX: &str = "blocked: dependency";
+
+/// True when a task's error marks it as parked on a failed/cancelled
+/// dependency (as opposed to an approval or policy block).
+pub fn is_dependency_block(error: Option<&str>) -> bool {
+    error
+        .map(|e| e.starts_with(DEPENDENCY_BLOCK_PREFIX))
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundTask {
     pub id: TaskId,
@@ -1738,26 +1756,26 @@ impl OrchestrationStore {
                 conn.execute(
                     "UPDATE background_tasks
                      SET status='blocked',
-                         error='blocked: dependency failed or was cancelled',
+                         error=?2,
                          updated_at=?1
                      WHERE status='queued' AND EXISTS (
                          SELECT 1 FROM background_task_dependencies d
                          JOIN background_tasks dep ON dep.id = d.depends_on_task_id
                          WHERE d.task_id = background_tasks.id
                            AND dep.status IN ('failed','cancelled'))",
-                    params![now],
+                    params![now, DEPENDENCY_BLOCK_ERROR],
                 )?;
                 conn.execute(
                     "UPDATE background_tasks
                      SET status='queued', error=NULL, updated_at=?1
                      WHERE status='blocked'
-                       AND error LIKE 'blocked: dependency%'
+                       AND error LIKE ?2
                        AND NOT EXISTS (
                          SELECT 1 FROM background_task_dependencies d
                          JOIN background_tasks dep ON dep.id = d.depends_on_task_id
                          WHERE d.task_id = background_tasks.id
                            AND dep.status <> 'completed')",
-                    params![now],
+                    params![now, format!("{DEPENDENCY_BLOCK_PREFIX}%")],
                 )?;
                 let running_readers: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM background_tasks
@@ -1922,9 +1940,15 @@ impl OrchestrationStore {
 
     pub fn retry_task(&self, task_id: &str) -> Result<()> {
         let task = self.task(task_id)?;
-        if !matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled) {
+        // Blocked is retryable too: it is the manual escape hatch for a task
+        // parked on a dependency that will never complete, so an operator is
+        // never stranded waiting for an auto-requeue that cannot fire.
+        if !matches!(
+            task.status,
+            TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Blocked
+        ) {
             return Err(NexusError::Other(format!(
-                "task `{task_id}` is {}, not failed/cancelled",
+                "task `{task_id}` is {}, not failed/cancelled/blocked",
                 task.status.as_str()
             )));
         }
@@ -2821,7 +2845,8 @@ mod tests {
         );
         let parked = orchestration.task(second.id.as_str()).expect("task");
         assert_eq!(parked.status, TaskStatus::Blocked);
-        assert!(parked.error.unwrap_or_default().starts_with("blocked:"));
+        assert_eq!(parked.error.as_deref(), Some(DEPENDENCY_BLOCK_ERROR));
+        assert!(is_dependency_block(parked.error.as_deref()));
 
         // A retry that completes the dependency re-queues the dependent.
         orchestration
@@ -2832,6 +2857,37 @@ mod tests {
             .expect("lease")
             .expect("dependent re-queued after dependency completion");
         assert_eq!(unblocked.id, second.id);
+    }
+
+    #[test]
+    fn retry_unsticks_a_dependency_blocked_task() {
+        let (_store, orchestration, session) = orchestration_store();
+        let first = quick_task(&orchestration, &session, "first");
+        let second = quick_task(&orchestration, &session, "second");
+        orchestration
+            .add_task_dependency(second.id.as_str(), first.id.as_str())
+            .expect("dependency");
+        orchestration
+            .set_task_status(first.id.as_str(), TaskStatus::Cancelled, None, Some("stop"))
+            .expect("cancel");
+        // Park the dependent on the cancelled prerequisite.
+        assert!(orchestration
+            .lease_next("w1", "2999-01-01T00:00:00Z", 3, true)
+            .expect("lease")
+            .is_none());
+        assert_eq!(
+            orchestration.task(second.id.as_str()).expect("task").status,
+            TaskStatus::Blocked
+        );
+        // The auto-requeue can never fire (the dependency is terminal), so the
+        // operator's manual retry is the only escape hatch.
+        orchestration
+            .retry_task(second.id.as_str())
+            .expect("blocked task is retryable");
+        assert_eq!(
+            orchestration.task(second.id.as_str()).expect("task").status,
+            TaskStatus::Queued
+        );
     }
 
     #[test]

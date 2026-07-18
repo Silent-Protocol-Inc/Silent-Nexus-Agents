@@ -468,7 +468,7 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             _ => usage(def),
         },
         CommandId::Connect => match args.as_slice() {
-            [] => view_or(View::Connect, login_report(app).await),
+            [] => view_or(View::Connect, connect_report(app).await),
             // Preserve the 1.0 advanced compatibility form. Bare /connect is
             // now the endpoint/runtime manager; hosted auth belongs to /login.
             ["codex"] | ["openai"] | ["anthropic"] | ["claude-plan"] | ["claude"] => {
@@ -1544,6 +1544,46 @@ async fn login_report(app: &App) -> Report {
     }
     r.line_sev(
         "authenticate with `snx auth login` (Codex) or store keys via `/login` in the TUI",
+        Sev::Dim,
+    )
+}
+
+/// `/connect` as a non-interactive report: the endpoint/runtime manager, so it
+/// lists only local runtimes and configured endpoints (the same filter as the
+/// interactive `connect_menu`), not the hosted-auth catalog that `/login` owns.
+async fn connect_report(app: &App) -> Report {
+    let entries = crate::providers::catalog(app).await;
+    let mut r = Report::new("connections");
+    let mut shown = 0;
+    for e in &entries {
+        if !(e.local || e.id.starts_with("custom:") || e.endpoint.is_some()) {
+            continue;
+        }
+        shown += 1;
+        let sev = if !e.implemented {
+            Sev::Dim
+        } else if e.authenticated {
+            Sev::Ok
+        } else {
+            Sev::Warn
+        };
+        let endpoint = e.endpoint.as_deref().unwrap_or("not configured");
+        r = r.line_sev(
+            format!(
+                "{} {:<28} {} · {}",
+                e.marker(),
+                e.label,
+                e.auth_state,
+                endpoint
+            ),
+            sev,
+        );
+    }
+    if shown == 0 {
+        r = r.line_sev("no local runtimes or endpoints configured yet", Sev::Dim);
+    }
+    r.line_sev(
+        "add an endpoint or local runtime with `/connect` in the TUI; hosted sign-in is `/login`",
         Sev::Dim,
     )
 }

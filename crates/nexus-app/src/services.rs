@@ -491,6 +491,27 @@ pub fn resume_candidates(app: &App) -> Result<Vec<ResumeCandidate>> {
 /// checkpointed file hashes with the loop's own recipe, check that the
 /// session's model is still configured, and render the harness recovery
 /// assessment. `None` when the session has no checkpoint to validate.
+/// Synchronous, network-free check that a model's provider has a usable
+/// credential. Mirrors the auth resolution in `status::model_facts`: local
+/// runtimes need no key, codex reuses the CLI login, hosted providers need a
+/// resolved key (env var set or credential-store entry resolved at bootstrap).
+fn provider_credentials_present(cfg: &nexus_core::config::ModelConfig) -> bool {
+    if cfg.auth.as_deref() == Some("codex") || cfg.provider == "codex" {
+        return nexus_models::codex_auth::resolve_with_consent(cfg.allow_existing_codex)
+            .map(|resolved| resolved.is_some())
+            .unwrap_or(false);
+    }
+    if let Some(env) = &cfg.api_key_env {
+        return std::env::var(env).map(|v| !v.is_empty()).unwrap_or(false);
+    }
+    if cfg.api_key_ref.is_some() {
+        return cfg.resolved_api_key.is_some();
+    }
+    // No authentication configured: local runtimes (ollama, llamacpp, mock) and
+    // subscription bridges are usable without a stored key.
+    true
+}
+
 pub fn resume_recovery_report(app: &App, session_id: &str) -> Result<Option<Report>> {
     let harness = app.harness();
     let repository = harness.workspace_repository();
@@ -504,7 +525,17 @@ pub fn resume_recovery_report(app: &App, session_id: &str) -> Result<Option<Repo
         }
     }
     let model = app.sessions().get(session_id)?.model;
-    let model_available = app.config.models.contains_key(&model);
+    let model_config = app.config.models.get(&model);
+    let model_available = model_config.is_some();
+    // Provider availability is a distinct signal from the model being
+    // configured: a present model whose credential is missing/revoked cannot
+    // serve the request. This is a synchronous credential check, not a live
+    // reachability probe, so a running endpoint that later goes down is not
+    // caught here — but a missing key re-enables the change-model-or-provider
+    // recommendation that passing model_available twice would suppress.
+    let provider_available = model_config
+        .map(provider_credentials_present)
+        .unwrap_or(false);
     // The stored fingerprint folds workspace, model, provider, and file hashes
     // together; reproduce its "unchanged" case exactly and mark any drift.
     let current_fingerprint = if current_hashes == checkpoint.file_hashes && model_available {
@@ -517,7 +548,7 @@ pub fn resume_recovery_report(app: &App, session_id: &str) -> Result<Option<Repo
         &current_fingerprint,
         &current_hashes,
         &checkpoint.assumptions,
-        model_available,
+        provider_available,
         model_available,
     )?;
     let mut report = Report::new("resume check")
@@ -531,6 +562,11 @@ pub fn resume_recovery_report(app: &App, session_id: &str) -> Result<Option<Repo
     if !model_available {
         report = report.warn(format!(
             "model `{model}` is no longer configured — pick one with /model before continuing"
+        ));
+    } else if !provider_available {
+        report = report.warn(format!(
+            "model `{model}` is configured but its provider has no usable credential — \
+             re-authenticate (/login) or switch model/provider before continuing"
         ));
     }
     for path in &assessment.changed_files {
@@ -865,10 +901,7 @@ pub fn persona_show_report(app: &App, id_or_name: &str) -> Result<Report> {
 }
 
 pub fn profile_report(app: &App, include_pending: bool) -> Result<Report> {
-    let context = app.harness().ensure_context(None)?;
-    let profile_id = context
-        .profile_id
-        .ok_or_else(|| NexusError::NotFound("no active profile".into()))?;
+    let profile_id = app.harness().active_profile_id(None)?;
     let profile = app.harness().global_repository().profile(&profile_id)?;
     let mut rows = app
         .harness()
@@ -1061,10 +1094,7 @@ pub fn profile_select(app: &App, profile_name: &str) -> Result<Report> {
 }
 
 pub fn profile_review(app: &App, id: &str, approve: bool) -> Result<Report> {
-    let context = app.harness().ensure_context(None)?;
-    let profile_id = context
-        .profile_id
-        .ok_or_else(|| NexusError::NotFound("no active profile".into()))?;
+    let profile_id = app.harness().active_profile_id(None)?;
     match app.harness().global_repository().set_profile_fact_status(
         &profile_id,
         id,
@@ -1085,10 +1115,7 @@ pub fn profile_review(app: &App, id: &str, approve: bool) -> Result<Report> {
 }
 
 pub fn profile_delete_fact(app: &App, id: &str) -> Result<Report> {
-    let context = app.harness().ensure_context(None)?;
-    let profile_id = context
-        .profile_id
-        .ok_or_else(|| NexusError::NotFound("no active profile".into()))?;
+    let profile_id = app.harness().active_profile_id(None)?;
     match app.harness().global_repository().set_profile_fact_status(
         &profile_id,
         id,
@@ -1132,10 +1159,7 @@ pub fn profile_rename(app: &App, new_name: &str) -> Result<Report> {
     if new_name.is_empty() {
         return Err(NexusError::Config("new profile name is required".into()));
     }
-    let context = app.harness().ensure_context(None)?;
-    let profile_id = context
-        .profile_id
-        .ok_or_else(|| NexusError::NotFound("no active profile to rename".into()))?;
+    let profile_id = app.harness().active_profile_id(None)?;
     let harness = app.harness();
     let repository = harness.global_repository();
     let mut profile = repository.profile(&profile_id)?;
@@ -1156,10 +1180,7 @@ pub fn profile_rename(app: &App, new_name: &str) -> Result<Report> {
 /// Export the active profile card and its approved facts as JSON. Candidate
 /// (unreviewed) facts stay out of the export by design.
 pub fn profile_export(app: &App, path: Option<&str>) -> Result<Report> {
-    let context = app.harness().ensure_context(None)?;
-    let profile_id = context
-        .profile_id
-        .ok_or_else(|| NexusError::NotFound("no active profile to export".into()))?;
+    let profile_id = app.harness().active_profile_id(None)?;
     let harness = app.harness();
     let repository = harness.global_repository();
     let profile = repository.profile(&profile_id)?;
@@ -1170,7 +1191,7 @@ pub fn profile_export(app: &App, path: Option<&str>) -> Result<Report> {
     }))?;
     match path {
         Some(path) => {
-            std::fs::write(path, &json)
+            nexus_core::atomic::atomic_write_private(std::path::Path::new(path), json.as_bytes())
                 .map_err(|error| NexusError::Other(format!("write `{path}`: {error}")))?;
             Ok(Report::new("profile export").ok(format!(
                 "exported profile `{}` with {} approved fact(s) to {path}",
@@ -1260,22 +1281,39 @@ pub fn improve_set_applied(app: &App, id: &str, applied: bool) -> Result<Report>
             if applied { "applied" } else { "rolled back" }
         )));
     }
+    // Validate the manifest before taking the status transition so a corrupt
+    // proposal fails without consuming the one-shot CAS gate.
+    let manifest = if proposal.kind == "skill" {
+        Some(
+            serde_json::from_str::<nexus_skills::SkillManifest>(&proposal.body).map_err(
+                |error| {
+                    NexusError::Other(format!(
+                        "stored skill proposal is not a valid manifest: {error}"
+                    ))
+                },
+            )?,
+        )
+    } else {
+        None
+    };
+    // The CAS status transition is the arbiter: when concurrent apply/rollback
+    // calls race, only the winner reaches the skill side effect.
+    app.rsi().set_applied(id, applied)?;
     let mut skill_note = "";
-    if proposal.kind == "skill" {
-        let manifest: nexus_skills::SkillManifest =
-            serde_json::from_str(&proposal.body).map_err(|error| {
-                NexusError::Other(format!(
-                    "stored skill proposal is not a valid manifest: {error}"
-                ))
-            })?;
-        skill_set_enabled(app, &manifest.name, applied)?;
+    if let Some(manifest) = manifest {
+        if let Err(error) = skill_set_enabled(app, &manifest.name, applied) {
+            // The status advanced but the skill toggle did not land (e.g. a
+            // required tool is unregistered); restore the exact prior status so
+            // the record stays consistent with the skill's real state.
+            let _ = app.rsi().restore_status(id, required);
+            return Err(error);
+        }
         skill_note = if applied {
             " (skill enabled)"
         } else {
             " (skill disabled)"
         };
     }
-    app.rsi().set_applied(id, applied)?;
     Ok(Report::untitled().ok(format!(
         "{} improvement {id}{skill_note}",
         if applied { "applied" } else { "rolled back" }
@@ -1586,7 +1624,7 @@ pub fn memory_export(app: &App, path: Option<&str>) -> Result<Report> {
         .unwrap_or(0);
     match path {
         Some(path) => {
-            std::fs::write(path, &json)
+            nexus_core::atomic::atomic_write_private(std::path::Path::new(path), json.as_bytes())
                 .map_err(|error| NexusError::Other(format!("write `{path}`: {error}")))?;
             Ok(Report::new("memory export").ok(format!("exported {count} memories to {path}")))
         }
@@ -2138,7 +2176,10 @@ pub fn active_work_snapshot(
                     owner: task.owner,
                     writer: task.writer,
                     duration_ms: task.budget.runtime_used_ms,
-                    waiting_approval: task.status == nexus_core::orchestration::TaskStatus::Blocked,
+                    // A dependency-parked task is Blocked but needs no operator
+                    // approval — it re-queues itself once its dependency clears.
+                    waiting_approval: task.status == nexus_core::orchestration::TaskStatus::Blocked
+                        && !nexus_core::orchestration::is_dependency_block(task.error.as_deref()),
                 }
             })
             .collect();
@@ -2417,32 +2458,40 @@ pub fn plan_set_paused(app: &App, session_id: &str, paused: bool) -> Result<Repo
     // The canonical plan version is immutable. Phase/task status changes are
     // represented by their linked task records, while the 1.0 plan remains
     // the compatibility source for pause/resume rendering.
-    if let Ok(plan) = app
+    if app
         .harness()
         .workspace_repository()
         .plan(work.id.as_str(), work.version)
+        .is_ok()
     {
         for mut task in app
             .harness()
             .workspace_repository()
             .plan_tasks(work.id.as_str(), work.version)?
         {
-            if !matches!(
-                task.status,
-                nexus_core::harness::TaskStatus::Completed
-                    | nexus_core::harness::TaskStatus::Cancelled
-                    | nexus_core::harness::TaskStatus::Superseded
-            ) {
-                task.status = if paused {
-                    nexus_core::harness::TaskStatus::Paused
-                } else {
-                    nexus_core::harness::TaskStatus::Ready
-                };
+            // Only runnable tasks toggle: Failed, Blocked, Waiting, and
+            // Validating keep their state so pause/resume cannot resurrect a
+            // failed task or bypass an approval gate.
+            let next = match task.status {
+                nexus_core::harness::TaskStatus::Draft
+                | nexus_core::harness::TaskStatus::Pending
+                | nexus_core::harness::TaskStatus::Ready
+                | nexus_core::harness::TaskStatus::Running
+                    if paused =>
+                {
+                    Some(nexus_core::harness::TaskStatus::Paused)
+                }
+                nexus_core::harness::TaskStatus::Paused if !paused => {
+                    Some(nexus_core::harness::TaskStatus::Ready)
+                }
+                _ => None,
+            };
+            if let Some(status) = next {
+                task.status = status;
                 task.updated_at = nexus_core::now_rfc3339();
                 app.harness().workspace_repository().save_task(&task)?;
             }
         }
-        let _ = plan;
     }
     Ok(Report::untitled().ok(format!(
         "{} plan {} v{}",
@@ -4324,6 +4373,36 @@ mod tests {
     fn default_policy_matches_default_mode() {
         let policy = nexus_core::config::PolicyConfig::default();
         assert_eq!(permission_mode(&policy), "default");
+    }
+
+    #[test]
+    fn provider_credentials_reflect_the_auth_source() {
+        use nexus_core::config::ModelConfig;
+        // Local runtime: no key required, always usable.
+        let local = ModelConfig {
+            provider: "ollama".into(),
+            ..Default::default()
+        };
+        assert!(provider_credentials_present(&local));
+
+        // Hosted provider keyed by env var: present only when the var is set.
+        std::env::remove_var("SNX_TEST_KEY_UNSET_9137");
+        let env_keyed = ModelConfig {
+            provider: "openai_compatible".into(),
+            api_key_env: Some("SNX_TEST_KEY_UNSET_9137".into()),
+            ..Default::default()
+        };
+        assert!(!provider_credentials_present(&env_keyed));
+
+        // Credential-store reference with no resolved key (e.g. revoked) reads
+        // as unavailable, which re-enables the change-model-or-provider path.
+        let ref_keyed = ModelConfig {
+            provider: "anthropic".into(),
+            api_key_ref: Some("nexus:anthropic".into()),
+            resolved_api_key: None,
+            ..Default::default()
+        };
+        assert!(!provider_credentials_present(&ref_keyed));
     }
 
     #[test]
