@@ -44,6 +44,7 @@ BIN="$TARGET_DIR/release/snx"
 [[ -x "$BIN" ]] || { echo "error: release binary missing: $BIN" >&2; exit 1; }
 install -m 0755 "$BIN" "$PACKAGE_ROOT/snx"
 install -m 0644 "$ROOT/LICENSE" "$PACKAGE_ROOT/LICENSE"
+install -m 0644 "$ROOT/NOTICE" "$PACKAGE_ROOT/NOTICE"
 install -m 0644 "$ROOT/README.md" "$PACKAGE_ROOT/README.md"
 install -m 0644 "$ROOT/man/snx.1" "$PACKAGE_ROOT/snx.1"
 "$BIN" completion bash >"$PACKAGE_ROOT/completions/snx.bash"

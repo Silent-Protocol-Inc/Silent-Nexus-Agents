@@ -23,7 +23,7 @@ PACKAGE_ROOT="$(find "$TEMP" -mindepth 1 -maxdepth 1 -type d -name "silent-nexus
 [[ -n "$PACKAGE_ROOT" ]] || { echo "error: package root missing" >&2; exit 1; }
 
 for required in \
-  snx LICENSE README.md snx.1 SBOM.spdx.json SHA256SUMS \
+  snx LICENSE NOTICE README.md snx.1 SBOM.spdx.json SHA256SUMS \
   completions/snx.bash completions/_snx completions/snx.fish; do
   [[ -f "$PACKAGE_ROOT/$required" ]] || {
     echo "error: package is missing $required" >&2
