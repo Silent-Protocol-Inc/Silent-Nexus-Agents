@@ -1,7 +1,11 @@
 # Contributing
 
-Silent Nexus is a safety-critical harness. Contributions are welcome, but the
-bar is: **the model must never be able to bypass a safety boundary.**
+Silent Nexus is a safety-critical harness and a product of **Silent Protocol**.
+Contributions are welcome, but the bar is: **the model must never be able to
+bypass a safety boundary.**
+
+By participating, you agree to abide by our
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Ground rules
 
@@ -49,3 +53,17 @@ Never edit a shipped migration. Add a new numbered migration, migration
 checksum coverage, upgrade tests from every previous level, and documentation.
 Security and release changes must also pass `scripts/release-check.sh` from a
 clean committed tree.
+
+## Reporting security issues
+
+Do **not** open a public issue for a suspected vulnerability. Follow the private
+process in [SECURITY.md](SECURITY.md).
+
+## Licensing of contributions
+
+Silent Nexus is licensed under the [Apache License 2.0](LICENSE), Copyright
+Silent Protocol. By submitting a contribution, you agree that your contribution
+is licensed under the same Apache-2.0 terms (per section 5 of the License,
+"Submission of Contributions"), and you certify that you have the right to
+submit it. Please do not add code under an incompatible license, and keep the
+`NOTICE` file accurate when adding third-party material.

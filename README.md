@@ -323,10 +323,11 @@ See the [`CHANGELOG`](CHANGELOG.md) for release-by-release detail.
 
 ## Contributing
 
-Contributions are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and
-[`AGENTS.md`](AGENTS.md) first — they cover the build environment, coding
-standards, and the write-discipline rules the codebase enforces. Every change
-must pass the full local gate before review:
+Contributions are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md),
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md), and [`AGENTS.md`](AGENTS.md) first —
+they cover the build environment, coding standards, community expectations, and
+the write-discipline rules the codebase enforces. Every change must pass the
+full local gate before review:
 
 ```sh
 cargo fmt --all -- --check
@@ -339,8 +340,16 @@ and release-archive validation. See [`docs/release-process.md`](docs/release-pro
 
 ## License
 
-Licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE).
+Licensed under the **Apache License 2.0** — Copyright © 2026 **Silent Protocol**.
+See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for
+attribution. Silent Nexus (NEXUS / `snx`) is a product of the Silent Protocol
+brand.
+
+Contributions are accepted under the same Apache-2.0 terms; see
+[`CONTRIBUTING.md`](CONTRIBUTING.md). All participation is governed by our
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
 <div align="center">
-<sub><b>NEXUS</b> · by Silent Protocol · Local intelligence. Controlled execution.</sub>
+<sub><b>NEXUS</b> · by Silent Protocol · Local intelligence. Controlled execution.<br>
+© 2026 Silent Protocol · Apache-2.0</sub>
 </div>
