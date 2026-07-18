@@ -46,6 +46,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0007_task_dependencies",
         include_str!("../../../migrations/0007_task_dependencies.sql"),
     ),
+    (
+        "0008_workspace_approval_grants",
+        include_str!("../../../migrations/0008_workspace_approval_grants.sql"),
+    ),
 ];
 pub const MIGRATION_COUNT: usize = MIGRATIONS.len();
 
@@ -512,6 +516,7 @@ mod tests {
             "rsi_proposals",
             "connector_imports",
             "session_approval_grants",
+            "workspace_approval_grants",
             "timeline_events",
             "context_manifests",
             "session_view_state",

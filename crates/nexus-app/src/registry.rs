@@ -620,7 +620,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "permissions",
         aliases: &[],
         summary: "Approval mode: read-only, default, auto-edit, or full access",
-        usage: "[show|read-only|default|auto-edit|full-access]",
+        usage: "[show|revoke <grant-token>|read-only|default|auto-edit|full-access]",
         category: CommandCategory::Inspection,
         interactive: true,
         non_interactive: true,

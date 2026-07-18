@@ -275,11 +275,12 @@ pub struct ModelCapabilities {
 
 impl ModelCapabilities {
     /// Whether the harness must treat this model as constrained: small
-    /// context window, no native tool calls, or no structured output.
-    /// Constrained models get smaller task bundles, fewer tools, tighter
-    /// context budgets, and shorter turn limits.
+    /// context window or no native tool calls. Structured JSON output is an
+    /// optimization, not a prerequisite when native tool calls are available.
+    /// Constrained models get smaller task bundles, tighter context budgets,
+    /// and shorter turn limits without losing essential tools.
     pub fn constrained(&self) -> bool {
-        self.context_window < 32_000 || !self.native_tool_calls || !self.structured_output
+        self.context_window < 32_000 || !self.native_tool_calls
     }
 }
 
@@ -347,6 +348,20 @@ mod tests {
             capabilities.fallback_eligibility,
             FallbackEligibility::Unknown
         );
+    }
+
+    #[test]
+    fn native_tools_do_not_require_structured_output_to_be_unconstrained() {
+        let mut capabilities: ModelCapabilities = serde_json::from_value(serde_json::json!({
+            "model_id": "codex", "provider_kind": "codex", "streaming": true,
+            "native_tool_calls": true, "structured_output": false,
+            "image_input": false, "embeddings": false, "context_window": 128000,
+            "max_output_tokens": 4096, "reasoning_controls": true, "local": false
+        }))
+        .expect("capabilities");
+        assert!(!capabilities.constrained());
+        capabilities.native_tool_calls = false;
+        assert!(capabilities.constrained());
     }
 
     #[test]

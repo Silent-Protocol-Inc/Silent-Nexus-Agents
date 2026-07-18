@@ -477,6 +477,44 @@ impl SessionStore {
         })
     }
 
+    pub fn add_workspace_approval_grant(&self, workspace: &str, grant_token: &str) -> Result<()> {
+        self.store.with(|conn| {
+            conn.execute(
+                "INSERT INTO workspace_approval_grants
+                 (workspace, grant_token, created_at, revoked_at) VALUES (?1,?2,?3,NULL)
+                 ON CONFLICT(workspace, grant_token) DO UPDATE SET revoked_at=NULL, created_at=excluded.created_at",
+                rusqlite::params![workspace, grant_token, nexus_core::now_rfc3339()],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn workspace_approval_grants(&self, workspace: &str) -> Result<Vec<String>> {
+        self.store.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT grant_token FROM workspace_approval_grants
+                 WHERE workspace=?1 AND revoked_at IS NULL ORDER BY created_at, grant_token",
+            )?;
+            let rows = stmt.query_map([workspace], |row| row.get(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
+    }
+
+    pub fn revoke_workspace_approval_grant(
+        &self,
+        workspace: &str,
+        grant_token: &str,
+    ) -> Result<bool> {
+        self.store.with(|conn| {
+            Ok(conn.execute(
+                "UPDATE workspace_approval_grants SET revoked_at=?3
+                 WHERE workspace=?1 AND grant_token=?2 AND revoked_at IS NULL",
+                rusqlite::params![workspace, grant_token, nexus_core::now_rfc3339()],
+            )? > 0)
+        })
+    }
+
     pub fn link_rollover(&self, parent: &str, child: &str) -> Result<()> {
         self.store.with(|conn| {
             conn.execute(
@@ -760,5 +798,27 @@ mod tests {
             s.rollover_root(grandchild.as_str()).expect("root"),
             parent.as_str()
         );
+    }
+
+    #[test]
+    fn workspace_grants_are_scoped_and_revocable() {
+        let s = sessions();
+        s.add_workspace_approval_grant("/ws-a", "cmd:[[\"git\",\"status\"]]")
+            .expect("grant");
+        assert_eq!(
+            s.workspace_approval_grants("/ws-a").expect("list"),
+            vec!["cmd:[[\"git\",\"status\"]]".to_string()]
+        );
+        assert!(s
+            .workspace_approval_grants("/ws-b")
+            .expect("other workspace")
+            .is_empty());
+        assert!(s
+            .revoke_workspace_approval_grant("/ws-a", "cmd:[[\"git\",\"status\"]]")
+            .expect("revoke"));
+        assert!(s
+            .workspace_approval_grants("/ws-a")
+            .expect("list after revoke")
+            .is_empty());
     }
 }

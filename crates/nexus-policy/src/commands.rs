@@ -30,6 +30,16 @@ impl CommandAnalysis {
             && self.risk < RiskLevel::Destructive
     }
 
+    /// Stable approval scope for proved argv. Known command families retain
+    /// the executable and meaningful subcommands; unknown shapes retain the
+    /// complete argv and therefore never degrade to executable-wide access.
+    pub fn approval_scope(&self) -> Option<Vec<Vec<String>>> {
+        if !self.session_grant_allowed() {
+            return None;
+        }
+        Some(self.commands.iter().map(|argv| scoped_argv(argv)).collect())
+    }
+
     fn empty(raw_shell: bool) -> Self {
         Self {
             commands: Vec::new(),
@@ -51,6 +61,18 @@ impl CommandAnalysis {
             },
         }
     }
+}
+
+fn scoped_argv(argv: &[String]) -> Vec<String> {
+    let program = argv.first().map(|s| basename(s).to_ascii_lowercase());
+    let keep = match program.as_deref() {
+        Some("git") => 2,
+        Some("npm") if argv.get(1).map(String::as_str) == Some("run") => 3,
+        Some("gh") => 3,
+        Some("cargo") => 2,
+        _ => argv.len(),
+    };
+    argv.iter().take(keep.min(argv.len())).cloned().collect()
 }
 
 pub fn analyze_argv(program: &str, args: &[String]) -> CommandAnalysis {
@@ -284,10 +306,20 @@ fn analyze_simple(argv: &[String], analysis: &mut CommandAnalysis, depth: usize)
         "gh" | "glab" => {
             analysis.requires_network = true;
             analysis.risk = analysis.risk.max(RiskLevel::Network);
-            if matches!(
-                subcommand.as_deref(),
-                Some("api" | "pr" | "issue" | "release" | "repo" | "workflow")
-            ) {
+            let operation = arguments.get(1).map(String::as_str);
+            let read_only = matches!(
+                (subcommand.as_deref(), operation),
+                (
+                    Some("pr" | "issue" | "release" | "repo" | "workflow"),
+                    Some("view" | "list" | "status")
+                )
+            );
+            if !read_only
+                && matches!(
+                    subcommand.as_deref(),
+                    Some("api" | "pr" | "issue" | "release" | "repo" | "workflow")
+                )
+            {
                 analysis.external_side_effect = true;
                 analysis.risk = RiskLevel::ExternalSideEffect;
             }
@@ -811,5 +843,43 @@ mod tests {
             &analyze_shell("cargo check; rm -rf target"),
             &allowed
         ));
+    }
+
+    #[test]
+    fn approval_scopes_preserve_safe_subcommands() {
+        assert_eq!(
+            analyze_argv("git", &strings(&["status", "--short"]))
+                .approval_scope()
+                .expect("git status is grant eligible")[0],
+            strings(&["git", "status"])
+        );
+        assert_eq!(
+            analyze_argv("npm", &strings(&["run", "test", "--", "unit"]))
+                .approval_scope()
+                .expect("npm run test is grant eligible")[0],
+            strings(&["npm", "run", "test"])
+        );
+        assert_eq!(
+            analyze_argv("gh", &strings(&["pr", "view", "42"]))
+                .approval_scope()
+                .expect("gh pr view is grant eligible")[0],
+            strings(&["gh", "pr", "view"])
+        );
+        assert_ne!(
+            analyze_argv("git", &strings(&["status"])).approval_scope(),
+            analyze_argv("git", &strings(&["log"])).approval_scope()
+        );
+    }
+
+    #[test]
+    fn unknown_command_scope_keeps_complete_argv() {
+        let argv = strings(&["inspect", "--format", "json"]);
+        assert_eq!(
+            scoped_argv(&strings(&["custom-tool", "inspect", "--format", "json"])),
+            strings(&["custom-tool", "inspect", "--format", "json"])
+        );
+        assert!(analyze_argv("custom-tool", &argv)
+            .approval_scope()
+            .is_none());
     }
 }

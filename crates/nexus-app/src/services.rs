@@ -1807,15 +1807,35 @@ pub fn tools_report(app: &App) -> Report {
     let rows = metas
         .iter()
         .map(|m| {
+            let configured = match m.risk {
+                nexus_core::RiskLevel::Read => &app.config.policy.reads,
+                nexus_core::RiskLevel::Write => &app.config.policy.writes,
+                nexus_core::RiskLevel::Network => &app.config.policy.network,
+                nexus_core::RiskLevel::Destructive => &app.config.policy.destructive,
+                nexus_core::RiskLevel::ExternalSideEffect => &app.config.policy.external,
+                nexus_core::RiskLevel::Privileged => "deny",
+            };
+            let (availability, reason) = match configured {
+                "allow" => ("available", "allowed by active permission mode"),
+                "ask" => ("ask", "visible; operator approval is required"),
+                _ => ("restricted", "visible; denied by active permission mode"),
+            };
             vec![
                 m.name.clone(),
                 m.risk.to_string(),
                 m.category.as_str().to_string(),
+                availability.into(),
+                reason.into(),
                 m.description.clone(),
             ]
         })
         .collect();
-    Report::new("tools").table(&["tool", "risk", "category", "description"], rows)
+    Report::new("tools")
+        .line_sev(
+            "All effective tools remain visible. Default mode asks for restricted actions; full access overrides ordinary agent-role limits, never hard safety rules.",
+            Sev::Dim,
+        )
+        .table(&["tool", "risk", "category", "effective", "reason", "description"], rows)
 }
 
 pub fn tool_show_report(app: &App, name: &str) -> Result<Report> {
@@ -1975,7 +1995,39 @@ pub fn permissions_report(app: &App) -> Report {
     if !p.denied_paths.is_empty() {
         r = r.field("denied paths", p.denied_paths.join(", "));
     }
+    if let Ok(grants) = nexus_agent::SessionStore::new(app.store.clone())
+        .workspace_approval_grants(&app.workspace_key)
+    {
+        r = r.field(
+            "workspace grants",
+            if grants.is_empty() {
+                "none".into()
+            } else {
+                grants.join(" | ")
+            },
+        );
+    }
     r
+}
+
+pub fn revoke_workspace_permission(app: &App, token: &str) -> Result<Report> {
+    let revoked = nexus_agent::SessionStore::new(app.store.clone())
+        .revoke_workspace_approval_grant(&app.workspace_key, token)?;
+    if !revoked {
+        return Err(NexusError::Config(
+            "workspace approval grant was not found".into(),
+        ));
+    }
+    app.audit().emit(
+        &nexus_core::ids::TraceId::generate(),
+        None,
+        nexus_core::events::AuditKind::ApprovalGrantChanged {
+            operation: "revoked".into(),
+            scope: "workspace".into(),
+            token: app.redactor.redact(token),
+        },
+    );
+    Ok(Report::new("permissions").ok("workspace approval grant revoked"))
 }
 
 // -------------------------------------------------------------------- context

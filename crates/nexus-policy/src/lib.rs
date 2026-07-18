@@ -37,12 +37,15 @@ pub struct ActionRequest {
 
 impl ActionRequest {
     pub fn session_grant_allowed(&self) -> bool {
-        self.command.is_some()
+        let proved_command = self.command.is_some()
             && self
                 .command_analysis
                 .as_ref()
-                .is_some_and(commands::CommandAnalysis::session_grant_allowed)
-            && self.risk < RiskLevel::Destructive
+                .is_some_and(commands::CommandAnalysis::session_grant_allowed);
+        let scoped_filesystem = self.command.is_none()
+            && !self.paths.is_empty()
+            && (self.tool.starts_with("fs.") || self.tool.starts_with("repo."));
+        (proved_command || scoped_filesystem) && self.risk < RiskLevel::Destructive
     }
 }
 
@@ -129,8 +132,12 @@ impl PolicyEngine {
     pub fn grant_token(action: &ActionRequest) -> String {
         match (&action.command, &action.command_analysis) {
             (Some(_), Some(analysis)) if analysis.session_grant_allowed() => {
-                let command = serde_json::to_string(&analysis.commands).unwrap_or_default();
+                let command = serde_json::to_string(&analysis.approval_scope()).unwrap_or_default();
                 format!("cmd:{command}")
+            }
+            (None, _) if action.session_grant_allowed() => {
+                let paths = serde_json::to_string(&action.paths).unwrap_or_default();
+                format!("path:{}:{paths}", action.tool)
             }
             _ => format!("once-only:{}", action.tool),
         }

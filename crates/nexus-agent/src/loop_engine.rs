@@ -84,6 +84,7 @@ pub enum ApprovalDecision {
     /// Approve, but run this edited command/arguments instead.
     ApproveEdited(Value),
     ApproveForSession,
+    ApproveForWorkspace,
     Deny,
 }
 
@@ -924,6 +925,9 @@ impl AgentLoop {
     }
 
     fn agent_can_write(&self) -> bool {
+        if self.full_access() {
+            return true;
+        }
         self.custom_agent
             .as_ref()
             .and_then(|definition| definition.can_write().ok())
@@ -938,10 +942,18 @@ impl AgentLoop {
     }
 
     fn agent_max_risk(&self) -> nexus_core::RiskLevel {
+        if self.full_access() {
+            return nexus_core::RiskLevel::ExternalSideEffect;
+        }
         self.custom_agent
             .as_ref()
             .and_then(|definition| definition.effective_max_risk().ok())
             .unwrap_or_else(|| self.role.max_risk())
+    }
+
+    fn full_access(&self) -> bool {
+        let p = self.runtime.policy.config();
+        p.writes == "allow" && p.commands == "allow" && p.downloads == "allow"
     }
 
     fn emit(&self, event: LoopEvent) {
@@ -1652,14 +1664,11 @@ impl AgentLoop {
             agent: self.agent_name().into(),
         });
 
-        // Select the minimal tool set: intersection of role and task class.
+        // Combine the role and task surfaces. Policy still decides whether a
+        // visible tool may execute; hiding a restricted tool prevents the
+        // operator from seeing and approving the action.
         let constrained_model = capabilities.constrained();
-        let mut tools = self.select_tools(class);
-        if constrained_model {
-            // Weak and compatibility-mode models perform better with a small,
-            // explicit tool surface and one bounded action at a time.
-            tools.truncate(6);
-        }
+        let tools = self.select_tools(class);
         let tool_specs = build_tool_specs(&tools, native);
 
         // Build the initial conversation (history now includes the objective).
@@ -2475,10 +2484,15 @@ impl AgentLoop {
             .await;
         let approved = matches!(
             &decision,
-            ApprovalDecision::Approve | ApprovalDecision::ApproveForSession
+            ApprovalDecision::Approve
+                | ApprovalDecision::ApproveForSession
+                | ApprovalDecision::ApproveForWorkspace
         );
         let canonical_status = if approved {
-            if matches!(&decision, ApprovalDecision::ApproveForSession) {
+            if matches!(
+                &decision,
+                ApprovalDecision::ApproveForSession | ApprovalDecision::ApproveForWorkspace
+            ) {
                 ApprovalStatus::ApprovedForTask
             } else {
                 ApprovalStatus::ApprovedOnce
@@ -2827,7 +2841,7 @@ impl AgentLoop {
                         )?;
                         (true, false)
                     }
-                    ApprovalDecision::ApproveForSession => {
+                    ApprovalDecision::ApproveForSession | ApprovalDecision::ApproveForWorkspace => {
                         if forced_one_time || !action_req.session_grant_allowed() {
                             repository.resolve_approval_request(
                                 &canonical_approval.id,
@@ -2840,13 +2854,39 @@ impl AgentLoop {
                         }
                         let grant = nexus_policy::PolicyEngine::grant_token(&action_req);
                         self.runtime.policy.grant_session(&grant);
-                        self.runtime
-                            .sessions
-                            .add_approval_grant(session_id.as_str(), &grant)?;
+                        if matches!(decision, ApprovalDecision::ApproveForWorkspace) {
+                            self.runtime
+                                .sessions
+                                .add_workspace_approval_grant(&session.workspace, &grant)?;
+                        } else {
+                            self.runtime
+                                .sessions
+                                .add_approval_grant(session_id.as_str(), &grant)?;
+                        }
+                        self.runtime.audit.emit(
+                            trace,
+                            Some(session_id),
+                            AuditKind::ApprovalGrantChanged {
+                                operation: "granted".into(),
+                                scope: if matches!(decision, ApprovalDecision::ApproveForWorkspace)
+                                {
+                                    "workspace".into()
+                                } else {
+                                    "session".into()
+                                },
+                                token: self.runtime.redactor.redact(&grant),
+                            },
+                        );
                         repository.resolve_approval_request(
                             &canonical_approval.id,
                             ApprovalStatus::ApprovedForTask,
-                            Some("operator approved the eligible scoped action"),
+                            Some(
+                                if matches!(decision, ApprovalDecision::ApproveForWorkspace) {
+                                    "operator approved the eligible workspace-scoped action"
+                                } else {
+                                    "operator approved the eligible session-scoped action"
+                                },
+                            ),
                         )?;
                         (true, false)
                     }
@@ -3138,16 +3178,36 @@ impl AgentLoop {
     }
 
     fn select_tools(&self, class: TaskClass) -> Vec<Arc<dyn Tool>> {
-        // Intersection of role-permitted and task-relevant categories.
-        let role_cats = self.agent_tool_categories();
-        let task_cats = classify::tool_categories(class);
-        let cats: Vec<_> = role_cats
-            .iter()
-            .filter(|c| task_cats.contains(c))
-            .copied()
-            .collect();
-        // Fall back to role categories if the intersection is empty.
-        let cats = if cats.is_empty() { role_cats } else { cats };
+        let mut cats = if self.full_access() {
+            vec![
+                nexus_tools::ToolCategory::Filesystem,
+                nexus_tools::ToolCategory::Repo,
+                nexus_tools::ToolCategory::Terminal,
+                nexus_tools::ToolCategory::Web,
+                nexus_tools::ToolCategory::Diagnostics,
+                nexus_tools::ToolCategory::Memory,
+                nexus_tools::ToolCategory::Goal,
+                nexus_tools::ToolCategory::Mcp,
+            ]
+        } else {
+            self.agent_tool_categories()
+        };
+        for category in classify::tool_categories(class) {
+            if !cats.contains(&category) {
+                cats.push(category);
+            }
+        }
+        // Every agent needs the basic inspection surface to ground its work.
+        for category in [
+            nexus_tools::ToolCategory::Filesystem,
+            nexus_tools::ToolCategory::Repo,
+            nexus_tools::ToolCategory::Diagnostics,
+            nexus_tools::ToolCategory::Terminal,
+        ] {
+            if !cats.contains(&category) {
+                cats.push(category);
+            }
+        }
         self.runtime.tools.for_categories(&cats)
     }
 

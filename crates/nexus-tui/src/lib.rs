@@ -322,13 +322,7 @@ async fn event_loop(
             }
             Some(req) = appr_rx.recv() => {
                 st.pending_approvals = 1;
-                st.approval_selected = if req.action.command.is_some()
-                    && req.action.risk < nexus_core::RiskLevel::Destructive
-                {
-                    2
-                } else {
-                    1
-                };
+                st.approval_selected = 0;
                 st.approval_edit = None;
                 st.pending = Some(req);
             }
@@ -703,11 +697,7 @@ fn handle_key(
                 .as_ref()
                 .is_some_and(|analysis| analysis.one_time_only)
         });
-        let option_count = match (persistent_allowed, edit_allowed) {
-            (true, true) => 4,
-            (false, true) => 3,
-            (_, false) => 2,
-        };
+        let option_count = 4;
         let decision = match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 st.approval_selected = st.approval_selected.saturating_sub(1);
@@ -723,6 +713,9 @@ fn handle_key(
             KeyCode::Char('s') | KeyCode::Char('S') if persistent_allowed => {
                 Some(ApprovalDecision::ApproveForSession)
             }
+            KeyCode::Char('p') | KeyCode::Char('P') if persistent_allowed => {
+                Some(ApprovalDecision::ApproveForWorkspace)
+            }
             KeyCode::Char('e') | KeyCode::Char('E') if edit_allowed => {
                 begin_approval_edit(st);
                 None
@@ -731,9 +724,13 @@ fn handle_key(
             KeyCode::Enter => match (persistent_allowed, st.approval_selected) {
                 (_, 0) => Some(ApprovalDecision::Approve),
                 (true, 1) => Some(ApprovalDecision::ApproveForSession),
-                (true, 2) | (false, 1) => Some(ApprovalDecision::Deny),
-                _ if edit_allowed => {
-                    begin_approval_edit(st);
+                (true, 2) => Some(ApprovalDecision::ApproveForWorkspace),
+                (_, 3) => Some(ApprovalDecision::Deny),
+                (false, 1 | 2) => {
+                    st.toast(
+                        "this action is eligible for one-time approval only",
+                        Sev::Warn,
+                    );
                     None
                 }
                 _ => Some(ApprovalDecision::Deny),
@@ -1007,6 +1004,7 @@ fn resolve_approval(st: &mut State, decision: ApprovalDecision) {
         let label = match &decision {
             ApprovalDecision::Approve => "approved once",
             ApprovalDecision::ApproveForSession => "approved for session",
+            ApprovalDecision::ApproveForWorkspace => "approved for workspace",
             ApprovalDecision::ApproveEdited(_) => "approved safer alternative",
             ApprovalDecision::Deny => "denied",
         };

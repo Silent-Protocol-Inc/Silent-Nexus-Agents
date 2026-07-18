@@ -4,6 +4,39 @@ All notable changes to NEXUS are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 Semantic Versioning.
 
+## [1.2.0] — 2026-07-18
+
+Critical reliability release restoring the complete effective agent tool
+surface and replacing overly broad approval behavior with revocable,
+workspace-scoped grants.
+
+### Fixed
+
+- Removed the alphabetical six-tool truncation and combined agent/task tool
+  categories so filesystem inspection, repository operations, diagnostics,
+  and eligible typed terminal actions remain available.
+- Codex and other providers with native tool calls are no longer classified as
+  constrained solely because structured JSON output is unavailable.
+- `/tools` now keeps restricted tools visible and explains their effective
+  availability under the active permission mode.
+- Approval prompts default to `Approve once` and distinguish one-time,
+  session-only, persistent workspace, and deny decisions.
+- Command grants use executable/subcommand scopes for understood command
+  families and retain the complete argv for unknown structures.
+
+### Security
+
+- Added append-only migration `0008_workspace_approval_grants.sql` for
+  revocable workspace grants; configuration schema version remains `1`.
+- Raw shell, interpreters, wrappers, unproved commands, destructive/external
+  actions, and unsafe host execution remain one-time-only.
+- Approval grants and revocations are recorded in the audit trail.
+
+### Deferred
+
+- Branding, mobile input, provider token-limit discovery, and expanded
+  configuration work are tracked in `docs/nexus-followup-plan.md`.
+
 ## [1.1.2] — 2026-07-18
 
 Patch release. Makes file changes visible in the timeline: file-mutating tool

@@ -1822,27 +1822,26 @@ fn draw_approval(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
         )));
     } else {
         let persistent_allowed = req.sandbox_active && req.action.session_grant_allowed();
-        let edit_allowed = !req
-            .action
-            .command_analysis
-            .as_ref()
-            .is_some_and(|analysis| analysis.one_time_only);
-        let options: Vec<&str> = match (persistent_allowed, edit_allowed) {
-            (true, true) => vec![
-                "Allow once",
-                "Allow this proved argv for this session",
-                "Deny",
-                "Edit / propose a safer action",
-            ],
-            (false, true) => vec!["Allow once", "Deny", "Propose a safer alternative"],
-            (_, false) => vec!["Allow once", "Deny"],
-        };
+        let options = [
+            "Approve once".to_string(),
+            if persistent_allowed {
+                "Approve only for this session".into()
+            } else {
+                "Approve only for this session (unavailable: one-time-only action)".into()
+            },
+            if persistent_allowed {
+                "Don't ask again (this workspace)".into()
+            } else {
+                "Don't ask again (unavailable: one-time-only action)".into()
+            },
+            "Deny".to_string(),
+        ];
         for (index, option) in options.iter().enumerate() {
             let selected = index == st.approval_selected;
             lines.push(Line::from(vec![
                 Span::styled(if selected { "▸ " } else { "  " }, t.primary()),
                 Span::styled(
-                    (*option).to_string(),
+                    option.clone(),
                     if selected { t.selection() } else { t.text() },
                 ),
             ]));
@@ -2273,11 +2272,11 @@ mod tests {
             .map(|(width, height)| (width, height, fnv1a64(&rendered_text(width, height))))
             .collect();
         let expected = [
-            (60, 20, 79_688_150_447_093_718),
-            (80, 24, 15_835_664_293_227_740_923),
-            (100, 30, 10_022_091_956_940_501_711),
-            (120, 40, 9_210_262_804_388_401_044),
-            (160, 50, 13_979_991_942_712_635_246),
+            (60, 20, 16_184_363_835_755_619_246),
+            (80, 24, 17_564_284_670_787_301_597),
+            (100, 30, 4_783_744_839_955_396_065),
+            (120, 40, 11_228_672_015_101_967_894),
+            (160, 50, 2_194_745_832_263_950_264),
         ];
         assert_eq!(actual, expected);
     }

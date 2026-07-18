@@ -13,7 +13,7 @@
 
 [![CI](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/actions/workflows/ci.yml/badge.svg)](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/actions/workflows/ci.yml)
 [![Security](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/actions/workflows/security.yml/badge.svg)](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/actions/workflows/security.yml)
-[![Release](https://img.shields.io/badge/release-v1.1.1-success.svg)](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.2.0-success.svg)](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.97.0-orange.svg?logo=rust)](rust-toolchain.toml)
 [![Platform](https://img.shields.io/badge/platform-x86__64--linux-lightgrey.svg)](#install)
@@ -145,8 +145,8 @@ sudo scripts/install.sh --system --binary target/release/snx
 ```sh
 # Verify, extract, re-verify the internal manifest, then install the binary
 sha256sum -c SHA256SUMS
-tar -xzf silent-nexus-1.1.1-x86_64-unknown-linux-gnu.tar.gz
-cd silent-nexus-1.1.1-x86_64-unknown-linux-gnu
+tar -xzf silent-nexus-1.2.0-x86_64-unknown-linux-gnu.tar.gz
+cd silent-nexus-1.2.0-x86_64-unknown-linux-gnu
 sha256sum -c SHA256SUMS
 install -m 0755 snx ~/.local/bin/snx
 ```

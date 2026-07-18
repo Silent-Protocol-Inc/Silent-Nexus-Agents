@@ -64,14 +64,9 @@ impl ApprovalHandler for InteractiveApprover {
             .as_ref()
             .is_some_and(|analysis| analysis.one_time_only);
         print!(
-            "  {} [o]nce{}{} / [N]o: ",
+            "  {} [o] Approve once / [s] Approve only for this session / [p] Don't ask again / [n] Deny{}: ",
             ui.violet("decision"),
-            if persistent_allowed {
-                " / [s]ession"
-            } else {
-                ""
-            },
-            if edit_allowed { " / [e]dit safer" } else { "" }
+            if persistent_allowed { "" } else { " (session/workspace unavailable: one-time-only action)" },
         );
         let _ = std::io::stdout().flush();
         let mut line = String::new();
@@ -83,6 +78,9 @@ impl ApprovalHandler for InteractiveApprover {
         match line.trim().to_lowercase().as_str() {
             "y" | "yes" | "o" | "once" => ApprovalDecision::Approve,
             "s" | "session" if persistent_allowed => ApprovalDecision::ApproveForSession,
+            "p" | "persist" | "workspace" if persistent_allowed => {
+                ApprovalDecision::ApproveForWorkspace
+            }
             "e" | "edit" | "alternative" if edit_allowed => {
                 println!(
                     "  {}",

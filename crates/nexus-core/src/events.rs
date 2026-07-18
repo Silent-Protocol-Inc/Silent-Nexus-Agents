@@ -58,6 +58,11 @@ pub enum AuditKind {
         approved: bool,
         edited: bool,
     },
+    ApprovalGrantChanged {
+        operation: String,
+        scope: String,
+        token: String,
+    },
     SandboxExecuted {
         backend: String,
         isolation: String,
@@ -142,6 +147,7 @@ impl AuditEvent {
             AuditKind::PolicyDecision { .. } => "policy_decision",
             AuditKind::ApprovalRequested { .. } => "approval_requested",
             AuditKind::ApprovalResolved { .. } => "approval_resolved",
+            AuditKind::ApprovalGrantChanged { .. } => "approval_grant_changed",
             AuditKind::SandboxExecuted { .. } => "sandbox_executed",
             AuditKind::FileMutated { .. } => "file_mutated",
             AuditKind::NetworkAccess { .. } => "network_access",

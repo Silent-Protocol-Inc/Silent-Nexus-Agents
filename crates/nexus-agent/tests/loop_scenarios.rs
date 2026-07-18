@@ -201,6 +201,46 @@ async fn valid_tool_call_then_finish() {
 }
 
 #[tokio::test]
+async fn constrained_reviewer_receives_complete_essential_tool_surface() {
+    let dir = tempfile::tempdir().expect("dir");
+    let provider = Arc::new(MockProvider::new(vec![MockScript::Text(
+        "review complete".into(),
+    )]));
+    let (runtime, session) = runtime_with_provider(provider.clone(), dir.path());
+    let agent = AgentLoop::new(runtime, AgentRole::Reviewer);
+    agent
+        .run(&session, "review this repository", Arc::new(AutoApprove))
+        .await
+        .expect("run");
+    let requests = provider.recorded_requests();
+    let tools = &requests.first().expect("provider request").tools;
+    let names = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        tools.len() > 6,
+        "tool surface was unexpectedly truncated: {names:?}"
+    );
+    assert!(
+        names.contains(&"fs.read_file"),
+        "missing file reader: {names:?}"
+    );
+    assert!(
+        names.contains(&"fs.search_text"),
+        "missing text search: {names:?}"
+    );
+    assert!(
+        names.contains(&"repo.git_status"),
+        "missing repository status: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.starts_with("diag.")),
+        "missing diagnostics: {names:?}"
+    );
+}
+
+#[tokio::test]
 async fn pre_stream_fallback_is_locked_for_the_remainder_of_the_turn() {
     let dir = tempfile::tempdir().expect("dir");
     std::fs::write(dir.path().join("hello.txt"), "world").expect("write");

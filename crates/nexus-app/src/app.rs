@@ -213,7 +213,11 @@ impl App {
         let audit = self.audit();
         let sessions = SessionStore::new(self.store.clone());
         if let Some(session_id) = session.as_ref() {
+            let meta = sessions.get(session_id.as_str())?;
             for grant in sessions.approval_grants(session_id.as_str())? {
+                policy.grant_session(&grant);
+            }
+            for grant in sessions.workspace_approval_grants(&meta.workspace)? {
                 policy.grant_session(&grant);
             }
         }
