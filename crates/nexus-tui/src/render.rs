@@ -59,35 +59,110 @@ fn styled_brand_lines(lockup: &BrandLockup, t: &Theme, available_width: u16) -> 
         .collect()
 }
 
+/// Map a semantic status color to the active theme.
+fn seg_style(color: crate::layout::SegColor, t: &Theme) -> Style {
+    use crate::layout::SegColor;
+    match color {
+        SegColor::Primary => t.primary(),
+        SegColor::Secondary => t.secondary(),
+        SegColor::Warning => t.warning(),
+        SegColor::Success => t.success(),
+        SegColor::Text => t.text(),
+        SegColor::Muted => t.muted(),
+    }
+}
+
+/// Wrap editor text to `wrapw` display columns, breaking hard on `\n`, and
+/// locate the cursor's visual (row, col). Never splits inside a character.
+fn wrap_editor(text: &str, cursor: usize, wrapw: usize) -> (Vec<String>, usize, usize) {
+    let wrapw = wrapw.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    let mut cursor_row = 0usize;
+    let mut cursor_col = 0usize;
+    let mut found = false;
+    let mut byte = 0usize;
+    for ch in text.chars() {
+        if byte == cursor {
+            cursor_row = lines.len();
+            cursor_col = cur_w;
+            found = true;
+        }
+        byte += ch.len_utf8();
+        if ch == '\n' {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_w + w > wrapw && !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(ch);
+        cur_w += w;
+    }
+    if !found && byte == cursor {
+        cursor_row = lines.len();
+        cursor_col = cur_w;
+    }
+    lines.push(cur);
+    (lines, cursor_row, cursor_col)
+}
+
+/// Content width available for input text (inside borders, after the prompt).
+fn input_wrap_width(area_width: u16) -> usize {
+    (area_width as usize)
+        .saturating_sub(2)
+        .saturating_sub(2)
+        .max(1)
+}
+
+/// Number of rows the input box needs, including its border (min 3).
+fn input_box_rows(st: &State, area_width: u16, max_rows: u16) -> u16 {
+    let text = st.search_edit.as_deref().unwrap_or_else(|| st.input.text());
+    let (lines, _, _) = wrap_editor(text, 0, input_wrap_width(area_width));
+    let content = (lines.len() as u16).clamp(1, max_rows.max(1));
+    content.saturating_add(2)
+}
+
 pub fn draw(f: &mut Frame, st: &mut State) {
     let t = st.theme;
     let area = f.area();
-    let wide = area.width >= 100;
+    let rl = crate::layout::classify(area);
+
+    if rl.too_small {
+        draw_too_small(f, area, &t);
+        return;
+    }
+
+    let input_rows = input_box_rows(st, area.width, rl.input_max_rows);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header
-            Constraint::Min(3),    // body
-            Constraint::Length(3), // input
-            Constraint::Length(1), // footer
+            Constraint::Length(rl.header_rows),
+            Constraint::Min(3),
+            Constraint::Length(input_rows),
+            Constraint::Length(rl.status_rows),
         ])
         .split(area);
 
-    draw_header(f, rows[0], st, &t);
+    draw_header(f, rows[0], st, &t, &rl);
 
-    if wide {
+    if rl.show_sidebar {
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(40), Constraint::Length(36)])
+            .constraints([Constraint::Min(40), Constraint::Length(rl.sidebar_width)])
             .split(rows[1]);
-        draw_transcript(f, body[0], st, &t);
+        draw_transcript(f, body[0], st, &t, &rl);
         draw_context_rail(f, body[1], st, &t);
     } else {
-        draw_transcript(f, rows[1], st, &t);
+        draw_transcript(f, rows[1], st, &t, &rl);
     }
 
-    draw_input(f, rows[2], st, &t);
-    draw_footer(f, rows[3], st, &t);
+    draw_input(f, rows[2], st, &t, &rl);
+    draw_footer(f, rows[3], st, &t, &rl);
 
     // Overlay stack: render every overlay, topmost last.
     for overlay in &st.overlays {
@@ -98,7 +173,7 @@ pub fn draw(f: &mut Frame, st: &mut State) {
         draw_approval(f, area, st, &t);
     }
 
-    if !wide && st.context_drawer {
+    if !rl.show_sidebar && st.context_drawer {
         draw_context_drawer(f, area, st, &t);
     }
     if st.agent_drawer {
@@ -108,76 +183,184 @@ pub fn draw(f: &mut Frame, st: &mut State) {
     draw_toasts(f, area, st, &t);
 }
 
-// -------------------------------------------------------------------- header
-
-/// Abbreviate a filesystem path for the chrome: `$HOME` → `~`, and
-/// middle-truncated from the left when it exceeds `max` (the tail — the part
-/// that identifies where you are — always survives).
-pub fn abbreviate_path(path: &str, max: usize) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut p = if !home.is_empty() && path.starts_with(&home) {
-        format!("~{}", &path[home.len()..])
-    } else {
-        path.to_string()
-    };
-    let count = p.chars().count();
-    if count > max && max > 4 {
-        let tail: String = p.chars().skip(count - (max - 1)).collect();
-        p = format!("…{tail}");
-    }
-    p
+/// Controlled message when the terminal is below the usable floor.
+fn draw_too_small(f: &mut Frame, area: Rect, t: &Theme) {
+    let lines = vec![
+        Line::from(Span::styled("Terminal too small", t.warning())),
+        Line::from(Span::styled("Minimum recommended: 36×12", t.text())),
+        Line::from(Span::styled(
+            format!("Current: {}×{}", area.width, area.height),
+            t.muted(),
+        )),
+        Line::from(Span::styled("Press ? for help", t.muted())),
+    ];
+    let inner = overlay_rect(area, 30, 4);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-fn draw_header(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
-    let compact = area.width < 64;
-    // The operator always sees where snx was launched from.
-    let ws = abbreviate_path(&st.bar.workspace, if compact { 24 } else { 40 });
+// -------------------------------------------------------------------- header
+
+fn draw_header(
+    f: &mut Frame,
+    area: Rect,
+    st: &State,
+    t: &Theme,
+    rl: &crate::layout::ResponsiveLayout,
+) {
+    use crate::layout::{compact_path, sandbox_short, WidthClass};
+    let san = |s: &str| nexus_core::sanitize::sanitize_terminal(s);
+    let model = san(&st.bar.model_label);
+    let agent = san(&st.bar.agent);
+    let sandbox_full = san(&st.bar.sandbox_level);
+    let sbx = sandbox_short(&sandbox_full).to_string();
+    let net = san(&st.bar.network);
+    let model_style = if st.bar.model_ok {
+        t.primary()
+    } else {
+        t.warning()
+    };
+
+    let narrow = matches!(rl.width_class, WidthClass::Narrow | WidthClass::Mobile);
+    let ws_wide = compact_path(
+        &st.bar.workspace,
+        if rl.compact_labels { 24 } else { 40 },
+        false,
+    );
+    let ws_proj = compact_path(&st.bar.workspace, 18, true);
+    let ws = san(if narrow { &ws_proj } else { &ws_wide });
+
+    // NEXUS identity mark for the first row.
+    let mark_width = if narrow { 9 } else { 19 };
     let lockup = brand::lockup(
         BrandVariant::Compact,
         BrandConstraints {
-            width: if compact { 9 } else { 19 },
+            width: mark_width,
             height: 1,
             unicode: brand::unicode_supported(),
         },
     );
-    let mut spans = vec![Span::styled(" ", t.text())];
-    if let Some(line) = lockup.lines.first() {
-        spans.extend(line.spans.iter().map(|span| {
-            Span::styled(
-                span.text.clone(),
-                brand_role_style(span.role, t, lockup.monochrome),
-            )
-        }));
-    }
-    spans.push(Span::styled("  ", t.text()));
-    spans.push(Span::styled(ws, t.muted()));
-    if !compact {
-        spans.push(Span::styled("  MODEL ", t.muted()));
-        spans.push(Span::styled(
-            st.bar.model_label.clone(),
-            if st.bar.model_ok {
-                t.primary()
-            } else {
-                t.warning()
-            },
-        ));
-        spans.push(Span::styled("  AGENT ", t.muted()));
-        spans.push(Span::styled(st.bar.agent.clone(), t.secondary()));
-        spans.push(Span::styled("  SANDBOX ", t.muted()));
-        spans.push(Span::styled(
-            st.bar.sandbox_level.clone(),
-            t.sandbox(&st.bar.sandbox_level),
-        ));
-    }
-    if st.busy > 0 || st.mode == Mode::Running {
+    let mark = |t: &Theme| -> Vec<Span<'static>> {
+        let mut spans = vec![Span::styled(" ", t.text())];
+        if let Some(line) = lockup.lines.first() {
+            spans.extend(line.spans.iter().map(|span| {
+                Span::styled(
+                    span.text.clone(),
+                    brand_role_style(span.role, t, lockup.monochrome),
+                )
+            }));
+        }
+        spans
+    };
+    let lbl = |s: &'static str, t: &Theme| Span::styled(s, t.muted());
+
+    let budget = rl.header_rows as usize;
+    let mut lines: Vec<Line<'static>> = match rl.width_class {
+        WidthClass::Wide => {
+            let mut r = mark(t);
+            r.push(Span::styled(format!("  {ws}"), t.muted()));
+            r.push(lbl("  MODEL ", t));
+            r.push(Span::styled(model.clone(), model_style));
+            r.push(lbl("  AGENT ", t));
+            r.push(Span::styled(agent.clone(), t.secondary()));
+            r.push(lbl("  SANDBOX ", t));
+            r.push(Span::styled(sandbox_full.clone(), t.sandbox(&sandbox_full)));
+            vec![Line::from(r)]
+        }
+        WidthClass::Desktop => {
+            let mut r = mark(t);
+            r.push(Span::styled(format!("  {ws}"), t.muted()));
+            r.push(lbl("  M ", t));
+            r.push(Span::styled(model.clone(), model_style));
+            r.push(lbl("  A ", t));
+            r.push(Span::styled(agent.clone(), t.secondary()));
+            r.push(lbl("  SBX ", t));
+            r.push(Span::styled(sbx.clone(), t.sandbox(&sandbox_full)));
+            vec![Line::from(r)]
+        }
+        WidthClass::Compact if budget >= 2 => {
+            let mut r0 = mark(t);
+            r0.push(Span::styled(format!("  {ws}"), t.muted()));
+            let r1 = vec![
+                lbl("MODEL ", t),
+                Span::styled(model.clone(), model_style),
+                lbl("  AGENT ", t),
+                Span::styled(agent.clone(), t.secondary()),
+                lbl("  SANDBOX ", t),
+                Span::styled(sbx.clone(), t.sandbox(&sandbox_full)),
+            ];
+            vec![Line::from(r0), Line::from(r1)]
+        }
+        WidthClass::Narrow if budget >= 3 => {
+            let mut r0 = mark(t);
+            r0.push(Span::styled(format!("  {ws}"), t.muted()));
+            let r1 = vec![
+                lbl("MODEL ", t),
+                Span::styled(model.clone(), model_style),
+                lbl("  AGENT ", t),
+                Span::styled(agent.clone(), t.secondary()),
+            ];
+            let r2 = vec![
+                lbl("SANDBOX ", t),
+                Span::styled(sbx.clone(), t.sandbox(&sandbox_full)),
+            ];
+            vec![Line::from(r0), Line::from(r1), Line::from(r2)]
+        }
+        WidthClass::Mobile if budget >= 3 => {
+            let mut r0 = mark(t);
+            r0.push(Span::styled(format!(" {ws}"), t.muted()));
+            let r1 = vec![
+                lbl("M ", t),
+                Span::styled(model.clone(), model_style),
+                lbl("  A ", t),
+                Span::styled(agent.clone(), t.secondary()),
+            ];
+            let r2 = vec![
+                lbl("SBX ", t),
+                Span::styled(sbx.clone(), t.sandbox(&sandbox_full)),
+                lbl("  NET ", t),
+                Span::styled(net.clone(), t.text()),
+            ];
+            vec![Line::from(r0), Line::from(r1), Line::from(r2)]
+        }
+        // Height-reduced fallbacks: keep identity + model (priority 1) visible.
+        _ if budget >= 2 => {
+            let mut r0 = mark(t);
+            r0.push(Span::styled("  ", t.text()));
+            r0.push(lbl("M ", t));
+            r0.push(Span::styled(model.clone(), model_style));
+            let r1 = vec![
+                lbl("A ", t),
+                Span::styled(agent.clone(), t.secondary()),
+                lbl("  SBX ", t),
+                Span::styled(sbx.clone(), t.sandbox(&sandbox_full)),
+            ];
+            vec![Line::from(r0), Line::from(r1)]
+        }
+        _ => {
+            let mut r0 = mark(t);
+            r0.push(Span::styled("  ", t.text()));
+            r0.push(lbl("M ", t));
+            r0.push(Span::styled(model.clone(), model_style));
+            vec![Line::from(r0)]
+        }
+    };
+
+    // Working spinner lives on the first header row.
+    if (st.busy > 0 || st.mode == Mode::Running) && !lines.is_empty() {
         let frame = if st.reduced_motion {
             "▪"
         } else {
             SPINNER[st.spinner % SPINNER.len()]
         };
-        spans.push(Span::styled(format!("  {frame} "), t.primary()));
+        if let Some(first) = lines.first_mut() {
+            first
+                .spans
+                .push(Span::styled(format!("  {frame} "), t.primary()));
+        }
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 // ------------------------------------------------------------ processing fx
@@ -212,7 +395,14 @@ fn processing_line(st: &State, t: &Theme) -> Line<'static> {
 
 // ---------------------------------------------------------------- transcript
 
-fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
+fn draw_transcript(
+    f: &mut Frame,
+    area: Rect,
+    st: &mut State,
+    t: &Theme,
+    rl: &crate::layout::ResponsiveLayout,
+) {
+    use crate::layout::WidthClass;
     let inner_width = area.width.saturating_sub(3).max(1) as usize;
     let mut next_row = usize::from(st.has_older_events);
     let mut layouts = Vec::new();
@@ -274,11 +464,16 @@ fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
             t.muted()
         })
         .title(Span::styled(
-            format!(
-                " TIMELINE · {} · {} ",
-                st.transcript_filter.as_str(),
-                st.detail_level.as_str()
-            ),
+            match rl.width_class {
+                WidthClass::Wide | WidthClass::Desktop => format!(
+                    " TIMELINE · {} · {} ",
+                    st.transcript_filter.as_str(),
+                    st.detail_level.as_str()
+                ),
+                WidthClass::Compact => format!(" TIMELINE · {} ", st.detail_level.as_str()),
+                WidthClass::Narrow => " TIMELINE ".to_string(),
+                WidthClass::Mobile => " LOG ".to_string(),
+            },
             t.primary(),
         ));
     let inner_h = area.height.saturating_sub(2) as usize;
@@ -894,56 +1089,88 @@ fn draw_agent_drawer(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
 
 // --------------------------------------------------------------------- input
 
-fn draw_input(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
-    let (title, border) = if st.search_edit.is_some() {
+fn draw_input(
+    f: &mut Frame,
+    area: Rect,
+    st: &State,
+    t: &Theme,
+    rl: &crate::layout::ResponsiveLayout,
+) {
+    use crate::layout::WidthClass;
+    let searching = st.search_edit.is_some();
+    let (title, border) = if searching {
         (
-            " search timeline · Enter apply · Esc cancel ",
+            " search timeline · Enter apply · Esc cancel ".to_string(),
             t.secondary(),
         )
     } else if st.mode == Mode::Running {
-        (" running — input queued after turn ", t.warning())
+        (
+            " running — input queued after turn ".to_string(),
+            t.warning(),
+        )
     } else if st.focus != Focus::Input {
-        (" F6 focus · input inactive ", t.muted())
+        (" F6 focus · input inactive ".to_string(), t.muted())
     } else {
-        (" message · / commands · Ctrl+K palette ", t.primary())
+        (
+            match rl.width_class {
+                WidthClass::Wide => " message · / commands · Ctrl+K palette ",
+                WidthClass::Desktop | WidthClass::Compact => " message · / commands ",
+                WidthClass::Narrow => " message · / ",
+                WidthClass::Mobile => " INPUT  / commands ",
+            }
+            .to_string(),
+            t.primary(),
+        )
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)
         .title(Span::styled(title, border));
-    let text = st.search_edit.as_deref().unwrap_or_else(|| st.input.text());
-    let display: String = text.replace('\n', " ⏎ ");
-    let content = Line::from(vec![
-        Span::styled(
-            if st.search_edit.is_some() {
-                "⌕ "
-            } else {
-                "❯ "
-            },
-            t.secondary(),
-        ),
-        Span::styled(display, t.text()),
-    ]);
-    f.render_widget(Paragraph::new(content).block(block), area);
 
-    // Place the terminal cursor at the edit position (single-row rendering).
+    let text = st.search_edit.as_deref().unwrap_or_else(|| st.input.text());
+    let cursor = if searching {
+        text.len()
+    } else {
+        st.input.cursor()
+    };
+    let wrapw = input_wrap_width(area.width);
+    let (vlines, crow, ccol) = wrap_editor(text, cursor, wrapw);
+
+    // Inner height available for text (box height minus the two borders).
+    let inner_rows = area.height.saturating_sub(2).max(1) as usize;
+    // Scroll so the cursor row stays visible when content exceeds the box.
+    let scroll_top = crow.saturating_sub(inner_rows.saturating_sub(1));
+    let prompt = if searching { "⌕ " } else { "❯ " };
+
+    let mut rendered: Vec<Line> = Vec::with_capacity(inner_rows);
+    for (i, line) in vlines.iter().enumerate().skip(scroll_top).take(inner_rows) {
+        let lead = if i == 0 { prompt } else { "  " };
+        rendered.push(Line::from(vec![
+            Span::styled(lead, t.secondary()),
+            Span::styled(line.clone(), t.text()),
+        ]));
+    }
+    f.render_widget(Paragraph::new(rendered).block(block), area);
+
+    // Place the terminal cursor at the edit position within the visible window.
     if st.overlays.is_empty() && st.pending.is_none() && st.focus == Focus::Input {
-        let cursor = if st.search_edit.is_some() {
-            text.len()
-        } else {
-            st.input.cursor()
-        };
-        let before = &text[..cursor];
-        let width = UnicodeWidthStr::width(before.replace('\n', " ⏎ ").as_str()) as u16;
-        let x = area.x + 3 + width.min(area.width.saturating_sub(4));
-        let y = area.y + 1;
+        let vis_row = crow.saturating_sub(scroll_top) as u16;
+        let x = area.x + 1 + 2 + (ccol as u16).min(area.width.saturating_sub(4));
+        let y = area.y + 1 + vis_row.min(inner_rows.saturating_sub(1) as u16);
         f.set_cursor_position((x, y));
     }
 }
 
 // -------------------------------------------------------------------- footer
 
-fn draw_footer(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
+fn draw_footer(
+    f: &mut Frame,
+    area: Rect,
+    st: &State,
+    t: &Theme,
+    rl: &crate::layout::ResponsiveLayout,
+) {
+    use crate::layout::{pack_status, sandbox_short, SegColor, StatusSegment, WidthClass};
     if st.pending.is_some() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -954,91 +1181,188 @@ fn draw_footer(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
         );
         return;
     }
-    let sep = Span::styled(" │ ", t.muted());
-    let mut spans: Vec<Span> = Vec::new();
-    let seg = |label: &str, value: String, style: Style| -> Vec<Span<'static>> {
-        vec![
-            Span::styled(format!(" {label} "), t.muted()),
-            Span::styled(value, style),
-        ]
-    };
-    if let Some(branch) = &st.bar.git_branch {
-        spans.extend(seg("BRANCH", branch.clone(), t.secondary()));
-        spans.push(sep.clone());
-    }
-    spans.extend(seg(
-        "MODEL",
-        st.bar.model_label.clone(),
-        if st.bar.model_ok {
-            t.primary()
+    let san = |s: &str| nexus_core::sanitize::sanitize_terminal(s);
+
+    let (state_label, state_color) = if st.mode == Mode::Running {
+        let label = if st.reduced_motion {
+            "RUNNING".to_string()
         } else {
-            t.warning()
-        },
-    ));
-    spans.push(sep.clone());
-    spans.extend(seg(
-        "TOKENS",
-        format!("{}↑ {}↓", st.bar.tokens_in, st.bar.tokens_out),
-        t.text(),
-    ));
-    spans.push(sep.clone());
-    spans.extend(seg("MODE", st.bar.permission_mode.clone(), t.secondary()));
-    spans.push(sep.clone());
-    spans.extend(seg("NET", st.bar.network.clone(), t.text()));
-    spans.push(sep.clone());
-    spans.extend(seg(
-        "VIEW",
-        format!(
-            "{}·{}",
-            st.transcript_filter.as_str(),
-            st.detail_level.as_str()
+            const RAMP: [char; 4] = ['░', '▒', '▓', '█'];
+            format!("RUNNING {}", RAMP[st.spinner % RAMP.len()])
+        };
+        (label, SegColor::Warning)
+    } else if st.busy > 0 {
+        ("LOADING".to_string(), SegColor::Secondary)
+    } else {
+        ("READY".to_string(), SegColor::Success)
+    };
+
+    let mk = |full: &'static str,
+              compact: &'static str,
+              minimal: &'static str,
+              value: String,
+              color: SegColor,
+              priority: u8,
+              allow_hide: bool| StatusSegment {
+        full_label: full,
+        compact_label: compact,
+        minimal_label: minimal,
+        value,
+        color,
+        priority,
+        allow_hide,
+    };
+
+    // Priority 0/1 lead so they always land on the first row(s).
+    let mut segs = vec![
+        mk("STATUS", "", "", state_label, state_color, 0, false),
+        mk(
+            "MODEL",
+            "M",
+            "M",
+            san(&st.bar.model_label),
+            if st.bar.model_ok {
+                SegColor::Primary
+            } else {
+                SegColor::Warning
+            },
+            0,
+            false,
         ),
-        t.muted(),
+    ];
+    if st.new_events > 0 {
+        segs.push(mk(
+            "NEW",
+            "NEW",
+            "NEW",
+            st.new_events.to_string(),
+            SegColor::Warning,
+            1,
+            true,
+        ));
+    }
+    segs.push(mk(
+        "NET",
+        "NET",
+        "NET",
+        san(&st.bar.network),
+        SegColor::Text,
+        2,
+        true,
     ));
-    spans.push(sep.clone());
+    segs.push(mk(
+        "SANDBOX",
+        "SBX",
+        "SBX",
+        sandbox_short(&san(&st.bar.sandbox_level)).to_string(),
+        SegColor::Secondary,
+        2,
+        true,
+    ));
+    segs.push(mk(
+        "AGENT",
+        "A",
+        "A",
+        san(&st.bar.agent),
+        SegColor::Secondary,
+        2,
+        true,
+    ));
+    segs.push(mk(
+        "MODE",
+        "MODE",
+        "MODE",
+        san(&st.bar.permission_mode),
+        SegColor::Secondary,
+        2,
+        true,
+    ));
+    if let Some(branch) = &st.bar.git_branch {
+        segs.push(mk(
+            "BRANCH",
+            "BR",
+            "BR",
+            san(branch),
+            SegColor::Secondary,
+            2,
+            true,
+        ));
+    }
     if !st.search_matches.is_empty() {
-        spans.extend(seg(
+        segs.push(mk(
             "MATCH",
+            "M",
+            "M",
             format!(
                 "{}/{}",
                 st.search_match_index.saturating_add(1),
                 st.search_matches.len()
             ),
-            t.secondary(),
+            SegColor::Secondary,
+            1,
+            true,
         ));
-        spans.push(sep.clone());
     }
-    let (state_label, state_style) = if st.mode == Mode::Running {
-        let label = if st.reduced_motion {
-            "RUNNING".to_string()
-        } else {
-            // Neon shimmer: the block after RUNNING cycles the pulse ramp.
-            const RAMP: [char; 4] = ['░', '▒', '▓', '█'];
-            format!("RUNNING {}", RAMP[st.spinner % RAMP.len()])
-        };
-        (label, t.warning())
-    } else if st.busy > 0 {
-        ("LOADING".to_string(), t.secondary())
-    } else {
-        ("READY".to_string(), t.success())
+    segs.push(mk(
+        "TOKENS",
+        "TOK",
+        "TOK",
+        format!("{}↑ {}↓", st.bar.tokens_in, st.bar.tokens_out),
+        SegColor::Text,
+        3,
+        true,
+    ));
+    segs.push(mk(
+        "VIEW",
+        "VIEW",
+        "V",
+        format!(
+            "{}·{}",
+            st.transcript_filter.as_str(),
+            st.detail_level.as_str()
+        ),
+        SegColor::Muted,
+        3,
+        true,
+    ));
+    let help = match rl.width_class {
+        WidthClass::Wide => "Enter send · PgUp/PgDn scroll · ? help",
+        WidthClass::Desktop | WidthClass::Compact => "Enter send · ? help",
+        WidthClass::Narrow | WidthClass::Mobile => "? help",
     };
-    spans.extend(seg("STATUS", state_label, state_style));
-    if st.new_events > 0 {
-        spans.push(sep.clone());
-        spans.extend(seg(
-            "NEW",
-            st.new_events.to_string(),
-            t.warning().add_modifier(Modifier::BOLD),
-        ));
+    segs.push(mk("", "", "", help.to_string(), SegColor::Muted, 1, false));
+
+    let (rows, hidden) = pack_status(
+        &segs,
+        area.width as usize,
+        rl.status_rows as usize,
+        rl.label_form(),
+        3,
+    );
+    let sep = Span::styled(" │ ", t.muted());
+    let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, cell) in row.iter().enumerate() {
+            if i > 0 {
+                spans.push(sep.clone());
+            }
+            if cell.label.is_empty() {
+                spans.push(Span::styled(" ", t.muted()));
+            } else {
+                spans.push(Span::styled(format!("{} ", cell.label), t.muted()));
+            }
+            spans.push(Span::styled(cell.value.clone(), seg_style(cell.color, t)));
+        }
+        lines.push(Line::from(spans));
     }
-    if area.width >= 100 {
-        spans.push(sep);
-        spans.push(Span::styled(
-            " Enter send · PgUp/PgDn scroll · ? help ",
-            t.muted(),
-        ));
+    if hidden > 0 {
+        if let Some(last) = lines.last_mut() {
+            last.spans
+                .push(Span::styled(format!("  +{hidden} ⋯ Ctrl+S"), t.muted()));
+        }
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 // ------------------------------------------------------------------ overlays
@@ -2267,18 +2591,107 @@ mod tests {
 
     #[test]
     fn timeline_and_context_snapshots_match_required_terminal_sizes() {
-        let actual: Vec<(u16, u16, u64)> = [(60, 20), (80, 24), (100, 30), (120, 40), (160, 50)]
-            .into_iter()
-            .map(|(width, height)| (width, height, fnv1a64(&rendered_text(width, height))))
-            .collect();
+        let actual: Vec<(u16, u16, u64)> = [
+            (36, 20),
+            (45, 20),
+            (60, 18),
+            (60, 20),
+            (80, 24),
+            (100, 30),
+            (120, 40),
+            (160, 50),
+        ]
+        .into_iter()
+        .map(|(width, height)| (width, height, fnv1a64(&rendered_text(width, height))))
+        .collect();
         let expected = [
-            (60, 20, 1_216_525_625_711_668_551),
-            (80, 24, 16_956_183_242_655_028_605),
-            (100, 30, 3_244_836_804_717_259_981),
-            (120, 40, 16_247_385_378_708_323_072),
-            (160, 50, 16_609_136_069_379_065_746),
+            (36, 20, 5_230_251_151_908_132_753),
+            (45, 20, 11_886_946_297_862_773_307),
+            (60, 18, 14_716_588_342_246_616_413),
+            (60, 20, 2_050_765_263_184_676_920),
+            (80, 24, 4_299_446_386_976_637_590),
+            (100, 30, 10_276_860_616_339_363_403),
+            (120, 40, 1_517_812_557_474_212_879),
+            (160, 50, 6_021_207_112_343_019_667),
         ];
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn responsive_sizes_render_key_regions_without_overflow() {
+        let sizes = [
+            (30, 10),
+            (36, 12),
+            (40, 16),
+            (45, 20),
+            (50, 22),
+            (60, 18),
+            (70, 24),
+            (80, 24),
+            (100, 30),
+            (120, 35),
+            (160, 40),
+        ];
+        for (w, h) in sizes {
+            let mut state = representative_state();
+            let out = render_state_text(&mut state, w, h);
+            let low = out.to_lowercase();
+            assert!(low.contains("nexus"), "no identity mark at {w}x{h}");
+            assert!(
+                low.contains("input") || low.contains("message"),
+                "no input area at {w}x{h}"
+            );
+            assert!(
+                out.contains("READY") || out.contains("RUNNING") || out.contains("LOADING"),
+                "no execution status at {w}x{h}:\n{out}"
+            );
+            for line in out.lines() {
+                assert!(
+                    UnicodeWidthStr::width(line) <= w as usize,
+                    "row exceeds width {w} at {w}x{h}: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn too_small_terminal_shows_controlled_message() {
+        let mut state = representative_state();
+        let out = render_state_text(&mut state, 20, 6);
+        assert!(out.to_lowercase().contains("too small"));
+    }
+
+    #[test]
+    fn wrap_editor_wraps_and_locates_cursor() {
+        assert_eq!(wrap_editor("", 0, 10).0, vec!["".to_string()]);
+        let (lines, row, col) = wrap_editor("hello", 5, 10);
+        assert_eq!(lines, vec!["hello".to_string()]);
+        assert_eq!((row, col), (0, 5));
+        assert_eq!(wrap_editor(&"x".repeat(25), 0, 10).0.len(), 3);
+        let (lines, row, col) = wrap_editor("a\nbc", 4, 10);
+        assert_eq!(lines, vec!["a".to_string(), "bc".to_string()]);
+        assert_eq!((row, col), (1, 2));
+    }
+
+    #[test]
+    fn input_box_grows_then_caps() {
+        let mut state = representative_state();
+        state.input.set_text("x".repeat(400));
+        assert_eq!(input_box_rows(&state, 80, 4), 6); // capped 4 content + 2 border
+        assert_eq!(input_box_rows(&state, 40, 3), 5); // capped 3 content + 2 border
+        state.input.set_text("hi");
+        assert_eq!(input_box_rows(&state, 80, 4), 3); // 1 content + 2 border
+    }
+
+    #[test]
+    fn resize_shrink_then_grow_keeps_input_intact() {
+        let mut state = representative_state();
+        state.input.set_text("draft message");
+        for (w, h) in [(120, 40), (36, 12), (120, 40)] {
+            let out = render_state_text(&mut state, w, h);
+            assert!(!out.is_empty());
+        }
+        assert_eq!(state.input.text(), "draft message");
     }
 
     #[test]

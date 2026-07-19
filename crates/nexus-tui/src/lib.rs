@@ -15,6 +15,7 @@
 mod approver;
 mod input;
 mod intro;
+mod layout;
 mod menus;
 mod render;
 mod state;
@@ -826,6 +827,13 @@ fn handle_key(
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('f')) {
         st.search_edit = Some(st.search_query.clone().unwrap_or_default());
         st.focus = Focus::Input;
+        return;
+    }
+
+    // Ctrl+S opens the full status detail — the escape hatch for values the
+    // responsive header/footer compact away on narrow terminals.
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('s')) {
+        start_load(st, LoadRequest::Status, app, ui_tx);
         return;
     }
 

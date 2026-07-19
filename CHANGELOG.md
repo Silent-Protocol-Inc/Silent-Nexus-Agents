@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.2.0] — 2026-07-19
+
+- Made the TUI fully responsive on mobile and narrow terminals (Termius, Blink,
+  small SSH windows). A centralized breakpoint system (width and height classes)
+  now drives every chrome section instead of scattered width checks.
+- The top header stacks into up to three rows and abbreviates by width instead of
+  clipping; the workspace path compacts to the project name and sandbox values use
+  short forms (e.g. `path-only`), with full values still available.
+- The bottom status bar is now a priority-ranked, width-aware segment packer that
+  wraps across rows and never clips important information; overflow is surfaced with
+  a `+N ⋯ Ctrl+S` hint.
+- The input box grows with wrapped/multiline text (up to 3–4 rows, then scrolls) and
+  is always visible with the cursor kept in view.
+- Added a Ctrl+S full-status overlay (and the existing `/status`) exposing every full
+  value — model, sandbox, network, workspace, git, tokens, approvals, and more.
+- Timeline title, help hints, and the sidebar now adapt to the available space; a
+  controlled "terminal too small" message replaces corrupted rendering below the floor.
+
 ## [2.1.0] — 2026-07-19
 
 - Redesigned the canonical startup lockup: a five-row stepped identity mark and a
