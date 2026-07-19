@@ -180,6 +180,36 @@ fn draw_header(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+// ------------------------------------------------------------ processing fx
+
+/// Neon "data stream" shown while the agent works: a pulse of shaded blocks
+/// sweeping a fixed track, glitch mark up front. Honest and quiet under
+/// reduced motion.
+fn processing_line(st: &State, t: &Theme) -> Line<'static> {
+    if st.reduced_motion {
+        return Line::from(Span::styled("  ▪ NEXUS PROCESSING", t.secondary()));
+    }
+    const TRACK: usize = 18;
+    const PULSE: [char; 7] = ['░', '▒', '▓', '█', '▓', '▒', '░'];
+    let tick = st.spinner;
+    let head = tick % (TRACK + PULSE.len());
+    let mut cells = vec![' '; TRACK];
+    for (i, c) in PULSE.iter().enumerate() {
+        let pos = head as isize - i as isize;
+        if (0..TRACK as isize).contains(&pos) {
+            cells[pos as usize] = *c;
+        }
+    }
+    let track: String = cells.into_iter().collect();
+    let glyph = ['◢', '◣', '◤', '◥'][tick % 4];
+    Line::from(vec![
+        Span::styled(format!("  {glyph} "), t.secondary()),
+        Span::styled("NEXUS PROCESSING ", t.primary()),
+        Span::styled(track, t.secondary()),
+        Span::styled(["⟨", "⟩", "⟨", "⟩"][(tick / 2) % 4].to_string(), t.muted()),
+    ])
+}
+
 // ---------------------------------------------------------------- transcript
 
 fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
@@ -231,6 +261,8 @@ fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
         layouts.push((index, next_row, rows, expanded));
         next_row = next_row.saturating_add(rows);
     }
+    let processing_row = (st.mode == Mode::Running).then_some(next_row);
+    next_row = next_row.saturating_add(usize::from(processing_row.is_some()));
     let new_events_row = (st.new_events > 0).then_some(next_row);
     next_row = next_row.saturating_add(usize::from(new_events_row.is_some()));
 
@@ -285,6 +317,9 @@ fn draw_transcript(f: &mut Frame, area: Rect, st: &mut State, t: &Theme) {
             .min(rendered.len())
             .max(from);
         lines.extend(rendered[from..to].iter().cloned());
+    }
+    if processing_row.is_some_and(|row| row >= scroll && row < visible_end) {
+        lines.push(processing_line(st, t));
     }
     if new_events_row.is_some_and(|row| row >= scroll && row < visible_end) {
         lines.push(Line::from(Span::styled(

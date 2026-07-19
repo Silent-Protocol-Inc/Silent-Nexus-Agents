@@ -23,41 +23,36 @@ pub const BUILD_PROFILE: &str = env!("SNX_BUILD_PROFILE");
 pub const BUILD_COMMIT: &str = env!("SNX_BUILD_COMMIT");
 pub const BUILD_EPOCH: &str = env!("SNX_BUILD_EPOCH");
 
-const FULL_MIN_WIDTH: u16 = 42;
-const FULL_MIN_HEIGHT: u16 = 18;
+// Full lockup fits side-by-side (icon | wordmark) when both are met; otherwise
+// falls back to a vertical stack, and to the compact mark when neither fits.
+const SIDE_MIN_WIDTH: u16 = 66; // icon(7) + gap(3) + wordmark(56)
+const SIDE_MIN_HEIGHT: u16 = 14;
+const STACK_MIN_WIDTH: u16 = 56; // wordmark width
+const STACK_MIN_HEIGHT: u16 = 16;
 
-const ICON_UNICODE: [&str; 6] = [
-    "██▄       ██",
-    "████▄     ██",
-    "██ ▀██▄   ██",
-    "██   ▀██▄ ██",
-    "██     ▀████",
-    "██       ▀██",
-];
+/// Gap between the icon and the wordmark in the side-by-side lockup.
+const LOCKUP_GAP: &str = "   ";
 
-const ICON_ASCII: [&str; 6] = [
-    "##        ##",
-    "####      ##",
-    "## ##     ##",
-    "##   ##   ##",
-    "##     ## ##",
-    "##       ###",
-];
+// Stepped identity mark, five rows tall so it sits level with the wordmark.
+const ICON_UNICODE: [&str; 5] = ["████   ", "████   ", "   ████", "   ████", "   ████"];
 
+const ICON_ASCII: [&str; 5] = ["####   ", "####   ", "   ####", "   ####", "   ####"];
+
+// Scanline-gradient NEXUS wordmark: light (░) at the top fading to solid (█).
 const WORDMARK_UNICODE: [&str; 5] = [
-    "█▄  █  █████  █   █  █   █  █████",
-    "██▄ █  █       █ █   █   █  █    ",
-    "█ █▄█  ████     █    █   █  █████",
-    "█  ██  █       █ █   █   █      █",
-    "█  ▀█  █████  █   █  █████  █████",
+    "░░░░░░░   ░░░  ░░        ░░  ░░░░  ░░  ░░░░  ░░░      ░░",
+    "▒▒▒▒▒▒▒    ▒▒  ▒▒  ▒▒▒▒▒▒▒▒▒  ▒▒  ▒▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒▒▒▒",
+    "▓▓▓▓▓▓▓  ▓  ▓  ▓▓      ▓▓▓▓▓▓    ▓▓▓▓  ▓▓▓▓  ▓▓▓      ▓▓",
+    "███████  ██    ██  █████████  ██  ███  ████  ████████  █",
+    "███████  ███   ██        ██  ████  ███      ████      ██",
 ];
 
 const WORDMARK_ASCII: [&str; 5] = [
-    "##  #  #####  #   #  #   #  #####",
-    "### #  #       # #   #   #  #    ",
-    "# ###  ####     #    #   #  #####",
-    "#  ##  #       # #   #   #      #",
-    "#   #  #####  #   #  #####  #####",
+    ".......   ...  ..        ..  ....  ..  ....  ...      ..",
+    ":::::::    ::  ::  :::::::::  ::  :::  ::::  ::  :::::::",
+    "+++++++  +  +  ++      ++++++    ++++  ++++  +++      ++",
+    "#######  ##    ##  #########  ##  ###  ####  ########  #",
+    "#######  ###   ##        ##  ####  ###      ####      ##",
 ];
 
 /// Terminal color capability. Detection is shared by the TUI and CLI so
@@ -92,21 +87,21 @@ pub struct BrandColor {
 
 /// Premium azure: brighter and calmer than the previous fully saturated cyan.
 pub const BLUE: BrandColor = BrandColor {
-    rgb: (103, 207, 255),
+    rgb: (125, 211, 252),
     ansi256: 81,
     ansi16: BasicColor::Cyan,
 };
 
 /// High-presence magenta reserved for the NEXUS identity mark.
 pub const PINK: BrandColor = BrandColor {
-    rgb: (255, 82, 190),
+    rgb: (255, 99, 214),
     ansi256: 205,
     ansi16: BasicColor::Magenta,
 };
 
 /// Soft neutral used for attribution and supporting copy.
 pub const SOFT_GRAY: BrandColor = BrandColor {
-    rgb: (154, 164, 188),
+    rgb: (170, 180, 202),
     ansi256: 246,
     ansi16: BasicColor::DarkGray,
 };
@@ -212,18 +207,16 @@ pub fn lockup(requested: BrandVariant, constraints: BrandConstraints) -> BrandLo
     let width = constraints.width.max(1);
     let height = constraints.height.max(1);
     let monochrome = requested == BrandVariant::Monochrome;
+    let full_fits = (width >= SIDE_MIN_WIDTH && height >= SIDE_MIN_HEIGHT)
+        || (width >= STACK_MIN_WIDTH && height >= STACK_MIN_HEIGHT);
     let resolved = match requested {
-        BrandVariant::Full | BrandVariant::Monochrome
-            if width < FULL_MIN_WIDTH || height < FULL_MIN_HEIGHT =>
-        {
-            BrandVariant::Compact
-        }
-        BrandVariant::Monochrome => BrandVariant::Full,
+        BrandVariant::Full | BrandVariant::Monochrome if !full_fits => BrandVariant::Compact,
+        BrandVariant::Full | BrandVariant::Monochrome => BrandVariant::Full,
         other => other,
     };
 
     let mut lines = match resolved {
-        BrandVariant::Full => full_lines(constraints.unicode),
+        BrandVariant::Full => full_lines(width, height, constraints.unicode),
         BrandVariant::Compact => compact_lines(width, constraints.unicode),
         BrandVariant::IconOnly => icon_lines(height, constraints.unicode),
         BrandVariant::WordmarkOnly => wordmark_lines(width, height, constraints.unicode),
@@ -252,7 +245,7 @@ pub fn lockup(requested: BrandVariant, constraints: BrandConstraints) -> BrandLo
     }
 }
 
-fn full_lines(unicode: bool) -> Vec<BrandLine> {
+fn full_lines(width: u16, height: u16, unicode: bool) -> Vec<BrandLine> {
     let icon = if unicode {
         &ICON_UNICODE[..]
     } else {
@@ -263,17 +256,41 @@ fn full_lines(unicode: bool) -> Vec<BrandLine> {
     } else {
         &WORDMARK_ASCII[..]
     };
+    let side_by_side = width >= SIDE_MIN_WIDTH && height >= SIDE_MIN_HEIGHT;
     let mut lines = Vec::with_capacity(17);
-    lines.extend(
-        icon.iter()
-            .map(|text| line((*text).to_string(), BrandRole::Icon)),
-    );
-    lines.push(spacer());
-    lines.extend(
-        wordmark
-            .iter()
-            .map(|text| line((*text).to_string(), BrandRole::Wordmark)),
-    );
+    if side_by_side {
+        // iPad/desktop: the identity mark sits beside the wordmark, sharing rows.
+        for (icon_row, word_row) in icon.iter().zip(wordmark.iter()) {
+            lines.push(BrandLine {
+                spans: vec![
+                    BrandSpan {
+                        text: (*icon_row).to_string(),
+                        role: BrandRole::Icon,
+                    },
+                    BrandSpan {
+                        text: LOCKUP_GAP.to_string(),
+                        role: BrandRole::Spacer,
+                    },
+                    BrandSpan {
+                        text: (*word_row).to_string(),
+                        role: BrandRole::Wordmark,
+                    },
+                ],
+            });
+        }
+    } else {
+        // Narrow/mobile: the identity mark stacks above the wordmark.
+        lines.extend(
+            icon.iter()
+                .map(|text| line((*text).to_string(), BrandRole::Icon)),
+        );
+        lines.push(spacer());
+        lines.extend(
+            wordmark
+                .iter()
+                .map(|text| line((*text).to_string(), BrandRole::Wordmark)),
+        );
+    }
     lines.push(spacer());
     lines.push(line(ATTRIBUTION, BrandRole::Attribution));
     lines.push(spacer());
@@ -344,7 +361,7 @@ fn icon_lines(height: u16, unicode: bool) -> Vec<BrandLine> {
 }
 
 fn wordmark_lines(width: u16, height: u16, unicode: bool) -> Vec<BrandLine> {
-    if width >= 37 && height >= 5 {
+    if width >= STACK_MIN_WIDTH && height >= 5 {
         let wordmark = if unicode {
             &WORDMARK_UNICODE[..]
         } else {

@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.0] — 2026-07-19
+
+- Redesigned the canonical startup lockup: a five-row stepped identity mark and a
+  scanline-gradient `NEXUS` wordmark that sit side by side on desktop/tablet widths
+  and stack vertically on narrow terminals, with a compact fallback below that.
+- Replaced the boot sequence with a calm, sub-400ms staged fade-in (identity mark →
+  wordmark → supporting copy); still skippable and reduced-motion aware.
+- Restored the animated "NEXUS PROCESSING" data-stream indicator in the timeline
+  while the agent is working (regressed in 2.0.0); quiet under reduced motion.
+- Refined the palette for contrast: brighter, calmer azure; more vibrant identity
+  magenta; softer neutral gray. The single canonical lockup continues to drive the
+  boot screen, `about`/`version`, welcome/home, login, and the installer banner.
+
 ## [2.0.0] — 2026-07-19
 
 - Replaced the removed `models` command with the provider-grouped, read-only

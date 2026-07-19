@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn brand_colors_follow_capability_ladder() {
         let truecolor = Ui::with_support(ColorSupport::TrueColor).cyan("NEXUS");
-        assert!(truecolor.contains("38;2;103;207;255"));
+        assert!(truecolor.contains("38;2;125;211;252"));
         let indexed = Ui::with_support(ColorSupport::Ansi256).violet("NEXUS");
         assert!(indexed.contains("38;5;205"));
         let basic = Ui::with_support(ColorSupport::Ansi16).cyan("NEXUS");
