@@ -78,7 +78,8 @@ workspace-scoped grants.
 ### Deferred
 
 - Branding, mobile input, provider token-limit discovery, and expanded
-  configuration work are tracked in `docs/nexus-followup-plan.md`.
+  configuration work were deferred here and subsequently delivered (mobile input
+  and token-limit discovery in 1.3.0; branding and configuration in 2.0.0).
 
 ## [1.1.2] — 2026-07-18
 
