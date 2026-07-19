@@ -8,7 +8,7 @@ mod commands;
 mod ui;
 
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Command, ConfigCmd};
+use cli::{CatalogCmd, Cli, Command, ConfigCmd};
 use nexus_app::App;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -147,7 +147,9 @@ async fn dispatch(args: Cli) -> anyhow::Result<()> {
         Command::Sandbox(c) => commands::sandbox(&app, c, json).await,
         Command::Index(c) => commands::index(&app, c, json).await,
         Command::Tools(c) => commands::tools(&app, c, json).await,
-        Command::Models(c) => commands::models(&app, c, json).await,
+        Command::Catalog(c) => {
+            commands::catalog(&app, c.command.unwrap_or(CatalogCmd::List), json).await
+        }
         Command::Auth(c) => commands::auth(&app, c, json).await,
         Command::Config(c) => commands::config(&app, c).await,
         Command::Audit(a) => commands::audit(&app, a, json).await,

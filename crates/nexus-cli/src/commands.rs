@@ -192,6 +192,27 @@ fn print_event(ui: &Ui, ev: &LoopEvent) {
                 ui.safe(reason)
             );
         }
+        LoopEvent::ProviderActivity {
+            effort,
+            reasoning_enabled,
+            running,
+            failed,
+            ..
+        } => {
+            let phase = if *running {
+                "started"
+            } else if *failed {
+                "failed"
+            } else {
+                "completed"
+            };
+            let label = if *reasoning_enabled {
+                format!("Thinking… · {effort}")
+            } else {
+                "Generating… · reasoning off/unsupported".into()
+            };
+            println!("{} {}", ui.dim(phase), ui.safe(&label));
+        }
         LoopEvent::ReasoningSummary(t) => {
             println!("{} {}", ui.dim("reasoning"), ui.safe(t))
         }
@@ -1261,32 +1282,28 @@ pub async fn tools(app: &App, cmd: ToolsCmd, json: bool) -> Result<()> {
     Ok(())
 }
 
-// -------------------------------------------------------------------- models
+// ------------------------------------------------------------------- catalog
 
-pub async fn models(app: &App, cmd: ModelsCmd, json: bool) -> Result<()> {
+pub async fn catalog(app: &App, cmd: CatalogCmd, json: bool) -> Result<()> {
     let ui = ui(app);
     match cmd {
-        ModelsCmd::List => {
+        CatalogCmd::List => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&app.config.models)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&nexus_app::providers::catalog(app).await)?
+                );
                 return Ok(());
             }
-            ui.render_report(&nexus_app::providers::models_report(app));
+            ui.render_report(&nexus_app::providers::catalog_report(app).await);
         }
-        ModelsCmd::Health => {
+        CatalogCmd::Health => {
+            let refreshed = nexus_app::providers::refresh_catalog(app).await;
             if json {
-                let manager = nexus_models::ModelManager::from_config(&app.config)?;
-                let health = manager.health_all().await;
-                let v: Vec<_> = health
-                    .iter()
-                    .map(|(n, k, h)| {
-                        serde_json::json!({"name": n, "kind": k, "reachable": h.reachable, "detail": h.detail, "latency_ms": h.latency_ms})
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&v)?);
+                println!("{}", serde_json::to_string_pretty(&refreshed)?);
                 return Ok(());
             }
-            ui.render_report(&nexus_app::providers::models_health_report(app).await?);
+            ui.render_report(&nexus_app::providers::catalog_report(app).await);
         }
     }
     Ok(())
@@ -1762,7 +1779,7 @@ pub async fn setup(args: SetupArgs, no_color: bool) -> Result<()> {
         );
         println!(
             "  {}  {}",
-            ui.cyan("snx models health"),
+            ui.cyan("snx catalog health"),
             ui.dim("probe your model server(s)")
         );
         println!(

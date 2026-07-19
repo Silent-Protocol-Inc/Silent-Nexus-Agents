@@ -287,7 +287,7 @@ fn compact_lines(width: u16, unicode: bool) -> Vec<BrandLine> {
         BrandLine {
             spans: vec![
                 BrandSpan {
-                    text: if unicode { "▚  " } else { ">> " }.to_string(),
+                    text: if unicode { "◤◢  " } else { ">> " }.to_string(),
                     role: BrandRole::Icon,
                 },
                 BrandSpan {
@@ -300,7 +300,7 @@ fn compact_lines(width: u16, unicode: bool) -> Vec<BrandLine> {
         BrandLine {
             spans: vec![
                 BrandSpan {
-                    text: if unicode { "▚ " } else { "> " }.to_string(),
+                    text: if unicode { "◤ " } else { "> " }.to_string(),
                     role: BrandRole::Icon,
                 },
                 BrandSpan {
@@ -331,7 +331,7 @@ fn compact_lines(width: u16, unicode: bool) -> Vec<BrandLine> {
 
 fn icon_lines(height: u16, unicode: bool) -> Vec<BrandLine> {
     if height < ICON_UNICODE.len() as u16 {
-        return vec![line(if unicode { "▚" } else { ">" }, BrandRole::Icon)];
+        return vec![line(if unicode { "◤" } else { ">" }, BrandRole::Icon)];
     }
     let icon = if unicode {
         &ICON_UNICODE[..]
@@ -581,5 +581,45 @@ mod tests {
         assert_eq!(wordmark_rows, 5);
         assert_eq!(attribution_rows, 1);
         assert!(lockup.plain_text().contains(ATTRIBUTION));
+    }
+
+    #[test]
+    fn responsive_identity_uses_the_approved_marks() {
+        let compact = lockup(
+            BrandVariant::Compact,
+            BrandConstraints {
+                width: 40,
+                height: 8,
+                unicode: true,
+            },
+        );
+        assert!(compact.plain_text().contains("◤◢"));
+        let narrow = lockup(
+            BrandVariant::Compact,
+            BrandConstraints {
+                width: 12,
+                height: 8,
+                unicode: true,
+            },
+        );
+        assert!(narrow.plain_text().contains('◤'));
+        let icon = lockup(
+            BrandVariant::IconOnly,
+            BrandConstraints {
+                width: 2,
+                height: 1,
+                unicode: true,
+            },
+        );
+        assert_eq!(icon.plain_text(), "◤");
+        let ascii = lockup(
+            BrandVariant::Compact,
+            BrandConstraints {
+                width: 40,
+                height: 8,
+                unicode: false,
+            },
+        );
+        assert!(ascii.plain_text().contains(">>"));
     }
 }

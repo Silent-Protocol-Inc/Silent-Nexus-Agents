@@ -169,6 +169,16 @@ impl OpenAiCompatProvider {
         if request.json_mode {
             body["response_format"] = json!({"type": "json_object"});
         }
+        if let Some(effort) = self.config.reasoning_effort.as_deref() {
+            if self.base_url.contains("openrouter.ai/") {
+                // OpenRouter's normalized contract. Reasoning output is
+                // excluded at the wire boundary and therefore cannot enter a
+                // stream, transcript, export, log, or artifact.
+                body["reasoning"] = json!({"effort": effort, "exclude": true});
+            } else if self.kind == "openai" {
+                body["reasoning_effort"] = json!(effort);
+            }
+        }
         if !request.tools.is_empty() && self.capabilities().native_tool_calls {
             let tools: Vec<Value> = request
                 .tools
@@ -311,7 +321,20 @@ impl ModelProvider for OpenAiCompatProvider {
             max_output_tokens: self.config.max_output_tokens,
             context_limit_source: self.config.context_limit_source,
             output_limit_source: self.config.output_limit_source,
-            reasoning_controls: false,
+            reasoning_controls: self.config.reasoning_effort.is_some(),
+            reasoning: self
+                .config
+                .reasoning_effort
+                .as_ref()
+                .map(|effort| ReasoningProfile {
+                    supported_efforts: vec![effort.clone()],
+                    default_effort: Some(effort.clone()),
+                    control: ReasoningControl::Optional,
+                    mandatory: false,
+                    provider_managed: false,
+                    provenance: ReasoningProvenance::ConfiguredDefault,
+                })
+                .unwrap_or_default(),
             system_prompt: true,
             // Only the dedicated OpenAI adapter has a contract strong enough
             // to advertise parallel calls. Generic compatible endpoints vary.
@@ -569,5 +592,43 @@ fn truncate_err(text: &str) -> String {
         )
     } else {
         t.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openrouter_uses_normalized_reasoning_and_excludes_private_output() {
+        let config = ModelConfig {
+            provider: "openai_compatible".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "exact/model".into(),
+            reasoning_effort: Some("high".into()),
+            ..Default::default()
+        };
+        let provider = OpenAiCompatProvider::new("openai_compatible", &config).expect("provider");
+        let body = provider.build_body(&CompletionRequest::default(), true);
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["exclude"], true);
+        assert!(body.get("include_reasoning").is_none());
+    }
+
+    #[test]
+    fn native_openai_uses_chat_reasoning_effort_contract() {
+        let config = ModelConfig {
+            provider: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            model: "exact-model".into(),
+            api_key_env: Some("NEXUS_TEST_MISSING_OPENAI_KEY".into()),
+            resolved_api_key: Some(nexus_core::SecretString::new("test-only")),
+            reasoning_effort: Some("low".into()),
+            ..Default::default()
+        };
+        let provider = OpenAiCompatProvider::new("openai", &config).expect("provider");
+        let body = provider.build_body(&CompletionRequest::default(), false);
+        assert_eq!(body["reasoning_effort"], "low");
+        assert!(body.get("reasoning").is_none());
     }
 }

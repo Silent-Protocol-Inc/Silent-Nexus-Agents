@@ -78,7 +78,8 @@ fn bare_interactive_view(def: &registry::CommandDef) -> Option<View> {
     Some(match def.id {
         CommandId::Setup | CommandId::Welcome => View::Welcome,
         CommandId::Init => View::Init,
-        CommandId::Model | CommandId::Models => View::Model,
+        CommandId::Model => View::Model,
+        CommandId::Catalog => View::CommandMenu("catalog".into()),
         CommandId::Login => View::Login,
         CommandId::Connect => View::Connect,
         CommandId::Agent | CommandId::Agents => View::Agents,
@@ -154,6 +155,11 @@ pub enum ConfirmedAction {
         title: String,
         objective: String,
         writer: bool,
+    },
+    SetConfig {
+        workspace: bool,
+        path: String,
+        value: String,
     },
 }
 
@@ -267,6 +273,9 @@ impl ConfirmedAction {
                 "Queue {} background task `{title}`?\nObjective: {objective}\n\
                  Writer tasks use a persistent isolated Git worktree and never auto-commit or merge.",
                 if *writer { "a writer" } else { "a reader" }
+            ),
+            ConfirmedAction::SetConfig { path, value, .. } => format!(
+                "Apply security-weakening configuration `{path} = {value}`? Hard denials, policy evaluation, approval, sandbox metadata, redaction, and audit remain enforced."
             ),
         }
     }
@@ -457,9 +466,12 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             }
             _ => usage(def),
         },
-        CommandId::Models => match args.first() {
-            Some(&"health") => Effect::Report(crate::providers::models_health_report(app).await?),
-            _ => Effect::Report(crate::providers::models_report(app)),
+        CommandId::Catalog => match args.first() {
+            Some(&"health") => {
+                let _ = crate::providers::refresh_catalog(app).await;
+                Effect::Report(crate::providers::catalog_report(app).await)
+            }
+            _ => Effect::Report(crate::providers::catalog_report(app).await),
         },
 
         CommandId::Login => match args.as_slice() {
@@ -1209,6 +1221,38 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                         app.paths.managed_overrides_file.display().to_string(),
                     ),
             ),
+            Some("set") if args.len() >= 4 => {
+                let workspace = match args[1] {
+                    "workspace" => true,
+                    "global" => false,
+                    _ => return Err(NexusError::Config("scope must be workspace|global".into())),
+                };
+                let path = args[2].to_string();
+                let value = args[3..].join(" ");
+                let weakening = (path == "sandbox.backend" && value.contains("none"))
+                    || (path == "sandbox.network" && value.contains("full"))
+                    || (path.starts_with("policy.") && value.contains("allow"))
+                    || (path == "web.enabled" && value == "true")
+                    || (path.starts_with("mcp.")
+                        && (path.ends_with(".enabled") || path.ends_with(".trust")));
+                if weakening {
+                    Effect::Confirm(ConfirmedAction::SetConfig {
+                        workspace,
+                        path,
+                        value,
+                    })
+                } else {
+                    Effect::ReloadApp(services::config_set(app, workspace, &path, &value)?)
+                }
+            }
+            Some("reset") if args.len() == 3 => {
+                let workspace = match args[1] {
+                    "workspace" => true,
+                    "global" => false,
+                    _ => return Err(NexusError::Config("scope must be workspace|global".into())),
+                };
+                Effect::ReloadApp(services::config_reset(app, workspace, args[2])?)
+            }
             _ => usage(def),
         },
 
@@ -1382,6 +1426,11 @@ pub fn apply_confirmed(app: &App, action: &ConfirmedAction) -> Result<Report> {
         ConfirmedAction::DeleteBranch(name) => {
             Ok(Report::untitled().ok(crate::gitx::delete_branch(&app.workspace, name)?))
         }
+        ConfirmedAction::SetConfig {
+            workspace,
+            path,
+            value,
+        } => services::config_set(app, *workspace, path, value),
         ConfirmedAction::CommitFiles {
             paths,
             message,

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRole {
+    Nexus,
     Orchestrator,
     Planner,
     Implementer,
@@ -38,6 +39,7 @@ pub enum AgentRole {
 impl AgentRole {
     pub fn as_str(&self) -> &'static str {
         match self {
+            AgentRole::Nexus => "nexus",
             AgentRole::Orchestrator => "orchestrator",
             AgentRole::Planner => "planner",
             AgentRole::Implementer => "implementer",
@@ -64,6 +66,7 @@ impl AgentRole {
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
+            "nexus" => AgentRole::Nexus,
             "orchestrator" => AgentRole::Orchestrator,
             "planner" => AgentRole::Planner,
             "implementer" => AgentRole::Implementer,
@@ -92,6 +95,7 @@ impl AgentRole {
     pub fn all() -> &'static [AgentRole] {
         use AgentRole::*;
         &[
+            Nexus,
             Orchestrator,
             Planner,
             Implementer,
@@ -117,7 +121,7 @@ impl AgentRole {
     }
 
     pub fn can_delegate(&self) -> bool {
-        matches!(self, AgentRole::Orchestrator)
+        matches!(self, AgentRole::Nexus | AgentRole::Orchestrator)
     }
 
     /// Highest risk this role may propose. Policy and explicit approvals still
@@ -125,9 +129,10 @@ impl AgentRole {
     /// roles from reaching those gates at all.
     pub fn max_risk(&self) -> RiskLevel {
         match self {
-            AgentRole::Orchestrator | AgentRole::Devops | AgentRole::ReleaseManager => {
-                RiskLevel::ExternalSideEffect
-            }
+            AgentRole::Nexus
+            | AgentRole::Orchestrator
+            | AgentRole::Devops
+            | AgentRole::ReleaseManager => RiskLevel::ExternalSideEffect,
             role if role.can_write() => RiskLevel::Destructive,
             role if role.tool_categories().contains(&ToolCategory::Web) => RiskLevel::Network,
             _ => RiskLevel::Read,
@@ -139,7 +144,7 @@ impl AgentRole {
     pub fn tool_categories(&self) -> Vec<ToolCategory> {
         use ToolCategory::*;
         match self {
-            AgentRole::Orchestrator => {
+            AgentRole::Nexus | AgentRole::Orchestrator => {
                 vec![Filesystem, Repo, Terminal, Web, Diagnostics, Memory, Goal]
             }
             AgentRole::Planner => vec![Filesystem, Repo, Diagnostics],
@@ -173,7 +178,8 @@ impl AgentRole {
     pub fn can_write(&self) -> bool {
         matches!(
             self,
-            AgentRole::Orchestrator
+            AgentRole::Nexus
+                | AgentRole::Orchestrator
                 | AgentRole::Implementer
                 | AgentRole::Debugger
                 | AgentRole::TestEngineer
@@ -208,6 +214,7 @@ impl AgentRole {
     /// The output contract the role must satisfy (surfaced in its prompt).
     pub fn output_contract(&self) -> &'static str {
         match self {
+            AgentRole::Nexus => "",
             AgentRole::Orchestrator => {
                 "Coordinate work and produce a final answer with a summary of changes."
             }
@@ -296,6 +303,17 @@ mod tests {
             AgentRole::Orchestrator.max_risk(),
             RiskLevel::ExternalSideEffect
         );
+    }
+
+    #[test]
+    fn nexus_is_general_purpose_but_does_not_bypass_safety() {
+        let nexus = AgentRole::Nexus;
+        assert!(nexus.can_delegate());
+        assert!(nexus.can_write());
+        assert!(nexus.tool_categories().contains(&ToolCategory::Terminal));
+        assert!(nexus.tool_categories().contains(&ToolCategory::Web));
+        assert_eq!(nexus.output_contract(), "");
+        assert_eq!(nexus.max_risk(), RiskLevel::ExternalSideEffect);
     }
 
     #[test]

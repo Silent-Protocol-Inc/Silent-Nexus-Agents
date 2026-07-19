@@ -312,6 +312,12 @@ pub enum TimelineKind {
         model: String,
         reason: String,
     },
+    ProviderActivity {
+        provider: String,
+        model: String,
+        effort: String,
+        reasoning_enabled: bool,
+    },
     ReasoningSummary {
         text: String,
     },
@@ -464,6 +470,7 @@ impl TimelineKind {
             Self::AssistantMessage { .. } => "assistant_message",
             Self::Classification { .. } => "classification",
             Self::ModelRouting { .. } => "model_routing",
+            Self::ProviderActivity { .. } => "provider_activity",
             Self::ReasoningSummary { .. } => "reasoning_summary",
             Self::WorkBreakdown { .. } => "work_breakdown",
             Self::PlanRevision { .. } => "plan_revision",

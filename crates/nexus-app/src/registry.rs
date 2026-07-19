@@ -21,7 +21,7 @@ pub enum CommandId {
     Setup,
     Init,
     Model,
-    Models,
+    Catalog,
     Login,
     Connect,
     Logout,
@@ -268,10 +268,10 @@ pub const COMMANDS: &[CommandDef] = &[
         requires_confirmation: false,
     },
     CommandDef {
-        id: CommandId::Models,
-        name: "models",
+        id: CommandId::Catalog,
+        name: "catalog",
         aliases: &[],
-        summary: "List configured models and their health",
+        summary: "Read-only provider catalog, availability, and health",
         usage: "[health]",
         category: CommandCategory::Models,
         interactive: true,
@@ -924,6 +924,14 @@ mod tests {
         assert_eq!(find("Note").map(|c| c.name), Some("btw"));
         assert_eq!(find("STATUS").map(|c| c.name), Some("status"));
         assert!(find("nope").is_none());
+        assert!(
+            find("models").is_none(),
+            "the removed command must not resolve"
+        );
+        assert_eq!(
+            find("catalog").map(|command| command.id),
+            Some(CommandId::Catalog)
+        );
     }
 
     #[test]
@@ -965,7 +973,7 @@ mod tests {
             "init",
             "connect",
             "model",
-            "models",
+            "catalog",
             "login",
             "logout",
             "agent",

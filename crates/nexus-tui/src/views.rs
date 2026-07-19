@@ -62,6 +62,12 @@ pub enum UiAction {
         provider: String,
         base_url: String,
         model: nexus_models::DiscoveredModel,
+        effort: Option<String>,
+    },
+    PickDiscoveredEffort {
+        provider: String,
+        base_url: String,
+        model: nexus_models::DiscoveredModel,
     },
     /// Open the reasoning-effort picker for a codex plan model (falls through
     /// to the plan default when the model reports no effort choices).
@@ -75,6 +81,7 @@ pub enum UiAction {
     },
     /// Probe one provider and reopen its submenu with fresh data.
     ProbeProvider(String),
+    OpenProvider(String),
     RenameSession {
         title: String,
     },
@@ -103,6 +110,7 @@ pub enum LoadRequest {
     Login,
     Connect,
     Model,
+    RefreshModel,
     Agents,
     Plan,
     Tasks,
@@ -1405,7 +1413,7 @@ mod tests {
         let refresh = UiAction::Load(LoadRequest::Model);
         let back = UiAction::RunCommand("profile".into());
         let mut menu = Menu::new(
-            "models",
+            "catalog",
             vec![
                 MenuItem::new("Alpha", UiAction::RunCommand("alpha".into()))
                     .id("model-alpha")

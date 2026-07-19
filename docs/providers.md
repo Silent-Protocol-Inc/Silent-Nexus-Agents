@@ -40,7 +40,7 @@ max_output_tokens = 4096
 
 ```sh
 export OPENAI_API_KEY=sk-...      # the value is registered with the redactor at startup
-snx models health                 # probes /v1/models with the bearer token
+snx catalog health                 # probes /v1/models with the bearer token
 snx run "summarize this repo" --agent researcher
 ```
 
@@ -170,8 +170,8 @@ unreadable GPU is reported as "none detected (CPU-only)", never guessed.
 
 ```sh
 snx doctor          # shows a "gpu / accelerator" line (vendor, name, VRAM, backend)
-snx models list     # adds an `accel` column: CUDA/ROCm/Metal/CPU for local, "remote" otherwise
-snx models health   # appends the per-model accelerator; for Ollama, the REAL VRAM offload
+snx catalog list     # adds an `accel` column: CUDA/ROCm/Metal/CPU for local, "remote" otherwise
+snx catalog health   # appends the per-model accelerator; for Ollama, the REAL VRAM offload
 ```
 
 What is detected:
@@ -184,7 +184,7 @@ What is detected:
   `CUDA`/`ROCm`/`Metal`/… when a local model can use the host GPU, `CPU` when a
   local model has no GPU, and `null` for remote endpoints (whose hardware the
   harness cannot observe — so it does not pretend to).
-- **Actual GPU offload (Ollama)** — `snx models health` queries Ollama's
+- **Actual GPU offload (Ollama)** — `snx catalog health` queries Ollama's
   `/api/ps` and reports whether the loaded model sits in VRAM
   (`loaded on GPU (N MiB VRAM)`), is split, or is CPU-only. This is the honest,
   per-model answer to "is it really running on the GPU?". llama.cpp's API does

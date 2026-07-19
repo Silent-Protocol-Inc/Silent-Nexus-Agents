@@ -89,9 +89,6 @@ impl OllamaProvider {
                     Role::Tool => "tool",
                 };
                 let mut v = json!({"role": role, "content": m.content});
-                if let Some(thinking) = m.provider_private.as_deref() {
-                    v["thinking"] = json!(thinking);
-                }
                 if !m.tool_calls.is_empty() {
                     v["tool_calls"] = json!(m
                         .tool_calls
@@ -222,7 +219,7 @@ impl OllamaProvider {
         output
     }
 
-    fn parse_stream_line(line: &str, retain_thinking: bool) -> Result<Vec<StreamEvent>> {
+    fn parse_stream_line(line: &str, _retain_thinking: bool) -> Result<Vec<StreamEvent>> {
         let value = serde_json::from_str::<Value>(line).map_err(|error| NexusError::Provider {
             provider: "ollama".into(),
             message: format!("invalid stream line: {error}"),
@@ -235,13 +232,6 @@ impl OllamaProvider {
         }
         let (content, calls) = Self::parse_message(&value);
         let mut events = Vec::new();
-        if retain_thinking {
-            if let Some(thinking) = value.pointer("/message/thinking").and_then(Value::as_str) {
-                if !thinking.is_empty() {
-                    events.push(StreamEvent::ProviderPrivateDelta(thinking.to_string()));
-                }
-            }
-        }
         if !content.is_empty() {
             events.push(StreamEvent::TextDelta(content));
         }
@@ -288,6 +278,14 @@ impl ModelProvider for OllamaProvider {
             context_limit_source: self.config.context_limit_source,
             output_limit_source: self.config.output_limit_source,
             reasoning_controls: true,
+            reasoning: ReasoningProfile {
+                supported_efforts: self.config.reasoning_effort.clone().into_iter().collect(),
+                default_effort: self.config.reasoning_effort.clone(),
+                control: crate::ReasoningControl::Optional,
+                mandatory: false,
+                provider_managed: false,
+                provenance: ReasoningProvenance::ConfiguredDefault,
+            },
             system_prompt: true,
             parallel_tool_calls: false,
             json_schema: false,
@@ -371,14 +369,7 @@ impl ModelProvider for OllamaProvider {
             } else {
                 "length".into()
             },
-            provider_private: self
-                .config
-                .reasoning_effort
-                .as_deref()
-                .filter(|effort| matches!(*effort, "on" | "low" | "medium" | "high"))
-                .and_then(|_| value.pointer("/message/thinking").and_then(Value::as_str))
-                .filter(|thinking| !thinking.is_empty())
-                .map(ToString::to_string),
+            provider_private: None,
         })
     }
 
@@ -607,17 +598,14 @@ mod tests {
     }
 
     #[test]
-    fn explicit_thinking_is_provider_private_only() {
+    fn explicit_thinking_is_dropped_at_the_adapter_boundary() {
         let events = OllamaProvider::parse_stream_line(
             r#"{"message":{"thinking":"private","content":"ready"},"done":true}"#,
             true,
         )
         .expect("line");
-        assert!(matches!(
-            &events[0],
-            StreamEvent::ProviderPrivateDelta(text) if text == "private"
-        ));
-        assert!(matches!(&events[1], StreamEvent::TextDelta(text) if text == "ready"));
+        assert!(matches!(&events[0], StreamEvent::TextDelta(text) if text == "ready"));
+        assert!(!format!("{events:?}").contains("private"));
     }
 
     #[test]

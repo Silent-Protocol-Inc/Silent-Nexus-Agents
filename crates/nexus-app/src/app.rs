@@ -132,6 +132,19 @@ impl App {
         let global_state_dir = paths.global_dir.join("state");
         nexus_core::permissions::repair_private_tree(&global_state_dir)?;
         let global_store = Store::open(&global_state_dir.join("nexus.db"))?;
+        // A `refreshing` row cannot survive a clean process lifetime. Convert
+        // leftovers before any new refresh generation begins; live concurrent
+        // refreshes are never mistaken for restart interruptions.
+        global_store.with_retry(|connection| {
+            connection.execute(
+                "UPDATE provider_catalog_cache
+                 SET health=CASE WHEN inventory_json='[]' THEN 'error' ELSE 'stale' END,
+                     last_error='refresh interrupted by restart', updated_at=?1
+                 WHERE health='refreshing'",
+                [nexus_core::now_rfc3339()],
+            )?;
+            Ok(())
+        })?;
 
         // Redactor learns every secret value the process can see so none of
         // them appear in logs, audit records, or terminal output.

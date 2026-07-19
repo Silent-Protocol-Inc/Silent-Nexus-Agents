@@ -191,6 +191,7 @@ impl ModelProvider for MockProvider {
             context_limit_source: nexus_core::config::LimitSource::ConfiguredConservative,
             output_limit_source: nexus_core::config::LimitSource::ConfiguredConservative,
             reasoning_controls: false,
+            reasoning: ReasoningProfile::default(),
             system_prompt: self.system_prompt,
             parallel_tool_calls: self.native_tool_calls,
             json_schema: true,

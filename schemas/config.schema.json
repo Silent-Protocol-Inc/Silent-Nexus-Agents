@@ -6,7 +6,7 @@
       "additionalProperties": false,
       "properties": {
         "default_agent": {
-          "default": "orchestrator",
+          "default": "nexus",
           "description": "Default agent profile used for plain `snx run`.",
           "type": "string"
         },
@@ -622,7 +622,7 @@
         }
       ],
       "default": {
-        "default_agent": "orchestrator",
+        "default_agent": "nexus",
         "no_color": false,
         "reduced_motion": false,
         "test_command": null,

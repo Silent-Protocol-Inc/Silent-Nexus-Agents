@@ -60,7 +60,7 @@ impl Default for GeneralConfig {
             theme: "nexus-dark".into(),
             no_color: false,
             reduced_motion: false,
-            default_agent: "orchestrator".into(),
+            default_agent: "nexus".into(),
             test_command: None,
         }
     }
@@ -474,6 +474,8 @@ pub struct ConfigPaths {
     /// (`/permissions`, `/sandbox`). Merged last so interactive choices win
     /// over every config file. Never holds secrets.
     pub managed_overrides_file: PathBuf,
+    /// Workspace-scoped managed overrides written by interactive `/config`.
+    pub workspace_overrides_file: PathBuf,
     /// Restricted credential/auth root (`auth/` under the global config dir):
     /// per-provider profiles, including the isolated Codex home.
     pub auth_dir: PathBuf,
@@ -492,6 +494,7 @@ impl ConfigPaths {
             global_file: global_dir.join("config.toml"),
             managed_models_file: global_dir.join("models.toml"),
             managed_overrides_file: global_dir.join("overrides.toml"),
+            workspace_overrides_file: project_dir.join("overrides.toml"),
             auth_dir: global_dir.join("auth"),
             global_dir,
             project_file: project_dir.join("config.toml"),
@@ -512,6 +515,7 @@ impl Config {
             &paths.managed_models_file,
             &paths.project_file,
             &paths.managed_overrides_file,
+            &paths.workspace_overrides_file,
         ] {
             if file.exists() {
                 let text = std::fs::read_to_string(file)?;
@@ -625,6 +629,69 @@ impl Config {
         }
         crate::atomic::atomic_write_private(&paths.managed_overrides_file, text.as_bytes())?;
         Ok(())
+    }
+
+    /// Atomically update one machine-managed scope without touching either
+    /// hand-written TOML file. Workspace overrides layer after global ones.
+    pub fn update_scoped_overrides(
+        paths: &ConfigPaths,
+        workspace: bool,
+        f: impl FnOnce(&mut toml::value::Table),
+    ) -> Result<()> {
+        let target = if workspace {
+            &paths.workspace_overrides_file
+        } else {
+            &paths.managed_overrides_file
+        };
+        let mut table = if target.exists() {
+            toml::from_str::<toml::value::Table>(&std::fs::read_to_string(target)?).map_err(
+                |error| NexusError::ConfigFile {
+                    path: target.display().to_string(),
+                    message: friendly_toml_error(&error),
+                },
+            )?
+        } else {
+            toml::value::Table::new()
+        };
+        f(&mut table);
+
+        let mut effective = toml::Value::Table(Default::default());
+        for file in [
+            &paths.global_file,
+            &paths.managed_models_file,
+            &paths.project_file,
+            &paths.managed_overrides_file,
+            &paths.workspace_overrides_file,
+        ] {
+            if file == target || !file.exists() {
+                continue;
+            }
+            let parsed: toml::Value =
+                toml::from_str(&std::fs::read_to_string(file)?).map_err(|error| {
+                    NexusError::ConfigFile {
+                        path: file.display().to_string(),
+                        message: friendly_toml_error(&error),
+                    }
+                })?;
+            merge_toml(&mut effective, migrate_value(parsed, file)?);
+        }
+        merge_toml(&mut effective, toml::Value::Table(table.clone()));
+        apply_env_overrides(&mut effective);
+        let candidate: Config = effective
+            .try_into()
+            .map_err(|error| NexusError::Config(friendly_toml_error_de(&error)))?;
+        candidate.validate()?;
+
+        let mut text =
+            String::from("# Managed by snx `/config`; hand-written TOML is never replaced.\n");
+        text.push_str(
+            &toml::to_string_pretty(&toml::Value::Table(table))
+                .map_err(|error| NexusError::Config(format!("serializing overrides: {error}")))?,
+        );
+        if let Some(parent) = target.parent() {
+            crate::permissions::repair_private_tree(parent)?;
+        }
+        crate::atomic::atomic_write_private(target, text.as_bytes())
     }
 
     /// Update one read-format rule without replacing unrelated hand-written
@@ -989,6 +1056,7 @@ mod tests {
             state_dir: dir.path().join(".nexus/state"),
             managed_models_file: dir.path().join("models.toml"),
             managed_overrides_file: dir.path().join("overrides.toml"),
+            workspace_overrides_file: dir.path().join(".nexus/overrides.toml"),
             auth_dir: dir.path().join("auth"),
             ui_state_file: dir.path().join("ui-state.json"),
         };

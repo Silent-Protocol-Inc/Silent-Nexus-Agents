@@ -89,6 +89,7 @@ pub async fn list_models(
                 max_output_tokens: None,
                 context_limit_source: None,
                 output_limit_source: None,
+                reasoning: None,
             })
         })
         .collect::<Vec<_>>();
@@ -183,6 +184,9 @@ impl AnthropicProvider {
         if !request.stop.is_empty() {
             body["stop_sequences"] = json!(request.stop);
         }
+        if let Some(effort) = self.config.reasoning_effort.as_deref() {
+            body["output_config"] = json!({"effort": effort});
+        }
         if !request.tools.is_empty() && self.capabilities().native_tool_calls {
             body["tools"] = json!(request
                 .tools
@@ -225,7 +229,20 @@ impl ModelProvider for AnthropicProvider {
             max_output_tokens: self.config.max_output_tokens,
             context_limit_source: self.config.context_limit_source,
             output_limit_source: self.config.output_limit_source,
-            reasoning_controls: false,
+            reasoning_controls: self.config.reasoning_effort.is_some(),
+            reasoning: self
+                .config
+                .reasoning_effort
+                .as_ref()
+                .map(|effort| ReasoningProfile {
+                    supported_efforts: vec![effort.clone()],
+                    default_effort: Some(effort.clone()),
+                    control: ReasoningControl::Optional,
+                    mandatory: false,
+                    provider_managed: false,
+                    provenance: ReasoningProvenance::ConfiguredDefault,
+                })
+                .unwrap_or_default(),
             system_prompt: true,
             parallel_tool_calls: self.config.native_tool_calls.unwrap_or(true),
             json_schema: false,
@@ -632,5 +649,20 @@ mod tests {
         assert_eq!(completion.content, "read it");
         assert_eq!(completion.tool_calls[0].name, "fs_read");
         assert_eq!(completion.usage.prompt_tokens, 10);
+    }
+
+    #[test]
+    fn native_effort_uses_output_config() {
+        let config = ModelConfig {
+            provider: "anthropic".into(),
+            base_url: ANTHROPIC_DEFAULT.into(),
+            model: "exact-model".into(),
+            resolved_api_key: Some(nexus_core::SecretString::new("test-only")),
+            reasoning_effort: Some("medium".into()),
+            ..Default::default()
+        };
+        let provider = AnthropicProvider::new(&config).expect("provider");
+        let body = provider.build_body(&CompletionRequest::default(), false);
+        assert_eq!(body["output_config"]["effort"], "medium");
     }
 }

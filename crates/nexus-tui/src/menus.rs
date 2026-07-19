@@ -304,7 +304,7 @@ pub fn connect_menu(entries: &[ProviderEntry]) -> Menu {
             let endpoint = entry.endpoint.as_deref().unwrap_or("not configured");
             let mut item = MenuItem::new(
                 format!("{} {}", entry.marker(), entry.label),
-                UiAction::ProbeProvider(entry.id.clone()),
+                UiAction::OpenProvider(entry.id.clone()),
             )
             .id(format!("connection:{}", entry.id))
             .category(if entry.local { "local" } else { "remote" })
@@ -493,6 +493,7 @@ pub fn provider_key_input(provider: &str) -> SecretInput {
 // --------------------------------------------------------------------- model
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConfiguredModelCard {
     pub name: String,
     pub provider: String,
@@ -501,6 +502,7 @@ pub struct ConfiguredModelCard {
     pub availability: String,
 }
 
+#[allow(dead_code)]
 fn capability_marker(value: bool) -> &'static str {
     if value {
         "yes"
@@ -509,6 +511,7 @@ fn capability_marker(value: bool) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 fn configured_model_detail(card: &ConfiguredModelCard) -> String {
     let Some(capabilities) = card.capabilities.as_ref() else {
         return format!(
@@ -541,6 +544,7 @@ fn configured_model_detail(card: &ConfiguredModelCard) -> String {
 /// entries, the codex plan (when connected), and reachable local runtimes.
 /// Providers that need connecting first point at /connect instead of faking
 /// availability.
+#[allow(dead_code)]
 pub fn model_menu(
     configured: &[ConfiguredModelCard],
     entries: &[ProviderEntry],
@@ -617,16 +621,30 @@ pub fn model_menu(
                 items.push(
                     MenuItem::new(
                         format!("  {}", m.id),
-                        UiAction::UseDiscovered {
-                            provider: e.id.clone(),
-                            base_url: e.endpoint.clone().unwrap_or_default(),
-                            model: m.clone(),
+                        if m.reasoning
+                            .as_ref()
+                            .is_some_and(|profile| !profile.supported_efforts.is_empty())
+                        {
+                            UiAction::PickDiscoveredEffort {
+                                provider: e.id.clone(),
+                                base_url: e.endpoint.clone().unwrap_or_default(),
+                                model: m.clone(),
+                            }
+                        } else {
+                            UiAction::UseDiscovered {
+                                provider: e.id.clone(),
+                                base_url: e.endpoint.clone().unwrap_or_default(),
+                                model: m.clone(),
+                                effort: None,
+                            }
                         },
                     )
                     .badge(e.label.clone())
                     .detail(format!(
                         "discovered on {}",
-                        e.endpoint.as_deref().unwrap_or("endpoint")
+                        nexus_app::providers::redacted_endpoint_identity(e.endpoint.as_deref())
+                            .as_deref()
+                            .unwrap_or("endpoint")
                     )),
                 );
             }
@@ -657,8 +675,44 @@ pub fn model_menu(
         .route("/model")
         .searchable();
     menu.hint = "Enter select · Ctrl+R refresh · Esc close · /connect adds providers".into();
-    menu.on_refresh = Some(UiAction::Load(LoadRequest::Model));
+    menu.on_refresh = Some(UiAction::Load(LoadRequest::RefreshModel));
     menu
+}
+
+/// Provider-first `/model` root. Inventories remain cached until the operator
+/// explicitly refreshes, so opening the picker never invents model rows.
+pub fn model_provider_menu(entries: &[ProviderEntry], active_model: &str) -> Menu {
+    let mut items: Vec<MenuItem> = entries
+        .iter()
+        .filter(|entry| entry.authenticated || !entry.configured_models.is_empty())
+        .map(|entry| {
+            MenuItem::new(
+                format!("{} {}", entry.marker(), entry.label),
+                UiAction::ProbeProvider(entry.id.clone()),
+            )
+            .id(format!("model-provider:{}", entry.id))
+            .category(if entry.local { "local" } else { "remote" })
+            .detail(entry.summary())
+        })
+        .collect();
+    items.push(
+        MenuItem::new(
+            "Refresh all providers",
+            UiAction::Load(LoadRequest::RefreshModel),
+        )
+        .detail("concurrently refresh configured endpoints and authenticated providers"),
+    );
+    items.push(
+        MenuItem::new(
+            "Use config routing (clear pin)",
+            UiAction::RunCommand("model clear".into()),
+        )
+        .detail(format!("currently active: {active_model}")),
+    );
+    Menu::new("model — choose provider", items)
+        .route("/model")
+        .searchable()
+        .hint("Enter provider · then model, effort, and Use/Test · Ctrl+R refresh all")
 }
 
 /// Reasoning-effort picker for one codex plan model.
@@ -686,6 +740,36 @@ pub fn effort_menu(model: &nexus_app::codex::PlanModel) -> Menu {
         .parent("/model", UiAction::Load(LoadRequest::Model));
     menu.hint = "Enter selects model + effort · Esc back".into();
     menu
+}
+
+pub fn discovered_effort_menu(
+    provider: &str,
+    base_url: &str,
+    model: &nexus_models::DiscoveredModel,
+) -> Menu {
+    let profile = model.reasoning.clone().unwrap_or_default();
+    let items = profile
+        .supported_efforts
+        .iter()
+        .map(|effort| {
+            let mut item = MenuItem::new(
+                effort.clone(),
+                UiAction::UseDiscovered {
+                    provider: provider.into(),
+                    base_url: base_url.into(),
+                    model: model.clone(),
+                    effort: Some(effort.clone()),
+                },
+            );
+            if profile.default_effort.as_deref() == Some(effort) {
+                item = item.badge("default");
+            }
+            item.detail(format!("reasoning metadata: {:?}", profile.provenance))
+        })
+        .collect();
+    Menu::new(format!("{} — reasoning effort", model.id), items)
+        .parent("/model", UiAction::Load(LoadRequest::Model))
+        .hint("Enter continues to Use/Test actions · Esc back")
 }
 
 /// Submenu for one probed provider: its models and setup actions.
@@ -716,7 +800,11 @@ pub fn provider_menu(
 
     // Discovered (unconfigured) models: endpoint probe results, or for Codex
     // the models on the operator's plan.
-    if let EndpointState::Connected { models, latency_ms } = &entry.state {
+    if let EndpointState::Connected { models, latency_ms }
+    | EndpointState::Stale {
+        models, latency_ms, ..
+    } = &entry.state
+    {
         let plan_default = if entry.id == "codex" {
             nexus_app::codex::cached_default_model()
         } else {
@@ -749,11 +837,22 @@ pub fn provider_menu(
                 UiAction::PickCodexEffort {
                     model_id: m.id.clone(),
                 }
+            } else if m
+                .reasoning
+                .as_ref()
+                .is_some_and(|profile| !profile.supported_efforts.is_empty())
+            {
+                UiAction::PickDiscoveredEffort {
+                    provider: entry.id.clone(),
+                    base_url: entry.endpoint.clone().unwrap_or_default(),
+                    model: m.clone(),
+                }
             } else {
                 UiAction::UseDiscovered {
                     provider: entry.id.clone(),
                     base_url: entry.endpoint.clone().unwrap_or_default(),
                     model: m.clone(),
+                    effort: None,
                 }
             };
             items.push(
@@ -1575,7 +1674,11 @@ pub fn config_menu() -> Menu {
     Menu::new(
         "configuration hub",
         vec![
-            MenuItem::new("Models", UiAction::Load(LoadRequest::Model))
+            MenuItem::new("General / UI…", UiAction::InsertInput("/config set workspace general.theme \"nexus-dark\"".into()))
+                .detail("typed theme, color, motion, default agent, and test command; edit the inserted path/value"),
+            MenuItem::new("Agents / routing…", UiAction::InsertInput("/config set workspace routing.coding \"model-name\"".into()))
+                .detail("simple, coding, planning, and fallback routes; reset inherits"),
+            MenuItem::new("Catalog", UiAction::RunCommand("catalog".into()))
                 .detail("provider/model selection and endpoint health"),
             MenuItem::new("Permissions", UiAction::Load(LoadRequest::Permissions))
                 .detail("read-only, default, auto-edit, full-access"),
@@ -1583,6 +1686,14 @@ pub fn config_menu() -> Menu {
                 .detail("backend, isolation, and network mode"),
             MenuItem::new("Memory", UiAction::Load(LoadRequest::Memory))
                 .detail("approved durable project/global memory"),
+            MenuItem::new("Web…", UiAction::InsertInput("/config set workspace web.enabled true".into()))
+                .detail("typed web enablement and safe limits; weakening changes require confirmation"),
+            MenuItem::new("Budgets…", UiAction::InsertInput("/config set workspace limits.max_steps_per_turn 24".into()))
+                .detail("turn, token, cost, runtime, memory, and delegation budgets"),
+            MenuItem::new("MCP…", UiAction::Load(LoadRequest::Mcp))
+                .detail("servers, transport, trust, timeouts, and allowlisted environment names"),
+            MenuItem::new("Inherit / reset override…", UiAction::InsertInput("/config reset workspace general.theme".into()))
+                .detail("workspace or global scope; removes only the managed override"),
             MenuItem::new("Persona", UiAction::Load(LoadRequest::Persona))
                 .detail("behavior cards; never override safety"),
             MenuItem::new("Profile", UiAction::Load(LoadRequest::Profile))
@@ -1602,7 +1713,7 @@ pub fn config_menu() -> Menu {
     )
     .route("/config")
     .branded(BrandVariant::Compact)
-    .hint("Managed choices are written to override layers; hand-written config is preserved")
+    .hint("Edit typed path/value · workspace|global scope · reset inherits · hand-written config is preserved")
 }
 
 pub fn connectors_menu(candidates: &[nexus_app::connectors::ConnectorCandidate]) -> Menu {

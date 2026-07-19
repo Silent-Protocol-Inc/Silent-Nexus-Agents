@@ -10,6 +10,7 @@ use nexus_core::config::ModelConfig;
 use nexus_core::config::{LimitMode, LimitSource};
 use nexus_core::{NexusError, Result, SecretString};
 use nexus_models::{DiscoveredModel, ProbeError};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -40,7 +41,7 @@ const OPENAI_PRESETS: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// What a provider needs before it can serve completions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum AuthRequirement {
     None,
     ApiKey,
@@ -62,12 +63,18 @@ impl AuthRequirement {
 }
 
 /// Probe outcome for one provider endpoint.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum EndpointState {
     /// Reachable; models enumerated.
     Connected {
         models: Vec<DiscoveredModel>,
         latency_ms: u64,
+    },
+    /// The last successful inventory retained after a failed refresh.
+    Stale {
+        models: Vec<DiscoveredModel>,
+        latency_ms: u64,
+        error: String,
     },
     /// Probe ran and failed (classified).
     Unreachable(String),
@@ -76,7 +83,7 @@ pub enum EndpointState {
 }
 
 /// One row of the provider list.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ProviderEntry {
     /// Stable id: `ollama`, `llamacpp`, `codex`, `openai`, `openrouter`,
     /// `custom:<name>`, `claude-plan`, `anthropic`, and API presets.
@@ -88,10 +95,180 @@ pub struct ProviderEntry {
     pub auth: AuthRequirement,
     pub auth_state: String,
     pub authenticated: bool,
+    #[serde(serialize_with = "serialize_redacted_endpoint")]
     pub endpoint: Option<String>,
     pub state: EndpointState,
     /// Config entries (`[models.*]`) backed by this provider.
     pub configured_models: Vec<String>,
+}
+
+pub fn redacted_endpoint_identity(endpoint: Option<&str>) -> Option<String> {
+    endpoint.map(|raw| {
+        url::Url::parse(raw)
+            .map(|mut parsed| {
+                let _ = parsed.set_username("");
+                let _ = parsed.set_password(None);
+                parsed.set_query(None);
+                parsed.set_fragment(None);
+                parsed.as_str().trim_end_matches('/').to_string()
+            })
+            .unwrap_or_else(|_| "<invalid endpoint>".into())
+    })
+}
+
+fn serialize_redacted_endpoint<S>(
+    endpoint: &Option<String>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serde::Serialize::serialize(&redacted_endpoint_identity(endpoint.as_deref()), serializer)
+}
+
+const CATALOG_FRESH_SECS: i64 = 15 * 60;
+
+fn endpoint_fingerprint(endpoint: Option<&str>) -> String {
+    let normalized = endpoint
+        .and_then(|raw| url::Url::parse(raw).ok())
+        .map(|mut parsed| {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.as_str().trim_end_matches('/').to_ascii_lowercase()
+        })
+        .unwrap_or_else(|| {
+            endpoint
+                .unwrap_or("adapter-managed")
+                .trim_end_matches('/')
+                .to_ascii_lowercase()
+        });
+    hex::encode(Sha256::digest(normalized.as_bytes()))
+}
+
+fn auth_profile_identity(entry: &ProviderEntry) -> String {
+    // This is deliberately an identity label, never key material. Custom
+    // profile names and preset provider ids are non-secret configuration.
+    entry
+        .id
+        .strip_prefix("custom:")
+        .unwrap_or(&entry.id)
+        .to_string()
+}
+
+fn instance_key(entry: &ProviderEntry) -> String {
+    format!(
+        "{}:{}:{}",
+        entry.id,
+        endpoint_fingerprint(entry.endpoint.as_deref()),
+        auth_profile_identity(entry)
+    )
+}
+
+fn load_cached_state(app: &App, entry: &ProviderEntry) -> Result<Option<EndpointState>> {
+    let key = instance_key(entry);
+    app.global_store.with_retry(|connection| {
+        let mut statement = connection.prepare(
+            "SELECT inventory_json, health, latency_ms, last_success_at, last_error
+             FROM provider_catalog_cache WHERE instance_key=?1",
+        )?;
+        let mut rows = statement.query([&key])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let inventory: String = row.get(0)?;
+        let health: String = row.get(1)?;
+        let latency: Option<u64> = row.get(2)?;
+        let last_success: Option<String> = row.get(3)?;
+        let error: Option<String> = row.get(4)?;
+        let models: Vec<DiscoveredModel> = serde_json::from_str(&inventory)
+            .map_err(|e| NexusError::other(format!("provider catalog cache: {e}")))?;
+        let age = last_success
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|stamp| {
+                chrono::Utc::now()
+                    .signed_duration_since(stamp.with_timezone(&chrono::Utc))
+                    .num_seconds()
+            })
+            .unwrap_or(i64::MAX);
+        let latency_ms = latency.unwrap_or_default();
+        let stale_reason = error.unwrap_or_else(|| {
+            if age > CATALOG_FRESH_SECS {
+                format!("cached inventory is {}s old", age.max(0))
+            } else {
+                "refresh interrupted".into()
+            }
+        });
+        let state = match health.as_str() {
+            "healthy" if age <= CATALOG_FRESH_SECS => {
+                EndpointState::Connected { models, latency_ms }
+            }
+            "healthy" | "stale" | "refreshing" if !models.is_empty() => EndpointState::Stale {
+                models,
+                latency_ms,
+                error: stale_reason,
+            },
+            "error" | "refreshing" => EndpointState::Unreachable(stale_reason),
+            _ => return Ok(None),
+        };
+        Ok(Some(state))
+    })
+}
+
+fn begin_refresh(app: &App, entry: &ProviderEntry) -> Result<i64> {
+    let key = instance_key(entry);
+    let provider = entry.id.clone();
+    let fingerprint = endpoint_fingerprint(entry.endpoint.as_deref());
+    let auth_profile = auth_profile_identity(entry);
+    app.global_store.with_retry(|connection| {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO provider_catalog_cache
+             (instance_key, provider_id, endpoint_fingerprint, auth_profile_id, health, refresh_generation, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'refreshing', 1, ?5)
+             ON CONFLICT(instance_key) DO UPDATE SET
+               health='refreshing', refresh_generation=refresh_generation+1, updated_at=excluded.updated_at, last_error=NULL",
+            rusqlite::params![key, provider, fingerprint, auth_profile, nexus_core::now_rfc3339()],
+        )?;
+        let generation = transaction.query_row(
+            "SELECT refresh_generation FROM provider_catalog_cache WHERE instance_key=?1",
+            [&key], |row| row.get(0),
+        )?;
+        transaction.commit()?;
+        Ok(generation)
+    })
+}
+
+fn commit_refresh(
+    app: &App,
+    entry: &ProviderEntry,
+    generation: i64,
+    state: &EndpointState,
+) -> Result<bool> {
+    let key = instance_key(entry);
+    app.global_store.with_retry(|connection| {
+        let now = nexus_core::now_rfc3339();
+        let changed = match state {
+            EndpointState::Connected { models, latency_ms } => connection.execute(
+                "UPDATE provider_catalog_cache SET inventory_json=?3, health='healthy', latency_ms=?4,
+                 last_success_at=?5, updated_at=?5, last_error=NULL WHERE instance_key=?1 AND refresh_generation=?2",
+                rusqlite::params![key, generation, serde_json::to_string(models)?, latency_ms, now],
+            )?,
+            EndpointState::Unreachable(error) | EndpointState::NotProbed(error) => connection.execute(
+                "UPDATE provider_catalog_cache SET health=CASE WHEN inventory_json='[]' THEN 'error' ELSE 'stale' END,
+                 updated_at=?3, last_error=?4 WHERE instance_key=?1 AND refresh_generation=?2",
+                rusqlite::params![key, generation, now, app.redactor.redact(error)],
+            )?,
+            EndpointState::Stale { error, .. } => connection.execute(
+                "UPDATE provider_catalog_cache SET health='stale', updated_at=?3, last_error=?4
+                 WHERE instance_key=?1 AND refresh_generation=?2",
+                rusqlite::params![key, generation, now, app.redactor.redact(error)],
+            )?,
+        };
+        Ok(changed == 1)
+    })
 }
 
 impl ProviderEntry {
@@ -113,6 +290,9 @@ impl ProviderEntry {
         let state = match &self.state {
             EndpointState::Connected { models, .. } => {
                 format!("connected, {} model(s)", models.len())
+            }
+            EndpointState::Stale { models, error, .. } => {
+                format!("stale, {} model(s) · {error}", models.len())
             }
             EndpointState::Unreachable(reason) => reason.clone(),
             EndpointState::NotProbed(reason) => reason.clone(),
@@ -369,6 +549,11 @@ pub async fn catalog(app: &App) -> Vec<ProviderEntry> {
         });
     }
 
+    for entry in &mut out {
+        if let Ok(Some(state)) = load_cached_state(app, entry) {
+            entry.state = state;
+        }
+    }
     out
 }
 
@@ -382,9 +567,35 @@ pub async fn refresh_catalog(app: &App) -> Vec<ProviderEntry> {
     let mut refreshed: Vec<ProviderEntry> =
         stream::iter(entries.into_iter().map(|mut entry| async move {
             let should_probe =
-                !entry.configured_models.is_empty() || (entry.id == "codex" && entry.authenticated);
+                !entry.configured_models.is_empty() || (entry.authenticated && !entry.local);
             if should_probe {
-                entry.state = probe_provider(app, &entry).await;
+                let generation = begin_refresh(app, &entry).ok();
+                let refreshed = probe_provider(app, &entry).await;
+                entry.state = match refreshed {
+                    EndpointState::Unreachable(error) => load_cached_state(app, &entry)
+                        .ok()
+                        .flatten()
+                        .and_then(|cached| match cached {
+                            EndpointState::Connected { models, latency_ms }
+                            | EndpointState::Stale {
+                                models, latency_ms, ..
+                            } => Some(EndpointState::Stale {
+                                models,
+                                latency_ms,
+                                error: error.clone(),
+                            }),
+                            _ => None,
+                        })
+                        .unwrap_or(EndpointState::Unreachable(error)),
+                    state => state,
+                };
+                if let Some(generation) = generation {
+                    if !commit_refresh(app, &entry, generation, &entry.state).unwrap_or(false) {
+                        if let Ok(Some(newer)) = load_cached_state(app, &entry) {
+                            entry.state = newer;
+                        }
+                    }
+                }
             }
             entry
         }))
@@ -394,6 +605,68 @@ pub async fn refresh_catalog(app: &App) -> Vec<ProviderEntry> {
     refreshed.sort_by(|left, right| left.id.cmp(&right.id));
     let _ = reconcile_managed_inventory(app, &refreshed);
     refreshed
+}
+
+pub async fn catalog_report(app: &App) -> Report {
+    let entries = catalog(app).await;
+    let active = app.read_ui_state(|state| state.active_model.clone());
+    let mut report = Report::new("model catalog")
+        .field("active session pin", active.as_deref().unwrap_or("none"))
+        .field(
+            "routing simple",
+            app.config.routing.simple.as_deref().unwrap_or("inherited"),
+        )
+        .field(
+            "routing coding",
+            app.config.routing.coding.as_deref().unwrap_or("inherited"),
+        )
+        .field(
+            "routing planning",
+            app.config
+                .routing
+                .planning
+                .as_deref()
+                .unwrap_or("inherited"),
+        )
+        .field(
+            "routing fallback",
+            app.config.routing.fallback.as_deref().unwrap_or("none"),
+        );
+    for entry in entries {
+        report = report.header(format!("{} {}", entry.marker(), entry.label));
+        report = report.line(entry.summary());
+        let inventory = match &entry.state {
+            EndpointState::Connected { models, .. } | EndpointState::Stale { models, .. } => {
+                Some(models)
+            }
+            _ => None,
+        };
+        for configured_name in &entry.configured_models {
+            if let Some(configured) = app.config.models.get(configured_name) {
+                let discovered = inventory
+                    .and_then(|models| models.iter().find(|model| model.id == configured.model));
+                let availability = if discovered.is_some() {
+                    "available"
+                } else {
+                    "unavailable"
+                };
+                let reasoning = discovered
+                    .and_then(|model| model.reasoning.as_ref())
+                    .map(|profile| {
+                        format!(
+                            "reasoning {:?} · {:?}",
+                            profile.supported_efforts, profile.provenance
+                        )
+                    })
+                    .unwrap_or_else(|| "reasoning default only".into());
+                report = report.line(format!(
+                    "{configured_name} · {} · {availability} · {reasoning}",
+                    configured.model
+                ));
+            }
+        }
+    }
+    report
 }
 
 fn reconcile_managed_inventory(app: &App, entries: &[ProviderEntry]) -> Result<()> {
@@ -511,6 +784,22 @@ pub async fn probe_provider(app: &App, entry: &ProviderEntry) -> EndpointState {
                             max_output_tokens: None,
                             context_limit_source: None,
                             output_limit_source: None,
+                            reasoning: Some(nexus_models::ReasoningProfile {
+                                supported_efforts: configured
+                                    .reasoning_effort
+                                    .clone()
+                                    .into_iter()
+                                    .collect(),
+                                default_effort: configured.reasoning_effort.clone(),
+                                control: if configured.reasoning_effort.is_some() {
+                                    nexus_models::ReasoningControl::Optional
+                                } else {
+                                    nexus_models::ReasoningControl::ProviderManaged
+                                },
+                                mandatory: false,
+                                provider_managed: configured.reasoning_effort.is_none(),
+                                provenance: nexus_models::ReasoningProvenance::InstalledCli,
+                            }),
                         })
                         .collect(),
                     latency_ms: started.elapsed().as_millis() as u64,
@@ -551,6 +840,22 @@ pub async fn probe_provider(app: &App, entry: &ProviderEntry) -> EndpointState {
                             output_limit_source: m
                                 .max_output_tokens
                                 .map(|_| LimitSource::ProviderMetadata),
+                            reasoning: Some(nexus_models::ReasoningProfile {
+                                supported_efforts: m
+                                    .reasoning_efforts
+                                    .iter()
+                                    .map(|effort| effort.effort.clone())
+                                    .collect(),
+                                default_effort: m.default_reasoning_effort.clone(),
+                                control: if m.default_reasoning_effort.is_some() {
+                                    nexus_models::ReasoningControl::Mandatory
+                                } else {
+                                    nexus_models::ReasoningControl::ProviderManaged
+                                },
+                                mandatory: true,
+                                provider_managed: m.default_reasoning_effort.is_none(),
+                                provenance: nexus_models::ReasoningProvenance::ProviderMetadata,
+                            }),
                         })
                         .collect(),
                     latency_ms: started.elapsed().as_millis() as u64,
@@ -796,6 +1101,16 @@ pub fn save_discovered_model(
     base_url: &str,
     discovered: &DiscoveredModel,
 ) -> Result<String> {
+    save_discovered_model_with_effort(app, provider_id, base_url, discovered, None)
+}
+
+pub fn save_discovered_model_with_effort(
+    app: &App,
+    provider_id: &str,
+    base_url: &str,
+    discovered: &DiscoveredModel,
+    effort: Option<&str>,
+) -> Result<String> {
     let mut managed = nexus_core::config::Config::load_managed_models(&app.paths)?;
     let model_id = discovered.id.as_str();
     let mut name = sanitize_model_name(model_id);
@@ -833,6 +1148,7 @@ pub fn save_discovered_model(
         limit_mode: LimitMode::Auto,
         ..Default::default()
     };
+    model.reasoning_effort = effort.map(str::to_string);
     apply_effective_limits(&mut model, discovered);
     if let Some(env_var) = preset_env(provider_id) {
         model.api_key_env = Some(env_var.into());
@@ -934,6 +1250,22 @@ pub fn save_codex_model(app: &App, model_id: &str, effort: Option<&str>) -> Resu
             output_limit_source: plan
                 .max_output_tokens
                 .map(|_| LimitSource::ProviderMetadata),
+            reasoning: Some(nexus_models::ReasoningProfile {
+                supported_efforts: plan
+                    .reasoning_efforts
+                    .iter()
+                    .map(|effort| effort.effort.clone())
+                    .collect(),
+                default_effort: plan.default_reasoning_effort.clone(),
+                control: if plan.default_reasoning_effort.is_some() {
+                    nexus_models::ReasoningControl::Mandatory
+                } else {
+                    nexus_models::ReasoningControl::ProviderManaged
+                },
+                mandatory: true,
+                provider_managed: plan.default_reasoning_effort.is_none(),
+                provenance: nexus_models::ReasoningProvenance::ProviderMetadata,
+            }),
         };
         apply_effective_limits(&mut configured, &discovered);
     }
@@ -1058,7 +1390,7 @@ pub async fn test_model(app: &App, name: &str) -> Result<Report> {
     Ok(r)
 }
 
-/// Render the `snx models list`-style table from config (shared).
+/// Render the `snx catalog list`-style table from config (shared).
 pub fn models_report(app: &App) -> Report {
     if app.config.models.is_empty() {
         return Report::new("models")
@@ -1199,5 +1531,18 @@ mod tests {
             "llama3_1_8b_instruct"
         );
         assert_eq!(sanitize_model_name("///"), "model");
+    }
+
+    #[test]
+    fn endpoint_fingerprint_drops_credentials_and_sensitive_query_values() {
+        let first = endpoint_fingerprint(Some(
+            "https://alice:secret@example.test/v1?api_key=first#fragment",
+        ));
+        let second =
+            endpoint_fingerprint(Some("https://bob:different@example.test/v1?token=second"));
+        assert_eq!(first, second);
+        assert!(!first.contains("alice"));
+        assert!(!first.contains("secret"));
+        assert_eq!(first.len(), 64);
     }
 }

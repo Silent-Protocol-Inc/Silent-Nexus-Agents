@@ -50,6 +50,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0008_workspace_approval_grants",
         include_str!("../../../migrations/0008_workspace_approval_grants.sql"),
     ),
+    (
+        "0009_provider_catalog_cache",
+        include_str!("../../../migrations/0009_provider_catalog_cache.sql"),
+    ),
 ];
 pub const MIGRATION_COUNT: usize = MIGRATIONS.len();
 
@@ -534,6 +538,7 @@ mod tests {
             "harness_profile_facts",
             "harness_identity_conflicts",
             "harness_memories",
+            "provider_catalog_cache",
             "harness_persona_versions",
             "harness_persona_assignments",
             "harness_agent_definitions",

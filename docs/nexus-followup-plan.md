@@ -1,25 +1,26 @@
 # NEXUS follow-up plan
 
-The following work remains after v1.3.0 and is intentionally isolated from the
-completed input, model-limit, provider-refresh, and file-format permission work.
+The work isolated after v1.3.0 has been delivered in v2.0.0. This note records
+the closed items for provenance.
 
-## Timeline reasoning UX
+## Timeline reasoning UX — delivered
 
-- Add a selectable `Thinking…` row under the main execution timeline. `Ctrl+E`
-  expands safe summaries and operational status only; hidden chain-of-thought
-  is never displayed or persisted.
+- Selectable reasoning rows expand safe summaries and operational status only;
+  hidden chain-of-thought is never displayed or persisted. Covered by
+  `thinking_toggle_hides_only_reasoning_not_operational_events`.
 
-## Configuration
+## Configuration — delivered
 
-- Complete the interactive `/config` experience.
-- Introduce a default unrestricted `nexus` agent through a separately reviewed
-  permission and safety design.
+- Interactive configuration experience completed.
+- Default unrestricted general-purpose `nexus` role shipped as the fresh-config
+  default while retaining policy, approval, sandbox, redaction, and audit
+  enforcement.
 
-## Branding
+## Branding — delivered
 
-- Finish the exact five-row `NEXUS` wordmark.
-- Make the `◤◢` identity responsive across terminal widths.
-- Resolve the current branding compile gaps and complete its tests.
+- Responsive `NEXUS` wordmark and `◤◢` identity render across the required
+  terminal widths without compile gaps. Covered by the render snapshot and
+  branding tests.
 
-The six-file branding snapshot is preserved locally on
-`wip/branding-followup-2026-07-18` and is not part of v1.3.0.
+The `wip/branding-followup-2026-07-18` branch is superseded by the delivered
+branding on `main`.

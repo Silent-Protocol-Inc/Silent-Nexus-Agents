@@ -850,6 +850,17 @@ fn handle_key(
     }
 
     if st.focus == Focus::Timeline {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'))
+        {
+            if st
+                .selected_timeline_event()
+                .is_some_and(|event| matches!(event.kind, TimelineKind::ProviderActivity { .. }))
+            {
+                activate_selected_event(st, app);
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('k') | KeyCode::Up => {
                 select_previous_event(st);
@@ -2169,7 +2180,14 @@ fn handle_action(
             provider,
             base_url,
             model,
-        } => match nexus_app::providers::save_discovered_model(app, &provider, &base_url, &model) {
+            effort,
+        } => match nexus_app::providers::save_discovered_model_with_effort(
+            app,
+            &provider,
+            &base_url,
+            &model,
+            effort.as_deref(),
+        ) {
             Ok(name) => {
                 let _ = app.update_ui_state({
                     let name = name.clone();
@@ -2185,6 +2203,17 @@ fn handle_action(
             }
             Err(e) => st.system_sev(format!("model save: {e}"), Sev::Err),
         },
+        UiAction::PickDiscoveredEffort {
+            provider,
+            base_url,
+            model,
+        } => {
+            push_menu(
+                st,
+                app,
+                menus::discovered_effort_menu(&provider, &base_url, &model),
+            );
+        }
         UiAction::PickCodexEffort { model_id } => {
             let plan = nexus_app::codex::cached_plan_models();
             match plan.iter().find(|m| m.id == model_id) {
@@ -2257,6 +2286,34 @@ fn handle_action(
                         configured,
                     },
                 });
+            });
+        }
+        UiAction::OpenProvider(id) => {
+            let app2 = app.clone();
+            let tx = ui_tx.clone();
+            let generation = st.generation;
+            st.busy += 1;
+            tokio::spawn(async move {
+                let entries = nexus_app::providers::catalog(&app2).await;
+                if let Some(entry) = entries.into_iter().find(|entry| entry.id == id) {
+                    let configured = entry
+                        .configured_models
+                        .iter()
+                        .filter_map(|name| {
+                            app2.config
+                                .models
+                                .get(name)
+                                .map(|model| (name.clone(), model.model.clone()))
+                        })
+                        .collect();
+                    let _ = tx.send(UiMsg::Loaded {
+                        generation,
+                        data: Loaded::Provider {
+                            entry: Box::new(entry),
+                            configured,
+                        },
+                    });
+                }
             });
         }
         UiAction::RenameSession { title } => match session.as_ref() {
@@ -2358,6 +2415,7 @@ fn action_changes_active_context(action: &UiAction) -> bool {
             | UiAction::SubmitGoal(_)
             | UiAction::SubmitCustomEndpoint(_)
             | UiAction::StoreProviderKey { .. }
+            | UiAction::OpenProvider(_)
             | UiAction::StartDeviceLogin
             | UiAction::StartClaudeLogin
             | UiAction::CodexImport
@@ -2671,19 +2729,23 @@ fn start_load(
                 });
             });
         }
-        LoadRequest::Login | LoadRequest::Connect | LoadRequest::Model => {
+        LoadRequest::Login
+        | LoadRequest::Connect
+        | LoadRequest::Model
+        | LoadRequest::RefreshModel => {
             let is_login = req == LoadRequest::Login;
             let is_connect = req == LoadRequest::Connect;
+            let refresh_model = req == LoadRequest::RefreshModel;
             let app2 = app.clone();
             let tx = ui_tx.clone();
             st.bump_generation();
             let generation = st.generation;
             st.busy += 1;
             tokio::spawn(async move {
-                let entries = if is_login || is_connect {
-                    nexus_app::providers::catalog(&app2).await
-                } else {
+                let entries = if refresh_model {
                     nexus_app::providers::refresh_catalog(&app2).await
+                } else {
+                    nexus_app::providers::catalog(&app2).await
                 };
                 let data = if is_login {
                     Loaded::Login(entries)
@@ -2724,45 +2786,7 @@ fn apply_loaded(st: &mut State, data: Loaded, app: &Arc<App>) {
         Loaded::Connect(entries) => replace_or_push_menu(st, app, menus::connect_menu(&entries)),
         Loaded::Model(entries) => {
             let active = app.any_model_name();
-            let manager = nexus_models::ModelManager::from_config(&app.config).ok();
-            let configured: Vec<menus::ConfiguredModelCard> = app
-                .config
-                .models
-                .iter()
-                .filter_map(|(name, model)| {
-                    let entry = entries.iter().find(|entry| {
-                        entry
-                            .configured_models
-                            .iter()
-                            .any(|configured| configured == name)
-                            || entry.id == model.provider
-                    });
-                    let confirmed = entry.is_some_and(|entry| {
-                        matches!(
-                            &entry.state,
-                            nexus_app::providers::EndpointState::Connected { models, .. }
-                                if models.iter().any(|candidate| candidate.id == model.model)
-                        )
-                    });
-                    if !confirmed && model.provider != "mock" {
-                        return None;
-                    }
-                    let availability = entry.map_or_else(
-                        || "configured; provider status unavailable".to_string(),
-                        |entry| format!("{} · {}", entry.auth_state, entry.summary()),
-                    );
-                    Some(menus::ConfiguredModelCard {
-                        name: name.clone(),
-                        provider: model.provider.clone(),
-                        model_id: model.model.clone(),
-                        capabilities: manager
-                            .as_ref()
-                            .and_then(|manager| manager.capabilities(name).ok()),
-                        availability,
-                    })
-                })
-                .collect();
-            replace_or_push_menu(st, app, menus::model_menu(&configured, &entries, &active));
+            replace_or_push_menu(st, app, menus::model_provider_menu(&entries, &active));
         }
         Loaded::Provider { entry, configured } => {
             push_menu(st, app, menus::provider_menu(&entry, &configured));
@@ -3175,6 +3199,56 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
                     reason: format!("fallback from {from_model}: {reason}"),
                 },
             );
+        }
+        LoopEvent::ProviderActivity {
+            call_id,
+            provider,
+            model,
+            effort,
+            reasoning_enabled,
+            running,
+            failed,
+        } => {
+            let label = if reasoning_enabled {
+                format!("Thinking… · {effort}")
+            } else {
+                "Generating… · reasoning off/unsupported".into()
+            };
+            let kind = TimelineKind::ProviderActivity {
+                provider,
+                model,
+                effort,
+                reasoning_enabled,
+            };
+            if running {
+                let event = st.push_local_event_for_turn(
+                    turn_id.clone(),
+                    TimelineStatus::Running,
+                    label,
+                    kind,
+                );
+                st.live_provider_events.insert(call_id.clone(), event);
+            } else if let Some(id) = st.live_provider_events.remove(&call_id) {
+                st.update_event(
+                    &id,
+                    TimelineEventUpdate {
+                        status: if failed {
+                            TimelineStatus::Failed
+                        } else {
+                            TimelineStatus::Completed
+                        },
+                        phase: if failed {
+                            LifecyclePhase::Failed
+                        } else {
+                            LifecyclePhase::Completed
+                        },
+                        summary: Some(label),
+                        kind,
+                        duration_ms: None,
+                        artifacts: Vec::new(),
+                    },
+                );
+            }
         }
         LoopEvent::ReasoningSummary(t) if st.thinking_enabled => {
             if let Some(id) = st.live_assistant_events.remove(&turn_key) {

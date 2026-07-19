@@ -454,6 +454,18 @@ impl ModelProvider for CodexResponsesProvider {
             context_limit_source: self.config.context_limit_source,
             output_limit_source: self.config.output_limit_source,
             reasoning_controls: true,
+            reasoning: ReasoningProfile {
+                supported_efforts: self.config.reasoning_effort.clone().into_iter().collect(),
+                default_effort: self.config.reasoning_effort.clone(),
+                control: if self.config.reasoning_effort.is_some() {
+                    crate::ReasoningControl::Mandatory
+                } else {
+                    crate::ReasoningControl::ProviderManaged
+                },
+                mandatory: true,
+                provider_managed: self.config.reasoning_effort.is_none(),
+                provenance: ReasoningProvenance::ConfiguredDefault,
+            },
             system_prompt: true,
             parallel_tool_calls: self.config.native_tool_calls.unwrap_or(true),
             json_schema: false,

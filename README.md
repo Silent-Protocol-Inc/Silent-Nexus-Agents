@@ -13,7 +13,7 @@
 
 [![CI](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/actions/workflows/ci.yml/badge.svg)](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/actions/workflows/ci.yml)
 [![Security](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/actions/workflows/security.yml/badge.svg)](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/actions/workflows/security.yml)
-[![Release](https://img.shields.io/badge/release-v1.3.0-success.svg)](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/releases/latest)
+[![Release](https://img.shields.io/badge/release-v2.0.0-success.svg)](https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.97.0-orange.svg?logo=rust)](rust-toolchain.toml)
 [![Platform](https://img.shields.io/badge/platform-x86__64--linux-lightgrey.svg)](#install)
@@ -145,8 +145,8 @@ sudo scripts/install.sh --system --binary target/release/snx
 ```sh
 # Verify, extract, re-verify the internal manifest, then install the binary
 sha256sum -c SHA256SUMS
-tar -xzf silent-nexus-1.3.0-x86_64-unknown-linux-gnu.tar.gz
-cd silent-nexus-1.3.0-x86_64-unknown-linux-gnu
+tar -xzf silent-nexus-2.0.0-x86_64-unknown-linux-gnu.tar.gz
+cd silent-nexus-2.0.0-x86_64-unknown-linux-gnu
 sha256sum -c SHA256SUMS
 install -m 0755 snx ~/.local/bin/snx
 ```
@@ -204,7 +204,7 @@ snx run "summarize the architecture of this repo" --agent researcher
 | `snx sandbox status\|test` | Inspect and self-test the execution sandbox |
 | `snx index …` | Build/query the code-intelligence index |
 | `snx tools …` | List tools and their risk levels |
-| `snx models …` | List models / probe provider health |
+| `snx catalog …` | List models / probe provider health |
 | `snx auth …` | Consent-gated Codex/Claude CLI auth and stored provider credentials |
 | `snx config show\|path\|schema` | Configuration inspection |
 | `snx audit` | Recent audit events |
@@ -298,7 +298,7 @@ uses the backup made before upgrade.
 
 Workspace data lives under `<workspace>/.nexus/state`; user configuration and auth
 profiles use the platform configuration directory (on Linux,
-`~/.config/silent-nexus`, subject to `XDG_CONFIG_HOME`). Silent Nexus 1.x never
+`~/.config/silent-nexus`, subject to `XDG_CONFIG_HOME`). Silent Nexus 2.x never
 automatically deletes transcripts, goals, plans, tasks, memories, or artifacts.
 See the [`CHANGELOG`](CHANGELOG.md) for release-by-release detail.
 

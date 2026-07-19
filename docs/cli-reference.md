@@ -25,7 +25,9 @@ details. Global flags include `--json`, `--no-color`, `--inline`, and
 ## Models and integrations
 
 - `snx setup [--project] [--force]`: detect local runtimes and write a starter.
-- `snx model ...`, `models ...`: select, list, probe, and test providers.
+- `snx model ...`: select and test a model through the provider-first picker.
+- `snx catalog list|health [--json]`: read-only provider-grouped inventory,
+  capabilities, freshness, availability, routing defaults, and health.
 - `snx auth ...`: consent-gated provider authentication.
 - `snx connector ...`: inspect/import connector definitions disabled/untrusted.
 - `snx mcp ...`: MCP registry/client and curated read-only server.
@@ -52,7 +54,9 @@ are denied; use the typed repository commands.
 - `snx maintenance optimize [--vacuum]`: optimize/checkpoint, refusing active
   foreground/background work.
 - `snx audit [--kind KIND] [--limit N]`, `logs`: audit/log locations.
-- `snx config show|path|schema`: redacted effective config and schema.
+- `snx config show|path|schema`: redacted effective config and schema. The TUI
+  `/config` hub writes typed workspace/global managed overrides and supports
+  explicit inheritance/reset; credentials remain in `/login` and `/connect`.
 - `snx completion <shell>`: generate shell completions.
 
 Maintenance commands never prune transcripts, tasks, plans, goals, memories, or

@@ -1,13 +1,14 @@
 //! Provider endpoint probing and model discovery for the interactive
 //! `/connect` flows. Read-only: never installs, starts, or downloads anything.
 
+use crate::types::ReasoningProfile;
 use futures::{stream, StreamExt};
 use nexus_core::config::LimitSource;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 /// A model reported by a provider endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredModel {
     pub id: String,
     /// On-disk size in bytes (Ollama reports this; OpenAI-style listings don't).
@@ -28,6 +29,8 @@ pub struct DiscoveredModel {
     pub max_output_tokens: Option<usize>,
     pub context_limit_source: Option<LimitSource>,
     pub output_limit_source: Option<LimitSource>,
+    /// Exact provider metadata for reasoning controls, when reported.
+    pub reasoning: Option<ReasoningProfile>,
 }
 
 /// Why an endpoint probe failed, classified so the UI can offer the right
@@ -226,6 +229,7 @@ pub async fn list_ollama_models_with_tls(
                 max_output_tokens: None,
                 context_limit_source: None,
                 output_limit_source: None,
+                reasoning: None,
             })
         })
         .collect();
@@ -249,6 +253,26 @@ pub async fn list_ollama_models_with_tls(
                         model.context_window = ollama_context_limit(&value);
                         if model.context_window.is_some() {
                             model.context_limit_source = Some(LimitSource::ProviderMetadata);
+                        }
+                        if value
+                            .get("capabilities")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|items| {
+                                items.iter().any(|item| item.as_str() == Some("thinking"))
+                            })
+                        {
+                            model.reasoning = Some(ReasoningProfile {
+                                supported_efforts: vec![
+                                    "low".into(),
+                                    "medium".into(),
+                                    "high".into(),
+                                ],
+                                default_effort: Some("medium".into()),
+                                control: crate::types::ReasoningControl::Optional,
+                                mandatory: false,
+                                provider_managed: false,
+                                provenance: crate::types::ReasoningProvenance::ProviderMetadata,
+                            });
                         }
                     }
                 }
@@ -345,6 +369,34 @@ pub async fn list_openai_models_with_tls(
                         .and_then(|provider| compatible_limit(provider, &["max_completion_tokens"]))
                 })
                 .map(|_| LimitSource::ProviderMetadata),
+                reasoning: m.get("reasoning").and_then(|reasoning| {
+                    let efforts = reasoning
+                        .get("supported_efforts")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|effort| effort.as_str().map(str::to_string))
+                        .collect::<Vec<_>>();
+                    let mandatory = reasoning
+                        .get("mandatory")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let default_effort = reasoning
+                        .get("default_effort")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    Some(ReasoningProfile {
+                        supported_efforts: efforts,
+                        default_effort,
+                        control: if mandatory {
+                            crate::types::ReasoningControl::Mandatory
+                        } else {
+                            crate::types::ReasoningControl::Optional
+                        },
+                        mandatory,
+                        provider_managed: false,
+                        provenance: crate::types::ReasoningProvenance::ProviderMetadata,
+                    })
+                }),
             })
         })
         .collect();
@@ -442,7 +494,8 @@ mod tests {
                 .and(path("/api/show"))
                 .and(body_json(serde_json::json!({"model": name})))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "model_info": {"any_arch.context_length": context}
+                    "model_info": {"any_arch.context_length": context},
+                    "capabilities": if name == "arbitrary-one:latest" { vec!["thinking"] } else { vec!["completion"] }
                 })))
                 .mount(&server)
                 .await;
@@ -452,11 +505,31 @@ mod tests {
             .expect("probe");
         let limits: std::collections::BTreeMap<_, _> = out
             .models
-            .into_iter()
-            .map(|model| (model.id, model.context_window))
+            .iter()
+            .map(|model| (model.id.clone(), model.context_window))
             .collect();
         assert_eq!(limits["arbitrary-one:latest"], Some(12_345));
         assert_eq!(limits["another-model:v2"], Some(67_890));
+        let thinking = out
+            .models
+            .iter()
+            .find(|model| model.id == "arbitrary-one:latest")
+            .expect("thinking model inventory row");
+        assert_eq!(
+            thinking
+                .reasoning
+                .as_ref()
+                .expect("provider thinking metadata")
+                .supported_efforts,
+            ["low", "medium", "high"]
+        );
+        assert!(out
+            .models
+            .iter()
+            .find(|model| model.id == "another-model:v2")
+            .expect("non-thinking model inventory row")
+            .reasoning
+            .is_none());
     }
 
     #[tokio::test]

@@ -13,9 +13,10 @@ Values merge from lowest to highest precedence:
    `XDG_CONFIG_HOME`);
 3. machine-managed model definitions (`models.toml`);
 4. workspace config (`<workspace>/.nexus/config.toml`);
-5. machine-managed interactive overrides (`overrides.toml`);
-6. supported `SNX_*` environment overrides;
-7. explicit command flags.
+5. machine-managed global interactive overrides (`overrides.toml`);
+6. machine-managed workspace overrides (`<workspace>/.nexus/overrides.toml`);
+7. supported `SNX_*` environment overrides;
+8. explicit command flags.
 
 Interactive commands update managed files and do not replace hand-written
 configuration. Files under the user config root are private (`0700` directories,
@@ -25,6 +26,12 @@ configuration. Files under the user config root are private (`0700` directories,
 
 `[general]` controls `theme`, `no_color`, `reduced_motion`,
 `default_agent`, and the optional `test_command`.
+
+Fresh or omitted configuration defaults `default_agent` to `nexus`, the
+general-purpose role. Explicit existing values remain unchanged. The role has
+no specialist prompt, task-class restriction, output contract, or reduced tool
+category, but every normal policy, approval, denial, sandbox, Full Access,
+redaction, and audit boundary remains mandatory.
 
 `[routing]` maps `simple`, `coding`, `planning`, and `fallback` to names defined
 under `[models.<name>]`. A route to a missing model is rejected.

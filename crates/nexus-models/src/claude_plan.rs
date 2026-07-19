@@ -9,7 +9,8 @@
 use crate::provider::{collect_stream, ModelProvider};
 use crate::types::{
     Completion, CompletionRequest, FallbackEligibility, ModelCapabilities, ModelCostClass,
-    ModelLatencyClass, ModelLocality, ModelPrivacy, ProviderHealth, Role, StreamEvent, Usage,
+    ModelLatencyClass, ModelLocality, ModelPrivacy, ProviderHealth, ReasoningProfile,
+    ReasoningProvenance, Role, StreamEvent, Usage,
 };
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -110,6 +111,18 @@ impl ModelProvider for ClaudePlanProvider {
             context_limit_source: self.config.context_limit_source,
             output_limit_source: self.config.output_limit_source,
             reasoning_controls: true,
+            reasoning: ReasoningProfile {
+                supported_efforts: self.config.reasoning_effort.clone().into_iter().collect(),
+                default_effort: self.config.reasoning_effort.clone(),
+                control: if self.config.reasoning_effort.is_some() {
+                    crate::ReasoningControl::Optional
+                } else {
+                    crate::ReasoningControl::ProviderManaged
+                },
+                mandatory: false,
+                provider_managed: self.config.reasoning_effort.is_none(),
+                provenance: ReasoningProvenance::InstalledCli,
+            },
             // The CLI receives one serialized prompt rather than a dedicated
             // system channel, so callers must use compatibility prompting.
             system_prompt: false,

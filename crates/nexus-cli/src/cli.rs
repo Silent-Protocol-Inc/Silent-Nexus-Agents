@@ -138,9 +138,8 @@ pub enum Command {
     #[command(subcommand)]
     Tools(ToolsCmd),
 
-    /// Configured models and their health.
-    #[command(subcommand)]
-    Models(ModelsCmd),
+    /// Read-only provider-grouped model catalog and health.
+    Catalog(CatalogArgs),
 
     /// Provider authentication (Codex "Sign in with ChatGPT" session).
     #[command(subcommand)]
@@ -520,11 +519,17 @@ pub enum ToolsCmd {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum ModelsCmd {
-    /// List configured models.
+pub enum CatalogCmd {
+    /// List the provider-grouped catalog.
     List,
-    /// Probe each configured provider's reachability.
+    /// Refresh and report every eligible provider's health.
     Health,
+}
+
+#[derive(clap::Args, Debug, Default)]
+pub struct CatalogArgs {
+    #[command(subcommand)]
+    pub command: Option<CatalogCmd>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -653,6 +658,28 @@ mod tests {
             Some(Command::About(args)) => assert!(args.compact),
             _ => panic!("expected about"),
         }
+    }
+
+    #[test]
+    fn catalog_replaces_models_without_a_compatibility_alias() {
+        assert!(matches!(
+            Cli::try_parse_from(["snx", "catalog", "health"])
+                .expect("catalog")
+                .command,
+            Some(Command::Catalog(CatalogArgs {
+                command: Some(CatalogCmd::Health)
+            }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["snx", "catalog"])
+                .expect("bare catalog")
+                .command,
+            Some(Command::Catalog(CatalogArgs { command: None }))
+        ));
+        let error = Cli::try_parse_from(["snx", "models", "health"])
+            .expect_err("removed command must stay unknown")
+            .to_string();
+        assert!(error.contains("unrecognized subcommand 'models'"));
     }
 
     #[test]

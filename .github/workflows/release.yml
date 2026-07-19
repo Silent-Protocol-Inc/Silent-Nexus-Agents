@@ -29,18 +29,34 @@ jobs:
       - name: Select pinned toolchain
         run: rustup override set 1.97.0
 
+      - name: Resolve and validate release version
+        id: version
+        shell: bash
+        run: |
+          version="$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
+          if [[ "$version" != "2.0.0" ]]; then
+            echo "release workflow certifies workspace version 2.0.0 only (got $version)" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v2.0.0" ]]; then
+            echo "release workflow accepts tag v2.0.0 only (got $GITHUB_REF_NAME)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "archive=silent-nexus-$version-x86_64-unknown-linux-gnu.tar.gz" >> "$GITHUB_OUTPUT"
+
       - name: Build deterministic Linux package
         run: scripts/package-release.sh
 
       - name: Validate packaged release
-        run: scripts/validate-release.sh dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+        run: scripts/validate-release.sh "dist/${{ steps.version.outputs.archive }}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: silent-nexus-1.0.0-linux-x86-64
+          name: silent-nexus-${{ steps.version.outputs.version }}-linux-x86-64
           path: |
-            dist/silent-nexus-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+            dist/${{ steps.version.outputs.archive }}
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30

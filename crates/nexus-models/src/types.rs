@@ -246,6 +246,47 @@ pub enum FallbackEligibility {
     Unknown,
 }
 
+/// Exact source used to expose reasoning controls. Family-name inference is
+/// deliberately not a provenance option.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningProvenance {
+    ProviderMetadata,
+    InstalledCli,
+    BundledExactCatalog,
+    #[default]
+    ConfiguredDefault,
+}
+
+/// How an exact model/provider pair permits reasoning to be controlled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningControl {
+    #[default]
+    DefaultOnly,
+    Unsupported,
+    Optional,
+    Mandatory,
+    ProviderManaged,
+}
+
+/// Provider-neutral reasoning controls for one exact model inventory row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningProfile {
+    #[serde(default)]
+    pub supported_efforts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    #[serde(default)]
+    pub control: ReasoningControl,
+    #[serde(default)]
+    pub mandatory: bool,
+    #[serde(default)]
+    pub provider_managed: bool,
+    #[serde(default)]
+    pub provenance: ReasoningProvenance,
+}
+
 /// Static capabilities a provider declares for a configured model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -264,6 +305,8 @@ pub struct ModelCapabilities {
     pub output_limit_source: LimitSource,
     /// Reasoning-effort style controls, when the endpoint honors them.
     pub reasoning_controls: bool,
+    #[serde(default)]
+    pub reasoning: ReasoningProfile,
     /// Whether the adapter preserves dedicated system-role instructions.
     #[serde(default)]
     pub system_prompt: bool,

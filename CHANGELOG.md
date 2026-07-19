@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.0.0] — 2026-07-19
+
+- Replaced the removed `models` command with the provider-grouped, read-only
+  `catalog` command across the TUI, CLI, help, completions, and documentation.
+- Added exact-provenance reasoning profiles, generic Ollama thinking discovery,
+  capability-aware effort controls, and provider-call activity cards.
+- Added the unrestricted general-purpose `nexus` role as the fresh-config
+  default while retaining all policy, approval, sandbox, redaction, and audit
+  enforcement.
+- Completed responsive NEXUS terminal branding and version-derived release
+  workflow paths with tag/version mismatch rejection.
+
 All notable changes to NEXUS are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 Semantic Versioning.

@@ -123,6 +123,15 @@ pub enum LoopEvent {
         provider: String,
         reason: String,
     },
+    ProviderActivity {
+        call_id: String,
+        provider: String,
+        model: String,
+        effort: String,
+        reasoning_enabled: bool,
+        running: bool,
+        failed: bool,
+    },
     /// Provider-supplied reasoning summary accompanying a real tool plan.
     /// Hidden chain-of-thought is never requested or surfaced.
     ReasoningSummary(String),
@@ -233,6 +242,7 @@ struct TurnTimeline {
     root_span_id: SpanId,
     tool_cards: Mutex<BTreeMap<String, ToolCard>>,
     assistant_card: Mutex<Option<AssistantCard>>,
+    provider_activity: Mutex<BTreeMap<String, AssistantCard>>,
 }
 
 struct TimelineReset(Arc<Mutex<Option<Arc<TurnTimeline>>>>);
@@ -319,6 +329,7 @@ impl TurnTimeline {
             root_span_id: SpanId::generate(),
             tool_cards: Mutex::new(BTreeMap::new()),
             assistant_card: Mutex::new(None),
+            provider_activity: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -557,6 +568,62 @@ impl TurnTimeline {
                     },
                     None,
                 )?;
+            }
+            LoopEvent::ProviderActivity {
+                call_id,
+                provider,
+                model,
+                effort,
+                reasoning_enabled,
+                running,
+                failed,
+            } => {
+                let label = if *reasoning_enabled {
+                    format!("Thinking… · {effort}")
+                } else {
+                    "Generating… · reasoning off/unsupported".into()
+                };
+                let kind = TimelineKind::ProviderActivity {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    reasoning_enabled: *reasoning_enabled,
+                };
+                let mut active = self
+                    .provider_activity
+                    .lock()
+                    .map_err(|_| NexusError::other("provider activity timeline lock poisoned"))?;
+                if *running {
+                    let event = self.append(
+                        LifecyclePhase::Started,
+                        TimelineStatus::Running,
+                        label,
+                        kind,
+                        None,
+                    )?;
+                    active.insert(
+                        call_id.clone(),
+                        AssistantCard {
+                            event,
+                            started: Instant::now(),
+                        },
+                    );
+                } else if let Some(mut card) = active.remove(call_id) {
+                    card.event.phase = if *failed {
+                        LifecyclePhase::Failed
+                    } else {
+                        LifecyclePhase::Completed
+                    };
+                    card.event.status = if *failed {
+                        TimelineStatus::Failed
+                    } else {
+                        TimelineStatus::Completed
+                    };
+                    card.event.summary = label;
+                    card.event.kind = kind;
+                    card.event.duration_ms = Some(card.started.elapsed().as_millis() as u64);
+                    self.store.update(&card.event)?;
+                }
             }
             LoopEvent::ReasoningSummary(text) => {
                 if !self.finalize_assistant(
@@ -1333,7 +1400,6 @@ impl AgentLoop {
         let mut calls: Vec<(Option<String>, String, String)> = Vec::new();
         let mut usage = Usage::default();
         let mut finish_reason = String::from("stop");
-        let mut provider_private = String::new();
         let mut display = StreamDisplayBuffer::new(native_tool_calls);
 
         while let Some(event) = stream.next().await {
@@ -1356,7 +1422,9 @@ impl AgentLoop {
                         self.emit(LoopEvent::AssistantTextDelta(safe_delta));
                     }
                 }
-                StreamEvent::ProviderPrivateDelta(delta) => provider_private.push_str(&delta),
+                StreamEvent::ProviderPrivateDelta(_) => {
+                    // Provider-private reasoning is destroyed at ingestion.
+                }
                 StreamEvent::ToolCallDelta {
                     index,
                     id,
@@ -1403,7 +1471,7 @@ impl AgentLoop {
             tool_calls,
             usage,
             finish_reason,
-            provider_private: (!provider_private.is_empty()).then_some(provider_private),
+            provider_private: None,
         })
     }
 
@@ -2015,9 +2083,53 @@ impl AgentLoop {
             );
             timeline.store.save_manifest(&manifest)?;
             timeline.record_context(&manifest)?;
+            let activity_effort = capabilities
+                .reasoning
+                .default_effort
+                .clone()
+                .unwrap_or_else(|| {
+                    if capabilities.reasoning.provider_managed {
+                        "provider managed".into()
+                    } else {
+                        "off/unsupported".into()
+                    }
+                });
+            let reasoning_enabled = capabilities.reasoning.provider_managed
+                || capabilities.reasoning.mandatory
+                || capabilities.reasoning.default_effort.is_some();
+            let activity_call_id = SpanId::generate().as_str().to_string();
+            self.emit(LoopEvent::ProviderActivity {
+                call_id: activity_call_id.clone(),
+                provider: provider.kind().into(),
+                model: model_name.clone(),
+                effort: activity_effort.clone(),
+                reasoning_enabled,
+                running: true,
+                failed: false,
+            });
             let completion: Completion = match self.streamed_completion(stream, native).await {
-                Ok(c) => c,
+                Ok(c) => {
+                    self.emit(LoopEvent::ProviderActivity {
+                        call_id: activity_call_id.clone(),
+                        provider: provider.kind().into(),
+                        model: model_name.clone(),
+                        effort: activity_effort.clone(),
+                        reasoning_enabled,
+                        running: false,
+                        failed: false,
+                    });
+                    c
+                }
                 Err(e) if e.is_model_recoverable() || e.is_provider_retryable() => {
+                    self.emit(LoopEvent::ProviderActivity {
+                        call_id: activity_call_id.clone(),
+                        provider: provider.kind().into(),
+                        model: model_name.clone(),
+                        effort: activity_effort.clone(),
+                        reasoning_enabled,
+                        running: false,
+                        failed: true,
+                    });
                     retries += 1;
                     failure_count += 1;
                     harness_state.retry_count = retries;
@@ -2057,7 +2169,18 @@ impl AgentLoop {
                     )));
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.emit(LoopEvent::ProviderActivity {
+                        call_id: activity_call_id,
+                        provider: provider.kind().into(),
+                        model: model_name.clone(),
+                        effort: activity_effort,
+                        reasoning_enabled,
+                        running: false,
+                        failed: true,
+                    });
+                    return Err(e);
+                }
             };
             if completion.usage.prompt_tokens > 0 {
                 manifest.observe_provider_input(completion.usage.prompt_tokens);
@@ -2245,7 +2368,6 @@ impl AgentLoop {
                     // Record the assistant's tool request.
                     let mut assistant_msg =
                         ChatMessage::assistant(self.safe_model_text(&completion.content));
-                    assistant_msg.provider_private = completion.provider_private.clone();
                     assistant_msg.tool_calls.push(call.clone());
                     self.runtime
                         .sessions

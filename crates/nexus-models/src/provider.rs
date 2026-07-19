@@ -38,11 +38,10 @@ pub async fn collect_stream(
     let mut calls: Vec<(Option<String>, String, String)> = Vec::new();
     let mut usage = Usage::default();
     let mut finish = String::from("stop");
-    let mut provider_private = String::new();
     while let Some(event) = stream.next().await {
         match event? {
             StreamEvent::TextDelta(t) => content.push_str(&t),
-            StreamEvent::ProviderPrivateDelta(delta) => provider_private.push_str(&delta),
+            StreamEvent::ProviderPrivateDelta(_) => {}
             StreamEvent::ToolCallDelta {
                 index,
                 id,
@@ -85,6 +84,6 @@ pub async fn collect_stream(
         tool_calls,
         usage,
         finish_reason: finish,
-        provider_private: (!provider_private.is_empty()).then_some(provider_private),
+        provider_private: None,
     })
 }
