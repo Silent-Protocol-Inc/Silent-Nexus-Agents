@@ -2,6 +2,60 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "ActivityConfig": {
+      "additionalProperties": false,
+      "description": "Controls the three-layer activity timeline. The improved defaults need no configuration; these only exist to override them.",
+      "properties": {
+        "animation": {
+          "default": "nexus",
+          "description": "Processing animation style: `nexus`, `minimal`, or `off`.",
+          "type": "string"
+        },
+        "animation_speed": {
+          "default": "normal",
+          "description": "Animation cadence: `slow`, `normal`, or `fast`.",
+          "type": "string"
+        },
+        "coalesce_events": {
+          "default": true,
+          "description": "Coalesce related events (tool start/complete, retries) into one entry.",
+          "type": "boolean"
+        },
+        "expand_shortcut": {
+          "default": "ctrl+e",
+          "description": "Shortcut that toggles the expanded activity detail.",
+          "type": "string"
+        },
+        "mode": {
+          "default": "default",
+          "description": "Timeline verbosity: `default`, `detailed`, or `debug`.",
+          "type": "string"
+        },
+        "reasoning_preview_lines": {
+          "default": 3,
+          "description": "Max wrapped lines in the NEXUS processing preview (1–10).",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reduced_motion": {
+          "default": false,
+          "description": "Force reduced motion regardless of the terminal/global setting.",
+          "type": "boolean"
+        },
+        "show_diagnostics": {
+          "default": false,
+          "description": "Show diagnostic-only events in the main timeline without debug mode.",
+          "type": "boolean"
+        },
+        "show_token_usage": {
+          "default": false,
+          "description": "Show token usage in progress/completion summaries.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "GeneralConfig": {
       "additionalProperties": false,
       "properties": {
@@ -555,6 +609,31 @@
       },
       "type": "object"
     },
+    "TuiConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "activity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ActivityConfig"
+            }
+          ],
+          "default": {
+            "animation": "nexus",
+            "animation_speed": "normal",
+            "coalesce_events": true,
+            "expand_shortcut": "ctrl+e",
+            "mode": "default",
+            "reasoning_preview_lines": 3,
+            "reduced_motion": false,
+            "show_diagnostics": false,
+            "show_token_usage": false
+          },
+          "description": "Live activity / inference timeline behavior (`[tui.activity]`)."
+        }
+      },
+      "type": "object"
+    },
     "WebConfig": {
       "additionalProperties": false,
       "properties": {
@@ -742,6 +821,27 @@
         "network": "off",
         "timeout_secs": 120
       }
+    },
+    "tui": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/TuiConfig"
+        }
+      ],
+      "default": {
+        "activity": {
+          "animation": "nexus",
+          "animation_speed": "normal",
+          "coalesce_events": true,
+          "expand_shortcut": "ctrl+e",
+          "mode": "default",
+          "reasoning_preview_lines": 3,
+          "reduced_motion": false,
+          "show_diagnostics": false,
+          "show_token_usage": false
+        }
+      },
+      "description": "Terminal UI preferences, e.g. `[tui.activity]`."
     },
     "version": {
       "default": 0,

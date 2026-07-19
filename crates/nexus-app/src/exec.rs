@@ -313,6 +313,7 @@ pub enum Effect {
     SetTheme(String),
     /// Toggle provider reasoning summaries and operational traces.
     SetThinking(bool),
+    SetActivityMode(nexus_core::timeline::ActivityMode),
     SetTranscriptDetail(nexus_core::timeline::TranscriptDetail),
     SetTranscriptFilter(nexus_core::timeline::TranscriptFilter),
     ContinueSession {
@@ -963,6 +964,36 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             ),
             Some(value) => Effect::SetTranscriptFilter(value.parse()?),
         },
+        CommandId::View => {
+            use nexus_core::timeline::ActivityMode;
+            let current = |app: &App| {
+                ActivityMode::parse(&app.read_ui_state(|s| s.activity_mode.clone()))
+                    .unwrap_or_default()
+            };
+            match args.first().copied() {
+                Some("cycle") | Some("next") => {
+                    let mode = current(app).cycle();
+                    app.update_ui_state(|s| s.activity_mode = mode.as_str().into())?;
+                    Effect::SetActivityMode(mode)
+                }
+                Some(value) => {
+                    let mode = ActivityMode::parse(value).ok_or_else(|| {
+                        NexusError::Config(format!(
+                            "unknown activity view '{value}' (expected default, detailed, or debug)"
+                        ))
+                    })?;
+                    app.update_ui_state(|s| s.activity_mode = mode.as_str().into())?;
+                    Effect::SetActivityMode(mode)
+                }
+                None => Effect::Report(
+                    Report::new("view")
+                        .field("mode", current(app).as_str())
+                        .line("default — essential activity only")
+                        .line("detailed — adds reasoning summaries, plans, and stages")
+                        .line("debug — adds routing, policy, and provider diagnostics"),
+                ),
+            }
+        }
         CommandId::Export => {
             match args.as_slice() {
                 [format] => {

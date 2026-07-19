@@ -235,6 +235,9 @@ struct InitialContextRequest<'a> {
 }
 
 struct TurnTimeline {
+    /// When false (`[tui.activity].coalesce_events = false`), repeated retries
+    /// and stage transitions each append their own card.
+    coalesce: bool,
     store: TimelineStore,
     session_id: SessionId,
     turn_id: TurnId,
@@ -243,6 +246,12 @@ struct TurnTimeline {
     tool_cards: Mutex<BTreeMap<String, ToolCard>>,
     assistant_card: Mutex<Option<AssistantCard>>,
     provider_activity: Mutex<BTreeMap<String, AssistantCard>>,
+    /// One retry card per turn, updated in place. Three attempts against the
+    /// same provider are one story, not three cards.
+    retry_card: Mutex<Option<AssistantCard>>,
+    /// One card per plan stage, keyed by stage id, so a stage moving
+    /// pending → running → completed stays a single row.
+    stage_cards: Mutex<BTreeMap<String, AssistantCard>>,
 }
 
 struct TimelineReset(Arc<Mutex<Option<Arc<TurnTimeline>>>>);
@@ -320,8 +329,15 @@ impl Drop for TimelineReset {
 }
 
 impl TurnTimeline {
-    fn new(store: Store, session_id: SessionId, turn_id: TurnId, trace_id: TraceId) -> Self {
+    fn new(
+        store: Store,
+        session_id: SessionId,
+        turn_id: TurnId,
+        trace_id: TraceId,
+        coalesce: bool,
+    ) -> Self {
         Self {
+            coalesce,
             store: TimelineStore::new(store),
             session_id,
             turn_id,
@@ -330,6 +346,8 @@ impl TurnTimeline {
             tool_cards: Mutex::new(BTreeMap::new()),
             assistant_card: Mutex::new(None),
             provider_activity: Mutex::new(BTreeMap::new()),
+            retry_card: Mutex::new(None),
+            stage_cards: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -375,12 +393,11 @@ impl TurnTimeline {
             } else {
                 TimelineStatus::Waiting
             },
-            format!(
-                "{} work · {} stage(s) · plan v{}",
-                work.kind.as_str(),
-                work.stages.len(),
-                work.version
-            ),
+            if work.approved {
+                format!("Working through {} stages", work.stages.len())
+            } else {
+                format!("Proposing a {}-stage plan", work.stages.len())
+            },
             TimelineKind::WorkBreakdown {
                 breakdown: work.clone(),
             },
@@ -394,9 +411,9 @@ impl TurnTimeline {
             LifecyclePhase::Completed,
             TimelineStatus::Completed,
             format!(
-                "context packed · {} tokens{}",
-                manifest.total_tokens,
-                if manifest.estimated { " estimated" } else { "" }
+                "Gathered {}{} tokens of context",
+                if manifest.estimated { "about " } else { "" },
+                manifest.total_tokens
             ),
             TimelineKind::ContextPacked {
                 manifest_id: manifest.id.as_str().to_string(),
@@ -722,19 +739,35 @@ impl TurnTimeline {
                 status,
                 next_action,
             } => {
-                self.append(
-                    LifecyclePhase::Progress,
-                    timeline_status_for_stage(*status),
-                    title.clone(),
-                    TimelineKind::StageChanged {
-                        plan_id: plan_id.clone(),
-                        stage_id: stage_id.clone(),
-                        title: title.clone(),
-                        status: *status,
-                        next_action: next_action.clone(),
-                    },
-                    None,
-                )?;
+                let kind = TimelineKind::StageChanged {
+                    plan_id: plan_id.clone(),
+                    stage_id: stage_id.clone(),
+                    title: title.clone(),
+                    status: *status,
+                    next_action: next_action.clone(),
+                };
+                let status = timeline_status_for_stage(*status);
+                let mut cards = self
+                    .stage_cards
+                    .lock()
+                    .map_err(|_| NexusError::other("stage timeline card lock poisoned"))?;
+                if let Some(card) = cards.get_mut(stage_id).filter(|_| self.coalesce) {
+                    card.event.status = status;
+                    card.event.summary = title.clone();
+                    card.event.kind = kind;
+                    card.event.duration_ms = Some(card.started.elapsed().as_millis() as u64);
+                    self.store.update(&card.event)?;
+                } else {
+                    let event =
+                        self.append(LifecyclePhase::Progress, status, title.clone(), kind, None)?;
+                    cards.insert(
+                        stage_id.clone(),
+                        AssistantCard {
+                            event,
+                            started: Instant::now(),
+                        },
+                    );
+                }
             }
             LoopEvent::ToolPlan {
                 tool,
@@ -914,17 +947,53 @@ impl TurnTimeline {
                 max,
                 reason,
             } => {
-                self.append(
-                    LifecyclePhase::Progress,
-                    TimelineStatus::Waiting,
-                    format!("retry {attempt}/{max}"),
-                    TimelineKind::Retry {
-                        attempt: *attempt,
-                        max: *max,
-                        reason: reason.clone(),
-                    },
-                    None,
-                )?;
+                let exhausted = *attempt >= *max;
+                let summary = if exhausted {
+                    format!("Gave up after {max} attempts · {}", summarize(reason, 80))
+                } else {
+                    format!("Retrying after a failed request · attempt {attempt} of {max}")
+                };
+                let kind = TimelineKind::Retry {
+                    attempt: *attempt,
+                    max: *max,
+                    reason: reason.clone(),
+                };
+                let mut active = self
+                    .retry_card
+                    .lock()
+                    .map_err(|_| NexusError::other("retry timeline card lock poisoned"))?;
+                if let Some(card) = active.as_mut().filter(|_| self.coalesce) {
+                    card.event.phase = if exhausted {
+                        LifecyclePhase::Failed
+                    } else {
+                        LifecyclePhase::Progress
+                    };
+                    card.event.status = if exhausted {
+                        TimelineStatus::Failed
+                    } else {
+                        TimelineStatus::Waiting
+                    };
+                    card.event.summary = summary;
+                    card.event.kind = kind;
+                    card.event.duration_ms = Some(card.started.elapsed().as_millis() as u64);
+                    self.store.update(&card.event)?;
+                } else {
+                    let event = self.append(
+                        LifecyclePhase::Progress,
+                        if exhausted {
+                            TimelineStatus::Failed
+                        } else {
+                            TimelineStatus::Waiting
+                        },
+                        summary,
+                        kind,
+                        None,
+                    )?;
+                    *active = Some(AssistantCard {
+                        event,
+                        started: Instant::now(),
+                    });
+                }
             }
             LoopEvent::Error(message) => {
                 self.append(
@@ -1672,6 +1741,7 @@ impl AgentLoop {
             session_id.clone(),
             turn_id.clone(),
             trace.clone(),
+            self.runtime.tool_ctx.config.tui.activity.coalesce_events,
         ));
         if let Ok(mut active) = self.active_timeline.lock() {
             *active = Some(timeline.clone());
@@ -4267,6 +4337,119 @@ fn idempotency_key(session_scope: &str, tool: &str, args: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn turn_timeline(coalesce: bool) -> TurnTimeline {
+        let store = Store::open_in_memory().expect("open store");
+        let session_id = crate::session::SessionStore::new(store.clone())
+            .create("/workspace", "orchestrator", "mock")
+            .expect("create session");
+        TurnTimeline::new(
+            store,
+            session_id.clone(),
+            TurnId::from(format!("{}:1", session_id.as_str())),
+            TraceId::generate(),
+            coalesce,
+        )
+    }
+
+    fn recorded(timeline: &TurnTimeline) -> Vec<TimelineEvent> {
+        timeline
+            .store
+            .all(
+                timeline.session_id.as_str(),
+                nexus_core::timeline::TranscriptFilter::All,
+            )
+            .expect("list timeline")
+    }
+
+    #[test]
+    fn repeated_retries_update_one_card_instead_of_stacking() {
+        let timeline = turn_timeline(true);
+        for attempt in 1..=3 {
+            timeline
+                .record_loop_event(&LoopEvent::Retry {
+                    attempt,
+                    max: 3,
+                    reason: "provider timed out".into(),
+                })
+                .expect("record retry");
+        }
+        let events = recorded(&timeline);
+        assert_eq!(events.len(), 1, "three attempts are one story");
+        let event = &events[0];
+        assert_eq!(
+            event.status,
+            TimelineStatus::Failed,
+            "exhausted retries fail"
+        );
+        assert!(
+            matches!(
+                event.kind,
+                TimelineKind::Retry {
+                    attempt: 3,
+                    max: 3,
+                    ..
+                }
+            ),
+            "the card carries the latest attempt",
+        );
+        assert_eq!(
+            event.kind.visibility(),
+            nexus_core::timeline::ActivityVisibility::Essential,
+            "an exhausted retry is essential, not a diagnostic",
+        );
+    }
+
+    #[test]
+    fn disabling_coalescing_keeps_one_card_per_retry() {
+        let timeline = turn_timeline(false);
+        for attempt in 1..=3 {
+            timeline
+                .record_loop_event(&LoopEvent::Retry {
+                    attempt,
+                    max: 3,
+                    reason: "provider timed out".into(),
+                })
+                .expect("record retry");
+        }
+        assert_eq!(recorded(&timeline).len(), 3);
+    }
+
+    #[test]
+    fn a_stage_moving_through_its_lifecycle_stays_one_card() {
+        let timeline = turn_timeline(true);
+        for status in [
+            StageStatus::Running,
+            StageStatus::Running,
+            StageStatus::Completed,
+        ] {
+            timeline
+                .record_loop_event(&LoopEvent::StageChanged {
+                    plan_id: "plan-1".into(),
+                    stage_id: "stage-1".into(),
+                    title: "Inspecting release configuration".into(),
+                    status,
+                    next_action: None,
+                })
+                .expect("record stage");
+        }
+        timeline
+            .record_loop_event(&LoopEvent::StageChanged {
+                plan_id: "plan-1".into(),
+                stage_id: "stage-2".into(),
+                title: "Verifying the build".into(),
+                status: StageStatus::Running,
+                next_action: None,
+            })
+            .expect("record stage");
+
+        let events = recorded(&timeline);
+        assert_eq!(events.len(), 2, "one card per stage, not per transition");
+        assert!(events
+            .iter()
+            .any(|e| e.summary == "Inspecting release configuration"
+                && e.status == TimelineStatus::Completed));
+    }
 
     #[test]
     fn compatibility_action_payload_is_not_streamed_as_assistant_text() {

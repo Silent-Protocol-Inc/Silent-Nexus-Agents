@@ -463,7 +463,130 @@ pub enum TimelineKind {
     },
 }
 
+/// How prominently an event should surface in the live timeline. Independent of
+/// the content-type [`TranscriptFilter`] and the per-event [`TranscriptDetail`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityVisibility {
+    /// User-facing narrative: messages, actions, results, diffs, warnings, final answer.
+    Essential,
+    /// Useful context folded into the processing preview / Ctrl+E detail by default.
+    CollapsedDetail,
+    /// Raw diagnostics shown only in debug mode or the Ctrl+E Raw tab.
+    DiagnosticOnly,
+}
+
+/// Timeline verbosity mode. `Default` is concise; `Debug` shows everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivityMode {
+    #[default]
+    Default,
+    Detailed,
+    Debug,
+}
+
+impl ActivityMode {
+    /// Whether an event of the given visibility appears in the main timeline.
+    pub fn shows(self, visibility: ActivityVisibility) -> bool {
+        match self {
+            Self::Default => visibility == ActivityVisibility::Essential,
+            Self::Detailed => visibility != ActivityVisibility::DiagnosticOnly,
+            Self::Debug => true,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Detailed => "detailed",
+            Self::Debug => "debug",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "default" => Some(Self::Default),
+            "detailed" => Some(Self::Detailed),
+            "debug" => Some(Self::Debug),
+            _ => None,
+        }
+    }
+
+    /// Cycle Default → Detailed → Debug → Default (for a keyboard shortcut).
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Default => Self::Detailed,
+            Self::Detailed => Self::Debug,
+            Self::Debug => Self::Default,
+        }
+    }
+}
+
 impl TimelineKind {
+    /// Classify this event for the three-layer activity system.
+    pub fn visibility(&self) -> ActivityVisibility {
+        use ActivityVisibility::{CollapsedDetail, DiagnosticOnly, Essential};
+        match self {
+            Self::UserMessage { .. }
+            | Self::AssistantMessage { .. }
+            | Self::FinalAnswer { .. }
+            | Self::ToolExecution { .. }
+            | Self::ToolProgress { .. }
+            | Self::FileMutation { .. }
+            | Self::Diff { .. }
+            | Self::Approval { .. }
+            | Self::Error { .. }
+            | Self::ProviderLimit { .. }
+            | Self::Cancellation { .. }
+            | Self::SlashCommand { .. }
+            | Self::SandboxCommand { .. }
+            | Self::BackgroundTask { .. }
+            | Self::AgentRun { .. } => Essential,
+            // Warnings/errors are essential; informational notices fold away.
+            Self::Notice { severity, .. } => {
+                if matches!(
+                    severity.as_str(),
+                    "warn" | "warning" | "error" | "err" | "critical"
+                ) {
+                    Essential
+                } else {
+                    CollapsedDetail
+                }
+            }
+            // A retry only matters up front once it is exhausted.
+            Self::Retry { attempt, max, .. } => {
+                if attempt >= max {
+                    Essential
+                } else {
+                    CollapsedDetail
+                }
+            }
+            // A failed validation is essential; a passing one is supporting detail.
+            Self::Validation { evidence } => {
+                if matches!(evidence.status, StageStatus::Failed) {
+                    Essential
+                } else {
+                    CollapsedDetail
+                }
+            }
+            Self::ReasoningSummary { .. }
+            | Self::WorkBreakdown { .. }
+            | Self::PlanRevision { .. }
+            | Self::StageChanged { .. }
+            | Self::ToolProposal { .. }
+            | Self::Checkpoint { .. }
+            | Self::Compaction { .. }
+            | Self::ContextPacked { .. } => CollapsedDetail,
+            Self::Classification { .. }
+            | Self::ModelRouting { .. }
+            | Self::ProviderActivity { .. }
+            | Self::PolicyDecision { .. }
+            | Self::GitStatus { .. }
+            | Self::LegacyAudit { .. } => DiagnosticOnly,
+        }
+    }
+
     pub fn type_label(&self) -> &'static str {
         match self {
             Self::UserMessage { .. } => "user_message",
@@ -1538,6 +1661,105 @@ fn legacy_assistant_text(content: &str) -> String {
 mod tests {
     use super::*;
     use crate::orchestration::{WorkBreakdown, WorkEstimate};
+
+    #[test]
+    fn visibility_tiers_match_the_activity_policy() {
+        use ActivityVisibility::*;
+        assert_eq!(
+            TimelineKind::UserMessage { text: "hi".into() }.visibility(),
+            Essential
+        );
+        assert_eq!(
+            TimelineKind::FinalAnswer {
+                text: "done".into()
+            }
+            .visibility(),
+            Essential
+        );
+        assert_eq!(
+            TimelineKind::ReasoningSummary {
+                text: "thinking".into()
+            }
+            .visibility(),
+            CollapsedDetail
+        );
+        assert_eq!(
+            TimelineKind::Classification {
+                class: "coding".into(),
+                model: "m".into(),
+                agent: "a".into(),
+            }
+            .visibility(),
+            DiagnosticOnly
+        );
+        assert_eq!(
+            TimelineKind::ProviderActivity {
+                provider: "p".into(),
+                model: "m".into(),
+                effort: "medium".into(),
+                reasoning_enabled: true,
+            }
+            .visibility(),
+            DiagnosticOnly
+        );
+        // Notice severity flips the tier.
+        assert_eq!(
+            TimelineKind::Notice {
+                text: "fyi".into(),
+                severity: "info".into()
+            }
+            .visibility(),
+            CollapsedDetail
+        );
+        assert_eq!(
+            TimelineKind::Notice {
+                text: "careful".into(),
+                severity: "warn".into()
+            }
+            .visibility(),
+            Essential
+        );
+        // Retry only surfaces once exhausted.
+        assert_eq!(
+            TimelineKind::Retry {
+                attempt: 1,
+                max: 3,
+                reason: "timeout".into()
+            }
+            .visibility(),
+            CollapsedDetail
+        );
+        assert_eq!(
+            TimelineKind::Retry {
+                attempt: 3,
+                max: 3,
+                reason: "timeout".into()
+            }
+            .visibility(),
+            Essential
+        );
+    }
+
+    #[test]
+    fn activity_mode_thresholds_and_roundtrip() {
+        use ActivityVisibility::*;
+        assert!(ActivityMode::Default.shows(Essential));
+        assert!(!ActivityMode::Default.shows(CollapsedDetail));
+        assert!(!ActivityMode::Default.shows(DiagnosticOnly));
+        assert!(ActivityMode::Detailed.shows(Essential));
+        assert!(ActivityMode::Detailed.shows(CollapsedDetail));
+        assert!(!ActivityMode::Detailed.shows(DiagnosticOnly));
+        assert!(ActivityMode::Debug.shows(DiagnosticOnly));
+        assert_eq!(
+            ActivityMode::parse("detailed"),
+            Some(ActivityMode::Detailed)
+        );
+        assert_eq!(ActivityMode::parse("DEBUG"), Some(ActivityMode::Debug));
+        assert_eq!(ActivityMode::parse("nope"), None);
+        assert_eq!(ActivityMode::Default.cycle(), ActivityMode::Detailed);
+        assert_eq!(ActivityMode::Debug.cycle(), ActivityMode::Default);
+        assert_eq!(ActivityMode::default(), ActivityMode::Default);
+    }
 
     fn seeded() -> (Store, SessionId, TimelineStore) {
         let store = Store::open_in_memory().expect("store");

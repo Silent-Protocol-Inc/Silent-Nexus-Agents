@@ -36,6 +36,56 @@ pub struct Config {
     pub limits: LimitsConfig,
     /// Registered MCP servers, e.g. `[mcp.my_server]`.
     pub mcp: BTreeMap<String, McpServerConfig>,
+    /// Terminal UI preferences, e.g. `[tui.activity]`.
+    pub tui: TuiConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct TuiConfig {
+    /// Live activity / inference timeline behavior (`[tui.activity]`).
+    pub activity: ActivityConfig,
+}
+
+/// Controls the three-layer activity timeline. The improved defaults need no
+/// configuration; these only exist to override them.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct ActivityConfig {
+    /// Timeline verbosity: `default`, `detailed`, or `debug`.
+    pub mode: String,
+    /// Max wrapped lines in the NEXUS processing preview (1–10).
+    pub reasoning_preview_lines: u8,
+    /// Shortcut that toggles the expanded activity detail.
+    pub expand_shortcut: String,
+    /// Show diagnostic-only events in the main timeline without debug mode.
+    pub show_diagnostics: bool,
+    /// Show token usage in progress/completion summaries.
+    pub show_token_usage: bool,
+    /// Processing animation style: `nexus`, `minimal`, or `off`.
+    pub animation: String,
+    /// Animation cadence: `slow`, `normal`, or `fast`.
+    pub animation_speed: String,
+    /// Force reduced motion regardless of the terminal/global setting.
+    pub reduced_motion: bool,
+    /// Coalesce related events (tool start/complete, retries) into one entry.
+    pub coalesce_events: bool,
+}
+
+impl Default for ActivityConfig {
+    fn default() -> Self {
+        Self {
+            mode: "default".into(),
+            reasoning_preview_lines: 3,
+            expand_shortcut: "ctrl+e".into(),
+            show_diagnostics: false,
+            show_token_usage: false,
+            animation: "nexus".into(),
+            animation_speed: "normal".into(),
+            reduced_motion: false,
+            coalesce_events: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -750,6 +800,31 @@ impl Config {
 
     /// Validate cross-field invariants with actionable messages.
     pub fn validate(&self) -> Result<()> {
+        let activity = &self.tui.activity;
+        if crate::timeline::ActivityMode::parse(&activity.mode).is_none() {
+            return Err(NexusError::Config(format!(
+                "tui.activity.mode must be one of default|detailed|debug, got `{}`",
+                activity.mode
+            )));
+        }
+        if !(1..=10).contains(&activity.reasoning_preview_lines) {
+            return Err(NexusError::Config(format!(
+                "tui.activity.reasoning_preview_lines must be 1-10, got {}",
+                activity.reasoning_preview_lines
+            )));
+        }
+        if !["slow", "normal", "fast"].contains(&activity.animation_speed.as_str()) {
+            return Err(NexusError::Config(format!(
+                "tui.activity.animation_speed must be one of slow|normal|fast, got `{}`",
+                activity.animation_speed
+            )));
+        }
+        if !["nexus", "minimal", "off"].contains(&activity.animation.as_str()) {
+            return Err(NexusError::Config(format!(
+                "tui.activity.animation must be one of nexus|minimal|off, got `{}`",
+                activity.animation
+            )));
+        }
         let decision_fields = [
             ("policy.reads", &self.policy.reads),
             ("policy.writes", &self.policy.writes),

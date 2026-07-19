@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const UI_STATE_VERSION: u32 = 5;
+pub const UI_STATE_VERSION: u32 = 6;
 const HISTORY_CAP: usize = 200;
 const RECENT_COMMANDS_CAP: usize = 12;
 
@@ -44,6 +44,10 @@ pub struct UiState {
     /// Show provider reasoning summaries and operational traces. This never
     /// requests or exposes hidden chain-of-thought.
     pub thinking_enabled: bool,
+    /// Timeline verbosity chosen via `/view`: `default`, `detailed`, or `debug`.
+    /// Default keeps the timeline to essential activity; diagnostics stay one
+    /// keystroke away rather than flooding the transcript.
+    pub activity_mode: String,
     /// Persona selected for new sessions.
     pub selected_persona: Option<String>,
     /// Approved profile-trait collection selected for new sessions.
@@ -80,6 +84,7 @@ impl Default for UiState {
             active_agent: None,
             last_provider: None,
             thinking_enabled: true,
+            activity_mode: "default".into(),
             selected_persona: None,
             profile_name: "default".into(),
             menus: BTreeMap::new(),
@@ -115,6 +120,9 @@ impl UiState {
         }
         if self.version < 5 {
             self.menus.clear();
+        }
+        if self.version < 6 && self.activity_mode.trim().is_empty() {
+            self.activity_mode = "default".into();
         }
         self.version = UI_STATE_VERSION;
     }
@@ -244,9 +252,26 @@ mod tests {
         }"#;
         let mut state: UiState = serde_json::from_str(raw).expect("legacy state");
         state.migrate();
-        assert_eq!(state.version, 5);
+        assert_eq!(state.version, UI_STATE_VERSION);
         assert_eq!(state.profile_name, "Sans");
         assert!(state.menus.is_empty());
+    }
+
+    #[test]
+    fn v5_state_migrates_to_the_concise_activity_view() {
+        let raw = r#"{ "version": 5, "thinking_enabled": true }"#;
+        let mut state: UiState = serde_json::from_str(raw).expect("legacy state");
+        state.migrate();
+        assert_eq!(state.version, 6);
+        assert_eq!(state.activity_mode, "default");
+    }
+
+    #[test]
+    fn an_explicit_activity_mode_survives_migration() {
+        let raw = r#"{ "version": 5, "activity_mode": "debug" }"#;
+        let mut state: UiState = serde_json::from_str(raw).expect("legacy state");
+        state.migrate();
+        assert_eq!(state.activity_mode, "debug");
     }
 
     #[test]

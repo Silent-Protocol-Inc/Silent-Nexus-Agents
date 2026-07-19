@@ -1166,6 +1166,130 @@ impl Pager {
     }
 }
 
+// ----------------------------------------------------------- activity detail
+
+/// One tab of the activity detail overlay. Tabs with no content are never
+/// built, so the operator only ever sees tabs that hold something.
+pub struct ActivityTab {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+/// The Ctrl+E overlay: everything the concise timeline held back for the
+/// current turn, grouped by concern and scrollable. Content arrives already
+/// sanitized and redacted; this view only arranges it.
+pub struct ActivityDetail {
+    pub tabs: Vec<ActivityTab>,
+    pub selected: usize,
+    pub scroll: u16,
+    /// Active in-panel search, when the operator has pressed `/`.
+    pub search: Option<String>,
+    /// True while the search box is accepting keystrokes.
+    pub editing_search: bool,
+    /// Copy mode renders the active tab unstyled for clean terminal selection.
+    pub copy_mode: bool,
+}
+
+impl ActivityDetail {
+    pub fn new(tabs: Vec<ActivityTab>) -> Self {
+        Self {
+            tabs,
+            selected: 0,
+            scroll: 0,
+            search: None,
+            editing_search: false,
+            copy_mode: false,
+        }
+    }
+
+    pub fn active(&self) -> Option<&ActivityTab> {
+        self.tabs.get(self.selected)
+    }
+
+    /// Lines of the active tab, filtered by the in-panel search.
+    pub fn visible_lines(&self) -> Vec<String> {
+        let Some(tab) = self.active() else {
+            return Vec::new();
+        };
+        match self.search.as_deref().filter(|q| !q.is_empty()) {
+            Some(query) => {
+                let needle = query.to_lowercase();
+                tab.lines
+                    .iter()
+                    .filter(|line| line.to_lowercase().contains(&needle))
+                    .cloned()
+                    .collect()
+            }
+            None => tab.lines.clone(),
+        }
+    }
+
+    fn select(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.selected = index;
+            // Scroll is per-tab-view; carrying it across tabs would land the
+            // operator in the middle of unrelated content.
+            self.scroll = 0;
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
+        if self.editing_search {
+            match key.code {
+                KeyCode::Esc => {
+                    self.editing_search = false;
+                    self.search = None;
+                    self.scroll = 0;
+                }
+                KeyCode::Enter => self.editing_search = false,
+                KeyCode::Backspace => {
+                    if let Some(query) = self.search.as_mut() {
+                        query.pop();
+                    }
+                    self.scroll = 0;
+                }
+                KeyCode::Char(c) => {
+                    self.search.get_or_insert_with(String::new).push(c);
+                    self.scroll = 0;
+                }
+                _ => {}
+            }
+            return Outcome::Consumed;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return Outcome::Close,
+            // Ctrl+E toggles the overlay shut from inside as well as open.
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Outcome::Close
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                let next = (self.selected + 1) % self.tabs.len().max(1);
+                self.select(next);
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                let count = self.tabs.len().max(1);
+                let prev = (self.selected + count - 1) % count;
+                self.select(prev);
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                self.select(c as usize - '1' as usize);
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_add(1),
+            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
+            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
+            KeyCode::Home | KeyCode::Char('g') => self.scroll = 0,
+            KeyCode::Char('/') => {
+                self.editing_search = true;
+                self.search = Some(String::new());
+            }
+            KeyCode::Char('c') => self.copy_mode = !self.copy_mode,
+            _ => {}
+        }
+        Outcome::Consumed
+    }
+}
+
 // ------------------------------------------------------------------ progress
 
 /// Live progress dialog (device login): streams lines, shows the
@@ -1283,6 +1407,7 @@ pub enum Overlay {
     Pager(Pager),
     Progress(Progress),
     Summary(SummaryPreview),
+    ActivityDetail(Box<ActivityDetail>),
 }
 
 impl Overlay {
@@ -1296,6 +1421,7 @@ impl Overlay {
             Overlay::Pager(p) => p.handle_key(key),
             Overlay::Progress(p) => p.handle_key(key),
             Overlay::Summary(s) => s.handle_key(key),
+            Overlay::ActivityDetail(d) => d.handle_key(key),
         }
     }
 }
@@ -1310,6 +1436,76 @@ mod tests {
 
     fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
+    }
+
+    fn detail() -> ActivityDetail {
+        ActivityDetail::new(vec![
+            ActivityTab {
+                title: "Activity".into(),
+                lines: (0..40).map(|i| format!("activity line {i}")).collect(),
+            },
+            ActivityTab {
+                title: "Tools".into(),
+                lines: vec!["fs.read_file · ok".into(), "shell.run · failed".into()],
+            },
+        ])
+    }
+
+    #[test]
+    fn activity_detail_switches_tabs_and_resets_scroll() {
+        let mut d = detail();
+        d.scroll = 12;
+        assert!(matches!(d.handle_key(key(KeyCode::Tab)), Outcome::Consumed));
+        assert_eq!(d.selected, 1);
+        assert_eq!(d.scroll, 0, "a new tab starts at the top");
+        d.handle_key(key(KeyCode::Tab));
+        assert_eq!(d.selected, 0, "tabs wrap");
+        d.handle_key(key(KeyCode::Char('2')));
+        assert_eq!(d.selected, 1, "number keys jump directly");
+        d.handle_key(key(KeyCode::Char('9')));
+        assert_eq!(d.selected, 1, "out-of-range numbers are ignored");
+    }
+
+    #[test]
+    fn activity_detail_scrolls_and_closes() {
+        let mut d = detail();
+        d.handle_key(key(KeyCode::PageDown));
+        assert_eq!(d.scroll, 10);
+        d.handle_key(key(KeyCode::Up));
+        assert_eq!(d.scroll, 9);
+        d.handle_key(key(KeyCode::Home));
+        assert_eq!(d.scroll, 0);
+        assert!(matches!(d.handle_key(key(KeyCode::Esc)), Outcome::Close));
+        assert!(matches!(
+            detail().handle_key(modified_key(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            Outcome::Close,
+        ));
+    }
+
+    #[test]
+    fn activity_detail_search_filters_the_active_tab() {
+        let mut d = detail();
+        d.selected = 1;
+        d.handle_key(key(KeyCode::Char('/')));
+        assert!(d.editing_search);
+        for c in "failed".chars() {
+            d.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(d.visible_lines(), vec!["shell.run · failed".to_string()]);
+        // Escape clears the filter rather than closing the overlay.
+        assert!(matches!(d.handle_key(key(KeyCode::Esc)), Outcome::Consumed));
+        assert!(d.search.is_none());
+        assert_eq!(d.visible_lines().len(), 2);
+    }
+
+    #[test]
+    fn activity_detail_copy_mode_toggles() {
+        let mut d = detail();
+        assert!(!d.copy_mode);
+        d.handle_key(key(KeyCode::Char('c')));
+        assert!(d.copy_mode);
+        d.handle_key(key(KeyCode::Char('c')));
+        assert!(!d.copy_mode);
     }
 
     #[test]

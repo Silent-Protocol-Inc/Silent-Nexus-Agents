@@ -8,9 +8,10 @@ use crate::views::Overlay;
 use nexus_app::Sev;
 use nexus_core::brand;
 use nexus_core::orchestration::ActiveWorkSnapshot;
+use nexus_core::orchestration::StageStatus;
 use nexus_core::timeline::{
-    LifecyclePhase, SessionViewState, TimelineEvent, TimelineKind, TimelineSource, TimelineStatus,
-    TranscriptDetail, TranscriptFilter,
+    ActivityMode, ActivityVisibility, LifecyclePhase, SessionViewState, TimelineEvent,
+    TimelineKind, TimelineSource, TimelineStatus, TranscriptDetail, TranscriptFilter,
 };
 use nexus_core::{SessionId, SpanId, TraceId, TurnId};
 use std::collections::VecDeque;
@@ -151,6 +152,16 @@ pub struct State {
     /// blocked until this turn finishes or is explicitly cancelled.
     pub turn_abort: Option<tokio::task::AbortHandle>,
     pub thinking_enabled: bool,
+    /// Timeline verbosity: Default (concise) hides reasoning/diagnostics.
+    pub activity_mode: ActivityMode,
+    /// When the active turn started, for the live elapsed counter.
+    pub turn_started: Option<Instant>,
+    /// Cap on the NEXUS activity preview (`[tui.activity].reasoning_preview_lines`).
+    pub preview_lines: usize,
+    /// Activity animation style: `nexus`, `minimal`, or `off`.
+    pub animation: String,
+    /// Frames the activity animation advances per tick: slow 1, normal 2, fast 3.
+    pub animation_rate: usize,
     pub active_work: ActiveWorkSnapshot,
 }
 
@@ -221,11 +232,94 @@ impl State {
             cancel_login: None,
             turn_abort: None,
             thinking_enabled,
+            activity_mode: ActivityMode::default(),
+            turn_started: None,
+            preview_lines: 3,
+            animation: "nexus".into(),
+            animation_rate: 2,
             active_work,
         };
         s.system(format!("{} ONLINE :: {}", brand::MARK, brand::TAGLINE));
         s.system("Type a message, `/` for commands, Ctrl+K for the palette, /help for keys.");
         s
+    }
+
+    /// Whether an event appears in the main timeline: it must pass the
+    /// content-type filter and the verbosity mode. Default mode shows only
+    /// Essential events; reasoning/diagnostics live in the Ctrl+E detail.
+    pub fn event_visible(&self, event: &TimelineEvent) -> bool {
+        self.transcript_filter.matches(event) && self.activity_mode.shows(event.kind.visibility())
+    }
+
+    /// What the agent is doing right now, derived from structured runtime
+    /// state rather than guessed from prose.
+    pub fn activity_state_label(&self) -> &'static str {
+        let work = &self.active_work;
+        if !work.waiting_approvals.is_empty() || work.turn_state.contains("waiting") {
+            return "WAITING";
+        }
+        if let Some(tool) = &work.active_foreground_tool {
+            return if tool.starts_with("web.") || tool.contains("search") {
+                "SEARCHING"
+            } else {
+                "EXECUTING"
+            };
+        }
+        if !work.validation_pending.is_empty() {
+            return "VERIFYING";
+        }
+        match &work.work {
+            Some(plan) if !plan.approved => "PLANNING",
+            _ => "PROCESSING",
+        }
+    }
+
+    /// True when the active turn carries a real provider reasoning channel.
+    /// Only then may the component claim to show reasoning — a summary the
+    /// harness derived from its own state is labelled ACTIVITY instead.
+    pub fn has_provider_reasoning(&self) -> bool {
+        let turn = self.active_turn_id.as_ref();
+        self.timeline.iter().rev().take(64).any(|event| {
+            matches!(event.kind, TimelineKind::ReasoningSummary { .. })
+                && turn.is_none_or(|id| &event.turn_id == id)
+        })
+    }
+
+    /// Text for the activity preview, most informative first. Returns the
+    /// harness's own structured knowledge — never fabricated reasoning.
+    pub fn activity_preview(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let work = &self.active_work;
+        if let Some(objective) = work.objective.as_ref().filter(|o| !o.trim().is_empty()) {
+            out.push(objective.trim().to_string());
+        }
+        if let Some(plan) = &work.work {
+            if let Some(stage) = plan
+                .stages
+                .iter()
+                .find(|stage| stage.status == StageStatus::Running)
+            {
+                out.push(stage.title.clone());
+                if let Some(next) = stage.next_action.as_ref().filter(|n| !n.trim().is_empty()) {
+                    out.push(format!("Next · {}", next.trim()));
+                }
+            }
+        }
+        if let Some(pending) = work.validation_pending.first() {
+            out.push(format!("Pending check · {pending}"));
+        }
+        // Fall back to the newest non-essential card, which is exactly the
+        // detail the concise timeline is holding back.
+        if out.is_empty() {
+            if let Some(event) = self.timeline.iter().rev().take(64).find(|event| {
+                event.kind.visibility() != ActivityVisibility::Essential
+                    && !event.summary.trim().is_empty()
+            }) {
+                out.push(event.summary.trim().to_string());
+            }
+        }
+        out.truncate(self.preview_lines.max(1));
+        out
     }
 
     pub fn set_theme(&mut self, name: &str) {
@@ -596,6 +690,48 @@ mod tests {
             Vec::new(),
             false,
         )
+    }
+
+    #[test]
+    fn activity_mode_gates_the_visible_timeline() {
+        let mut state = state();
+        state.timeline.clear();
+        state.user("ship the release");
+        state.activity("packed 12 files into context");
+        state.push_local_event(
+            TimelineStatus::Completed,
+            "routing".into(),
+            TimelineKind::ModelRouting {
+                provider: "mock".into(),
+                model: "mock".into(),
+                reason: "default".into(),
+            },
+        );
+        let visible = |s: &State| s.timeline.iter().filter(|e| s.event_visible(e)).count();
+
+        assert_eq!(state.activity_mode, ActivityMode::Default);
+        assert_eq!(visible(&state), 1, "default shows only essential activity");
+        state.activity_mode = ActivityMode::Detailed;
+        assert_eq!(visible(&state), 2, "detailed adds collapsed detail");
+        state.activity_mode = ActivityMode::Debug;
+        assert_eq!(visible(&state), 3, "debug adds diagnostics");
+    }
+
+    #[test]
+    fn transcript_filter_stays_orthogonal_to_activity_mode() {
+        let mut state = state();
+        state.timeline.clear();
+        state.user("ship the release");
+        state.activity("packed 12 files into context");
+        state.activity_mode = ActivityMode::Debug;
+        let visible = |s: &State| s.timeline.iter().filter(|e| s.event_visible(e)).count();
+        assert_eq!(visible(&state), 2, "debug shows both events");
+        state.transcript_filter = TranscriptFilter::Diffs;
+        assert_eq!(
+            visible(&state),
+            0,
+            "the content-type filter still applies in debug"
+        );
     }
 
     #[test]

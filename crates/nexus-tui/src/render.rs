@@ -8,7 +8,10 @@
 
 use crate::state::{Focus, Mode, State, WrapLayoutCacheEntry};
 use crate::theme::Theme;
-use crate::views::{Form, Menu, Overlay, Pager, Palette, Progress, SecretInput, SummaryPreview};
+use crate::views::{
+    ActivityDetail, ActivityTab, Form, Menu, Overlay, Pager, Palette, Progress, SecretInput,
+    SummaryPreview,
+};
 use nexus_app::{Item, Report, Sev};
 use nexus_core::brand::{self, BrandConstraints, BrandLockup, BrandRole, BrandVariant};
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
@@ -365,32 +368,188 @@ fn draw_header(
 
 // ------------------------------------------------------------ processing fx
 
-/// Neon "data stream" shown while the agent works: a pulse of shaded blocks
-/// sweeping a fixed track, glitch mark up front. Honest and quiet under
-/// reduced motion.
-fn processing_line(st: &State, t: &Theme) -> Line<'static> {
-    if st.reduced_motion {
-        return Line::from(Span::styled("  ▪ NEXUS PROCESSING", t.secondary()));
+/// Cells in the activity sweep track.
+const ACTIVITY_TRACK: usize = 12;
+
+/// Wrap prose on word boundaries at display width, falling back to a hard
+/// break for any single word too long to fit.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for word in text.split_whitespace() {
+        let word_width = brand::visible_width(word);
+        if word_width > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            lines.extend(wrap_terminal_line(word, width));
+            if let Some(last) = lines.pop() {
+                current_width = brand::visible_width(&last);
+                current = last;
+            }
+            continue;
+        }
+        let needed = if current.is_empty() {
+            word_width
+        } else {
+            word_width + 1
+        };
+        if current_width + needed > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+            current_width += 1;
+        }
+        current.push_str(word);
+        current_width += word_width;
     }
-    const TRACK: usize = 18;
-    const PULSE: [char; 7] = ['░', '▒', '▓', '█', '▓', '▒', '░'];
-    let tick = st.spinner;
-    let head = tick % (TRACK + PULSE.len());
-    let mut cells = vec![' '; TRACK];
-    for (i, c) in PULSE.iter().enumerate() {
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// The animated sweep: a bright block group travelling a dim track with a
+/// scan marker at its head. Empty under reduced motion or `animation = "off"`,
+/// where the caller falls back to a static marker.
+fn activity_track(st: &State) -> Vec<Span<'static>> {
+    let t = &st.theme;
+    if st.reduced_motion || st.animation == "off" {
+        return Vec::new();
+    }
+    if st.animation == "minimal" {
+        let glyph = ['·', '∙', '•', '∙'][(st.spinner * st.animation_rate / 2) % 4];
+        return vec![Span::styled(glyph.to_string(), t.primary())];
+    }
+    const GROUP: [char; 3] = ['▰', '▰', '▰'];
+    let frame = st.spinner.wrapping_mul(st.animation_rate);
+    let head = frame % (ACTIVITY_TRACK + GROUP.len());
+    let mut cells = ['▱'; ACTIVITY_TRACK];
+    let mut marker = None;
+    for (i, glyph) in GROUP.iter().enumerate() {
         let pos = head as isize - i as isize;
-        if (0..TRACK as isize).contains(&pos) {
-            cells[pos as usize] = *c;
+        if (0..ACTIVITY_TRACK as isize).contains(&pos) {
+            cells[pos as usize] = *glyph;
+            if i == 0 {
+                marker = Some(pos as usize);
+            }
         }
     }
-    let track: String = cells.into_iter().collect();
-    let glyph = ['◢', '◣', '◤', '◥'][tick % 4];
-    Line::from(vec![
-        Span::styled(format!("  {glyph} "), t.secondary()),
-        Span::styled("NEXUS PROCESSING ", t.primary()),
-        Span::styled(track, t.secondary()),
-        Span::styled(["⟨", "⟩", "⟨", "⟩"][(tick / 2) % 4].to_string(), t.muted()),
-    ])
+    // Three spans so the scan head reads in a different hue from the trail.
+    let mut spans = Vec::new();
+    let mut flush = |text: String, style| {
+        if !text.is_empty() {
+            spans.push(Span::styled(text, style));
+        }
+    };
+    match marker {
+        Some(at) => {
+            flush(cells[..at].iter().collect(), t.muted());
+            flush(cells[at].to_string(), t.primary());
+            flush(cells[at + 1..].iter().collect(), t.muted());
+        }
+        None => flush(cells.iter().collect(), t.muted()),
+    }
+    spans
+}
+
+fn format_elapsed(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
+/// The live activity component: one status row, up to
+/// `reasoning_preview_lines` of preview drawn from structured runtime state,
+/// and a hint pointing at the full detail. Collapses to a single row on
+/// narrow terminals.
+fn processing_lines(st: &State, t: &Theme, width: usize) -> Vec<Line<'static>> {
+    let state_label = st.activity_state_label();
+    let elapsed = st.turn_started.map(|s| format_elapsed(s.elapsed()));
+
+    // Mobile: one row, no preview, no track.
+    if width < 40 {
+        let mut text = format!("◢ {state_label}");
+        if let Some(elapsed) = &elapsed {
+            text.push_str(" · ");
+            text.push_str(elapsed);
+        }
+        return vec![Line::from(Span::styled(text, t.primary()))];
+    }
+
+    // "PROCESSING" claims a provider reasoning channel; without one this is
+    // the harness reporting its own activity, and it says so.
+    let heading = if st.has_provider_reasoning() {
+        format!("NEXUS {state_label}")
+    } else {
+        "NEXUS ACTIVITY".to_string()
+    };
+    let marker = if st.reduced_motion || st.animation == "off" {
+        "▪"
+    } else {
+        "◢"
+    };
+
+    let track = activity_track(st);
+    let mut head = vec![
+        Span::styled(format!("  {marker} "), t.secondary()),
+        Span::styled(
+            if track.is_empty() {
+                heading.clone()
+            } else {
+                format!("{heading} ")
+            },
+            t.primary(),
+        ),
+    ];
+    head.extend(track);
+    if let Some(elapsed) = elapsed {
+        head.push(Span::styled(format!("  {elapsed}"), t.muted()));
+    }
+    let mut lines = vec![Line::from(head)];
+
+    let preview = st.activity_preview();
+    if preview.is_empty() || width < 56 {
+        return lines;
+    }
+    let wrap_width = width.saturating_sub(6).max(8);
+    let mut rows = 0usize;
+    let mut truncated = false;
+    for entry in &preview {
+        if rows >= st.preview_lines.max(1) {
+            truncated = true;
+            break;
+        }
+        let clean = nexus_core::sanitize::sanitize_terminal(entry);
+        for chunk in wrap_words(&clean, wrap_width) {
+            if rows >= st.preview_lines.max(1) {
+                truncated = true;
+                break;
+            }
+            lines.push(Line::from(Span::styled(
+                format!("    {chunk}"),
+                t.secondary(),
+            )));
+            rows += 1;
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        if truncated {
+            "    … Ctrl+E details".to_string()
+        } else {
+            "    Ctrl+E details".to_string()
+        },
+        t.muted(),
+    )));
+    lines
 }
 
 // ---------------------------------------------------------------- transcript
@@ -408,14 +567,7 @@ fn draw_transcript(
     let mut layouts = Vec::new();
     st.event_row_offsets.clear();
     for (index, event) in st.timeline.iter().enumerate() {
-        if !st.transcript_filter.matches(event) {
-            continue;
-        }
-        if matches!(
-            event.kind,
-            nexus_core::timeline::TimelineKind::ReasoningSummary { .. }
-        ) && !st.thinking_enabled
-        {
+        if !st.event_visible(event) {
             continue;
         }
         let selected = st.selected_event == Some(index) && st.focus == Focus::Timeline;
@@ -451,8 +603,11 @@ fn draw_transcript(
         layouts.push((index, next_row, rows, expanded));
         next_row = next_row.saturating_add(rows);
     }
-    let processing_row = (st.mode == Mode::Running).then_some(next_row);
-    next_row = next_row.saturating_add(usize::from(processing_row.is_some()));
+    let processing = (st.mode == Mode::Running)
+        .then(|| processing_lines(st, t, inner_width))
+        .filter(|lines| !lines.is_empty());
+    let processing_row = processing.as_ref().map(|_| next_row);
+    next_row = next_row.saturating_add(processing.as_ref().map_or(0, Vec::len));
     let new_events_row = (st.new_events > 0).then_some(next_row);
     next_row = next_row.saturating_add(usize::from(new_events_row.is_some()));
 
@@ -513,8 +668,15 @@ fn draw_transcript(
             .max(from);
         lines.extend(rendered[from..to].iter().cloned());
     }
-    if processing_row.is_some_and(|row| row >= scroll && row < visible_end) {
-        lines.push(processing_line(st, t));
+    if let (Some(row), Some(rendered)) = (processing_row, processing.as_ref()) {
+        // Clip the component to the viewport the same way event cards are, so
+        // a 4-row activity block never overruns a short terminal.
+        let from = scroll.saturating_sub(row).min(rendered.len());
+        let to = visible_end
+            .saturating_sub(row)
+            .min(rendered.len())
+            .max(from);
+        lines.extend(rendered[from..to].iter().cloned());
     }
     if new_events_row.is_some_and(|row| row >= scroll && row < visible_end) {
         lines.push(Line::from(Span::styled(
@@ -560,6 +722,138 @@ fn event_layout_signature(
     hasher.finish()
 }
 
+/// A concise, purpose-built header for the kinds the operator sees most.
+/// Returns `None` for kinds that keep the generic status/type row.
+fn component_header(
+    event: &nexus_core::timeline::TimelineEvent,
+    t: &Theme,
+    header_style: ratatui::style::Style,
+) -> Option<Line<'static>> {
+    use nexus_core::timeline::{TimelineKind, TimelineStatus};
+
+    let running = event.status == TimelineStatus::Running;
+    let failed = matches!(
+        event.status,
+        TimelineStatus::Failed | TimelineStatus::Blocked
+    );
+    // `●` reads as live, `✓` settled, `✕` failed, `◆` handed to the background.
+    let mark = match event.status {
+        TimelineStatus::Running => "●",
+        TimelineStatus::Completed => "✓",
+        TimelineStatus::Failed => "✕",
+        TimelineStatus::Blocked => "■",
+        TimelineStatus::Cancelled => "×",
+        TimelineStatus::Waiting => "◫",
+        TimelineStatus::Pending => "◇",
+        TimelineStatus::Skipped => "–",
+    };
+    let duration = event.duration_ms.map(human_duration);
+    let mark = match &event.kind {
+        TimelineKind::BackgroundTask { .. } if !failed => "◆",
+        TimelineKind::ProviderLimit { .. } => "△",
+        _ => mark,
+    };
+
+    let (body, trailing) = match &event.kind {
+        TimelineKind::ToolExecution {
+            tool, exit_status, ..
+        } => {
+            let detail = match (failed, exit_status.as_deref()) {
+                (true, Some(status)) if status != "error" => format!(" · exit {status}"),
+                (true, _) => " · failed".to_string(),
+                _ => String::new(),
+            };
+            let summary = if event.summary.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", truncate(event.summary.trim(), 60))
+            };
+            (format!("{tool}{detail}{summary}"), duration)
+        }
+        TimelineKind::SandboxCommand { command, .. } => {
+            // Show enough of the command line to identify it, not just argv[0].
+            let rendered = truncate(&command.join(" "), 52);
+            let rendered = if rendered.is_empty() {
+                "shell".to_string()
+            } else {
+                rendered
+            };
+            let verb = if running {
+                format!("Running {rendered}")
+            } else if failed {
+                format!("Failed · {rendered}")
+            } else {
+                format!("Ran {rendered}")
+            };
+            (verb, duration)
+        }
+        TimelineKind::FileMutation {
+            path, operation, ..
+        } => {
+            let verb = match operation.as_str() {
+                "create" | "created" => "Created",
+                "delete" | "deleted" => "Deleted",
+                _ => "Updated",
+            };
+            (
+                format!("{verb} {}", crate::layout::compact_path(path, 48, true)),
+                None,
+            )
+        }
+        TimelineKind::Diff {
+            path,
+            insertions,
+            deletions,
+            ..
+        } => {
+            let target = path
+                .as_deref()
+                .map(|path| crate::layout::compact_path(path, 44, true))
+                .unwrap_or_else(|| "working tree".into());
+            (
+                format!("Updated {target}"),
+                Some(format!("+{insertions} −{deletions}")),
+            )
+        }
+        // The message body follows on its own line, so the header stays a
+        // label — repeating a short error in both places reads as a stutter.
+        TimelineKind::Error {
+            class, retryable, ..
+        } => (
+            class.clone(),
+            retryable.then(|| "retryable".to_string()).or(duration),
+        ),
+        TimelineKind::ProviderLimit { .. } => ("Provider limit".to_string(), None),
+        // The answer is the point of the turn: no status word, no type label,
+        // just a quiet marker and any evidence worth citing.
+        TimelineKind::FinalAnswer { .. } => ("Answer".to_string(), {
+            let sources = event.artifact_refs.len();
+            (sources > 0).then(|| format!("Sources: {sources}"))
+        }),
+        TimelineKind::BackgroundTask { .. } => (
+            format!("Background · {}", truncate(event.summary.trim(), 60)),
+            duration,
+        ),
+        _ => return None,
+    };
+
+    // Errors and limits are warnings first; the status colour would read as
+    // just another card otherwise.
+    let body_style = match &event.kind {
+        TimelineKind::Error { .. } => t.failure(),
+        TimelineKind::ProviderLimit { .. } => t.warning(),
+        _ => t.text(),
+    };
+    let mut spans = vec![
+        Span::styled(format!("{mark} "), header_style),
+        Span::styled(body, body_style),
+    ];
+    if let Some(trailing) = trailing {
+        spans.push(Span::styled(format!("  {trailing}"), t.muted()));
+    }
+    Some(Line::from(spans))
+}
+
 fn event_lines(
     event: &nexus_core::timeline::TimelineEvent,
     detail: nexus_core::timeline::TranscriptDetail,
@@ -597,10 +891,19 @@ fn event_lines(
     } else {
         status_style
     };
-    let mut lines = vec![Line::from(vec![
-        Span::styled(format!("{glyph} {status_label:<9}"), header_style),
-        Span::styled(format!(" {label}{meta}"), t.muted()),
-    ])];
+    // Common kinds get a purpose-built header that reads as a sentence; the
+    // generic status/type/meta row remains the fallback for the rest.
+    let component = component_header(event, t, header_style);
+    // A component header already states the summary; repeating it below would
+    // be the verbosity this redesign is removing.
+    let header_carries_summary = component.is_some();
+    let mut lines = match component {
+        Some(line) => vec![line],
+        None => vec![Line::from(vec![
+            Span::styled(format!("{glyph} {status_label:<9}"), header_style),
+            Span::styled(format!(" {label}{meta}"), t.muted()),
+        ])],
+    };
     // Message-like events use `summary` as searchable/indexed metadata (often
     // the first body line). Rendering both fields duplicated one-line messages
     // and repeated the first line of multiline messages. The body is the sole
@@ -618,7 +921,7 @@ fn event_lines(
         | TimelineKind::ProviderLimit { message, .. } => !message.trim().is_empty(),
         _ => false,
     };
-    if !has_primary_body {
+    if !has_primary_body && !header_carries_summary {
         push_wrapped(&mut lines, &event.summary, width, t.text());
     }
 
@@ -724,11 +1027,17 @@ fn event_lines(
             deletions,
             preview,
         } => {
-            let header = match path {
-                Some(path) => format!("▸ {path}  (+{insertions} −{deletions})"),
-                None => format!("(+{insertions} −{deletions})"),
-            };
-            lines.push(Line::from(Span::styled(header, t.secondary())));
+            // The component header already names the file and the counts; the
+            // full path is still worth showing when it was compacted away.
+            if !header_carries_summary {
+                let header = match path {
+                    Some(path) => format!("▸ {path}  (+{insertions} −{deletions})"),
+                    None => format!("(+{insertions} −{deletions})"),
+                };
+                lines.push(Line::from(Span::styled(header, t.secondary())));
+            } else if let Some(path) = path.as_deref().filter(|path| path.len() > 44) {
+                lines.push(Line::from(Span::styled(path.to_string(), t.muted())));
+            }
             let cap = if expanded { 400 } else { 40 };
             for source_line in preview.lines().take(cap) {
                 let style = match source_line.as_bytes().first() {
@@ -1388,7 +1697,194 @@ fn draw_overlay(f: &mut Frame, area: Rect, overlay: &Overlay, st: &State, t: &Th
         Overlay::Pager(p) => draw_pager(f, area, p, t),
         Overlay::Progress(p) => draw_progress(f, area, p, st, t),
         Overlay::Summary(s) => draw_summary(f, area, s, t),
+        Overlay::ActivityDetail(d) => draw_activity_detail(f, area, d, t),
     }
+}
+
+fn draw_activity_detail(f: &mut Frame, area: Rect, d: &ActivityDetail, t: &Theme) {
+    // Mobile gets the whole screen; there is no room for a floating panel.
+    let mobile = area.width < 60;
+    let rect = if mobile {
+        area
+    } else {
+        overlay_rect(
+            area,
+            area.width.saturating_sub(6).min(110),
+            area.height.saturating_sub(4),
+        )
+    };
+    f.render_widget(Clear, rect);
+
+    let hint = if d.editing_search {
+        " type to filter · Enter apply · Esc clear "
+    } else if mobile {
+        " Tab tabs · Esc close "
+    } else {
+        " Tab/1-9 tabs · ↑↓ PgUp/PgDn scroll · / search · c copy · Esc close "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(t.primary())
+        .title(Span::styled(" nexus activity ", t.brand()))
+        .title_bottom(Span::styled(hint, t.muted()));
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut tab_row: Vec<Span> = Vec::new();
+    for (index, tab) in d.tabs.iter().enumerate() {
+        if index > 0 {
+            tab_row.push(Span::styled(" · ", t.muted()));
+        }
+        let label = if mobile {
+            tab.title.clone()
+        } else {
+            format!("{} {}", index + 1, tab.title)
+        };
+        tab_row.push(Span::styled(
+            label,
+            if index == d.selected {
+                t.primary().add_modifier(Modifier::BOLD)
+            } else {
+                t.muted()
+            },
+        ));
+    }
+    lines.push(Line::from(tab_row));
+    if let Some(query) = &d.search {
+        lines.push(Line::from(Span::styled(
+            format!("/{query}{}", if d.editing_search { "▏" } else { "" }),
+            t.warning(),
+        )));
+    }
+    lines.push(Line::from(""));
+
+    let body = d.visible_lines();
+    if body.is_empty() {
+        lines.push(Line::from(Span::styled(
+            if d.search.is_some() {
+                "no lines match this filter"
+            } else {
+                "nothing recorded for this tab yet"
+            },
+            t.muted(),
+        )));
+    } else {
+        // Copy mode drops styling so a terminal selection yields clean text.
+        let style = if d.copy_mode { t.text() } else { t.secondary() };
+        lines.extend(
+            body.into_iter()
+                .map(|line| Line::from(Span::styled(line, style))),
+        );
+    }
+
+    let total = lines.len() as u16;
+    let inner = rect.height.saturating_sub(2);
+    let scroll = d.scroll.min(total.saturating_sub(inner.min(total)));
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        rect,
+    );
+}
+
+/// Group the current turn's events into detail tabs. Only tabs with content
+/// are returned, and the Raw tab is built only in Debug mode.
+pub(crate) fn activity_detail_tabs(st: &State) -> Vec<ActivityTab> {
+    use nexus_core::timeline::{ActivityMode, TimelineKind};
+    let turn = st
+        .active_turn_id
+        .clone()
+        .or_else(|| st.timeline.last().map(|event| event.turn_id.clone()));
+    let events: Vec<&nexus_core::timeline::TimelineEvent> = st
+        .timeline
+        .iter()
+        .filter(|event| turn.as_ref().is_none_or(|id| &event.turn_id == id))
+        .collect();
+
+    let describe = |event: &nexus_core::timeline::TimelineEvent| {
+        let summary = nexus_core::sanitize::sanitize_terminal(&event.summary);
+        match event
+            .kind
+            .text()
+            .map(str::trim)
+            .filter(|text| !text.is_empty() && *text != event.summary.trim())
+        {
+            Some(text) => format!(
+                "{} · {summary}\n    {}",
+                event.status.as_str(),
+                nexus_core::sanitize::sanitize_terminal(text)
+            ),
+            None => format!("{} · {summary}", event.status.as_str()),
+        }
+    };
+
+    let collect = |title: &str, matches: &dyn Fn(&TimelineKind) -> bool| {
+        let lines: Vec<String> = events
+            .iter()
+            .filter(|event| matches(&event.kind))
+            .map(|event| describe(event))
+            .collect();
+        (!lines.is_empty()).then(|| ActivityTab {
+            title: title.to_string(),
+            lines,
+        })
+    };
+
+    let mut tabs: Vec<ActivityTab> = Vec::new();
+    // Activity: the whole turn in order, so the tab is never empty when
+    // anything happened at all.
+    if !events.is_empty() {
+        tabs.push(ActivityTab {
+            title: "Activity".into(),
+            lines: events.iter().map(|event| describe(event)).collect(),
+        });
+    }
+    tabs.extend(collect("Reasoning", &|kind| {
+        matches!(kind, TimelineKind::ReasoningSummary { .. })
+    }));
+    tabs.extend(collect("Tools", &|kind| {
+        matches!(
+            kind,
+            TimelineKind::ToolExecution { .. }
+                | TimelineKind::ToolProposal { .. }
+                | TimelineKind::ToolProgress { .. }
+                | TimelineKind::SandboxCommand { .. }
+        )
+    }));
+    tabs.extend(collect("Policy", &|kind| {
+        matches!(
+            kind,
+            TimelineKind::PolicyDecision { .. } | TimelineKind::Approval { .. }
+        )
+    }));
+    tabs.extend(collect("Provider", &|kind| {
+        matches!(
+            kind,
+            TimelineKind::ProviderActivity { .. }
+                | TimelineKind::ModelRouting { .. }
+                | TimelineKind::ProviderLimit { .. }
+                | TimelineKind::Retry { .. }
+        )
+    }));
+    // Raw payloads are a debugging tool, not a default surface.
+    if st.activity_mode == ActivityMode::Debug {
+        let lines: Vec<String> = events
+            .iter()
+            .filter_map(|event| {
+                serde_json::to_string(&event.kind)
+                    .ok()
+                    .map(|json| nexus_core::sanitize::sanitize_terminal(&json))
+            })
+            .collect();
+        if !lines.is_empty() {
+            tabs.push(ActivityTab {
+                title: "Raw".into(),
+                lines,
+            });
+        }
+    }
+    tabs
 }
 
 fn draw_palette(f: &mut Frame, area: Rect, p: &Palette, t: &Theme) {
@@ -2449,6 +2945,294 @@ mod tests {
         }
     }
 
+    fn activity_state() -> State {
+        let mut state = representative_state();
+        state.mode = Mode::Running;
+        state.turn_started = Some(std::time::Instant::now());
+        state.reduced_motion = false;
+        state.active_work.objective = Some("Ship the 2.3.0 release".into());
+        state
+    }
+
+    #[test]
+    fn the_activity_preview_never_exceeds_its_configured_line_budget() {
+        let mut state = activity_state();
+        state.active_work.objective = Some("word ".repeat(200));
+        for budget in [1usize, 3, 5] {
+            state.preview_lines = budget;
+            let lines = processing_lines(&state, &state.theme.clone(), 80);
+            // One status row + preview rows + one hint row.
+            assert_eq!(
+                lines.len(),
+                budget + 2,
+                "budget {budget} produced {} rows",
+                lines.len()
+            );
+            assert!(
+                line_text(lines.last().expect("hint")).contains("Ctrl+E"),
+                "the operator is always told where the detail lives",
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_terminal_collapses_activity_to_one_row() {
+        let state = activity_state();
+        let lines = processing_lines(&state, &state.theme.clone(), 36);
+        assert_eq!(lines.len(), 1);
+        let text = line_text(&lines[0]);
+        assert!(text.starts_with("◢ "), "{text}");
+        assert!(text.contains("PROCESSING") || text.contains('·'), "{text}");
+    }
+
+    #[test]
+    fn activity_is_not_labelled_as_reasoning_without_a_provider_channel() {
+        let mut state = activity_state();
+        state
+            .timeline
+            .retain(|event| !matches!(event.kind, TimelineKind::ReasoningSummary { .. }));
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
+        assert!(text.contains("NEXUS ACTIVITY"), "{text}");
+
+        state.active_turn_id = None;
+        state.push_local_event(
+            TimelineStatus::Completed,
+            "provider reasoning summary".into(),
+            TimelineKind::ReasoningSummary {
+                text: "Considering the release checklist.".into(),
+            },
+        );
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
+        assert!(
+            !text.contains("NEXUS ACTIVITY"),
+            "a real reasoning channel earns the live state label: {text}",
+        );
+        assert!(text.contains(state.activity_state_label()), "{text}");
+    }
+
+    #[test]
+    fn reduced_motion_replaces_the_sweep_with_a_static_marker() {
+        let mut state = activity_state();
+        state.reduced_motion = true;
+        assert!(activity_track(&state).is_empty());
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
+        assert!(text.contains('▪'), "{text}");
+        assert!(!text.contains('▰'), "{text}");
+    }
+
+    #[test]
+    fn the_sweep_advances_deterministically_and_wraps() {
+        let mut state = activity_state();
+        state.animation_rate = 1;
+        let frame = |state: &State| {
+            activity_track(state)
+                .iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        };
+        let period = ACTIVITY_TRACK + 3;
+        state.spinner = 0;
+        let first = frame(&state);
+        state.spinner = period;
+        assert_eq!(frame(&state), first, "the sweep is periodic");
+        state.spinner = 1;
+        assert_ne!(frame(&state), first, "successive ticks differ");
+    }
+
+    #[test]
+    fn control_characters_never_reach_the_activity_preview() {
+        let mut state = activity_state();
+        state.active_work.objective = Some("clean\u{1b}[31mred\u{7}text".into());
+        let text = processing_lines(&state, &state.theme.clone(), 80)
+            .iter()
+            .map(line_text)
+            .collect::<String>();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains('\u{7}'), "{text:?}");
+    }
+
+    #[test]
+    fn activity_tabs_are_built_only_when_they_have_content() {
+        let mut state = representative_state();
+        state.activity_mode = nexus_core::timeline::ActivityMode::Detailed;
+        let titles: Vec<String> = activity_detail_tabs(&state)
+            .into_iter()
+            .map(|tab| tab.title)
+            .collect();
+        assert!(titles.contains(&"Activity".to_string()));
+        assert!(
+            !titles.contains(&"Raw".to_string()),
+            "raw payloads are a debug surface only: {titles:?}",
+        );
+
+        state.activity_mode = nexus_core::timeline::ActivityMode::Debug;
+        let titles: Vec<String> = activity_detail_tabs(&state)
+            .into_iter()
+            .map(|tab| tab.title)
+            .collect();
+        assert!(titles.contains(&"Raw".to_string()), "{titles:?}");
+    }
+
+    #[test]
+    fn activity_detail_lines_are_sanitized() {
+        let mut state = representative_state();
+        state.push_local_event(
+            TimelineStatus::Completed,
+            "clean\u{1b}[31m summary".into(),
+            TimelineKind::Notice {
+                text: "body\u{7}bell".into(),
+                severity: "info".into(),
+            },
+        );
+        let joined = activity_detail_tabs(&state)
+            .into_iter()
+            .flat_map(|tab| tab.lines)
+            .collect::<String>();
+        assert!(!joined.contains('\u{1b}'), "{joined:?}");
+        assert!(!joined.contains('\u{7}'), "{joined:?}");
+    }
+
+    fn component_card(
+        status: TimelineStatus,
+        summary: &str,
+        kind: TimelineKind,
+        duration_ms: Option<u64>,
+    ) -> String {
+        let theme = Theme::new("cyberpunk", ColorSupport::None);
+        let mut event = message_event(summary, kind);
+        event.status = status;
+        event.duration_ms = duration_ms;
+        event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_string()
+    }
+
+    fn tool(status: TimelineStatus, exit: Option<&str>) -> TimelineKind {
+        let _ = status;
+        TimelineKind::ToolExecution {
+            tool: "fs.read_file".into(),
+            arguments: serde_json::json!({}),
+            output_preview: String::new(),
+            exit_status: exit.map(str::to_string),
+            affected_paths: vec![],
+        }
+    }
+
+    #[test]
+    fn a_tool_card_reads_as_one_line_through_its_lifecycle() {
+        let running = component_card(
+            TimelineStatus::Running,
+            "reading render.rs",
+            tool(TimelineStatus::Running, None),
+            None,
+        );
+        assert_eq!(running, "● fs.read_file · reading render.rs");
+
+        let done = component_card(
+            TimelineStatus::Completed,
+            "read 412 lines",
+            tool(TimelineStatus::Completed, Some("ok")),
+            Some(340),
+        );
+        assert_eq!(done, "✓ fs.read_file · read 412 lines  340ms");
+
+        let failed = component_card(
+            TimelineStatus::Failed,
+            "command not found",
+            tool(TimelineStatus::Failed, Some("127")),
+            Some(90),
+        );
+        assert!(failed.starts_with("✕ fs.read_file · exit 127"), "{failed}");
+    }
+
+    #[test]
+    fn a_shell_card_shows_the_command_not_just_the_program() {
+        let card = component_card(
+            TimelineStatus::Running,
+            "cargo test",
+            TimelineKind::SandboxCommand {
+                command: vec!["cargo".into(), "test".into()],
+                backend: "process".into(),
+                output_preview: String::new(),
+            },
+            None,
+        );
+        assert_eq!(card, "● Running cargo test");
+    }
+
+    #[test]
+    fn a_diff_card_states_the_file_and_counts_exactly_once() {
+        let card = component_card(
+            TimelineStatus::Completed,
+            "diff",
+            TimelineKind::Diff {
+                path: Some("crates/nexus-tui/src/render.rs".into()),
+                insertions: 42,
+                deletions: 7,
+                preview: "+added\n-removed".into(),
+            },
+            None,
+        );
+        assert!(card.starts_with("✓ Updated render.rs  +42 −7"), "{card}");
+        assert_eq!(card.matches("+42").count(), 1, "counts appear once: {card}");
+    }
+
+    #[test]
+    fn errors_and_limits_carry_their_own_marks_without_stuttering() {
+        let error = component_card(
+            TimelineStatus::Failed,
+            "provider request timed out after 30s",
+            TimelineKind::Error {
+                class: "provider_timeout".into(),
+                message: "provider request timed out after 30s".into(),
+                retryable: true,
+            },
+            None,
+        );
+        assert!(error.starts_with("✕ provider_timeout"), "{error}");
+        assert!(error.contains("retryable"), "{error}");
+        assert_eq!(
+            error.matches("timed out after 30s").count(),
+            1,
+            "the message is stated once: {error}",
+        );
+
+        let limit = component_card(
+            TimelineStatus::Waiting,
+            "resets at 14:02Z",
+            TimelineKind::ProviderLimit {
+                provider: "anthropic".into(),
+                limit_kind: "rate".into(),
+                message: "rate limited; resets at 14:02Z".into(),
+                reset_at: None,
+            },
+            None,
+        );
+        assert!(limit.starts_with("△ Provider limit"), "{limit}");
+    }
+
+    #[test]
+    fn the_final_answer_is_visually_distinct_from_diagnostics() {
+        let card = component_card(
+            TimelineStatus::Completed,
+            "answer",
+            TimelineKind::FinalAnswer {
+                text: "The release is ready.".into(),
+            },
+            None,
+        );
+        assert!(card.starts_with("✓ Answer"), "{card}");
+        assert!(
+            !card.contains("FINAL ANSWER") && !card.contains("DONE  "),
+            "no diagnostic labels on the answer: {card}",
+        );
+        assert!(card.contains("The release is ready."), "{card}");
+    }
+
     fn representative_state() -> State {
         let mut state = State::new(
             "neon-noir".into(),
@@ -2605,14 +3389,14 @@ mod tests {
         .map(|(width, height)| (width, height, fnv1a64(&rendered_text(width, height))))
         .collect();
         let expected = [
-            (36, 20, 5_230_251_151_908_132_753),
-            (45, 20, 11_886_946_297_862_773_307),
-            (60, 18, 14_716_588_342_246_616_413),
-            (60, 20, 2_050_765_263_184_676_920),
-            (80, 24, 4_299_446_386_976_637_590),
-            (100, 30, 10_276_860_616_339_363_403),
-            (120, 40, 1_517_812_557_474_212_879),
-            (160, 50, 6_021_207_112_343_019_667),
+            (36, 20, 13_812_581_967_948_532_461),
+            (45, 20, 10_867_498_953_966_715_543),
+            (60, 18, 14_614_356_305_927_070_958),
+            (60, 20, 13_128_974_092_938_649_675),
+            (80, 24, 7_204_910_961_854_061_004),
+            (100, 30, 11_943_346_917_770_416_418),
+            (120, 40, 374_212_053_389_028_937),
+            (160, 50, 5_225_851_684_132_558_617),
         ];
         assert_eq!(actual, expected);
     }

@@ -1,5 +1,43 @@
 # Changelog
 
+## [2.3.0] — 2026-07-20
+
+- Redesigned the inference, live-activity, tool-execution, and progress timeline
+  so raw internal events no longer flood the transcript. Timeline events now carry
+  a visibility tier (essential, collapsed detail, diagnostic-only) and the default
+  view shows only what the operator acted on or needs to act on.
+- Added `/view default|detailed|debug` (alias `/activity`, `d` on the timeline) to
+  choose verbosity. The choice persists per workspace and is independent of the
+  content-type filter, so `/transcript` still applies inside every mode.
+- Added a live NEXUS activity component: one status row with an elapsed counter,
+  up to `reasoning_preview_lines` of preview drawn from structured runtime state,
+  and a pointer to the full detail. It collapses to a single row on narrow
+  terminals and to a static marker under reduced motion.
+- The component is labelled honestly: it reads NEXUS ACTIVITY when the preview is
+  derived from the harness's own state, and only claims a reasoning state when the
+  provider actually supplied a reasoning channel. Nothing is fabricated or
+  relabelled as chain-of-thought.
+- Added a Ctrl+E activity detail overlay with Activity/Reasoning/Tools/Policy/
+  Provider/Raw tabs, scrolling, in-panel search, and a copy mode. Only tabs with
+  content are built; the Raw tab exists only in debug view. Opening it leaves the
+  timeline scroll position and the input contents untouched.
+- Coalesced repeated events into single cards: retries against one provider update
+  one card through to exhaustion, and a plan stage moving pending → running →
+  completed stays one row. Set `[tui.activity].coalesce_events = false` to restore
+  a card per event.
+- Redesigned per-component rendering. Cards now read as sentences — `● Running
+  cargo test`, `✓ fs.read_file · read 412 lines  340ms`, `✕ shell.run · exit 127`,
+  `✓ Updated render.rs  +42 −7`, `△ Provider limit` — instead of a generic status
+  and type row. Every state keeps a text label so it survives no-color terminals.
+- Narrative event titles replaced machine-formatted summaries (for example
+  "Proposing a 3-stage plan" rather than "planned work · 3 stage(s) · plan v1").
+- Added the `[tui.activity]` configuration block: `mode`, `reasoning_preview_lines`,
+  `show_diagnostics`, `show_token_usage`, `animation`, `animation_speed`,
+  `reduced_motion`, and `coalesce_events`. All values are defaulted and validated.
+- The animation now runs on a single adaptive clock: ~8fps only while a turn is
+  running and motion is not reduced, and a slow idle tick otherwise, so an idle
+  harness stops waking up to animate nothing.
+
 ## [2.2.0] — 2026-07-19
 
 - Made the TUI fully responsive on mobile and narrow terminals (Termius, Blink,

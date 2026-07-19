@@ -50,8 +50,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use views::{
-    LoadRequest, Menu, MenuFocusRegion, MenuSort, MenuSortDirection, Outcome, Overlay, Pager,
-    Palette, SummaryPreview, UiAction,
+    ActivityDetail, LoadRequest, Menu, MenuFocusRegion, MenuSort, MenuSortDirection, Outcome,
+    Overlay, Pager, Palette, SummaryPreview, UiAction,
 };
 
 /// One ordered message from a logical agent turn. Loop events and completion
@@ -272,6 +272,22 @@ async fn event_loop(
         history,
         app.read_ui_state(|state| state.thinking_enabled),
     );
+    // Timeline verbosity: the operator's last `/view` choice wins, falling back
+    // to config. Default keeps the timeline to essential activity.
+    st.activity_mode = nexus_core::timeline::ActivityMode::parse(
+        &app.read_ui_state(|state| state.activity_mode.clone()),
+    )
+    .or_else(|| nexus_core::timeline::ActivityMode::parse(&app.config.tui.activity.mode))
+    .unwrap_or_default();
+    let activity = &app.config.tui.activity;
+    st.preview_lines = usize::from(activity.reasoning_preview_lines).max(1);
+    st.animation = activity.animation.clone();
+    st.animation_rate = match activity.animation_speed.as_str() {
+        "slow" => 1,
+        "fast" => 3,
+        _ => 2,
+    };
+    st.reduced_motion = st.reduced_motion || activity.reduced_motion;
     st.active_work = nexus_app::services::active_work_snapshot(&app, None, "idle");
 
     // Channels.
@@ -298,6 +314,7 @@ async fn event_loop(
     let approver: Arc<dyn ApprovalHandler> = Arc::new(TuiApprover::new(appr_tx));
     let mut session: Option<SessionId> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut last_background_poll = std::time::Instant::now();
 
     // First run: no models configured yet — greet and offer onboarding.
     if app.config.models.is_empty() {
@@ -365,7 +382,20 @@ async fn event_loop(
             }
             _ = tick.tick() => {
                 st.tick();
-                if st.spinner.is_multiple_of(4) {
+                // One animation clock, adaptive rather than free-running: the
+                // sweep needs ~8fps to read as motion, but an idle harness has
+                // nothing to animate and should not wake up for it.
+                let period = if st.mode == Mode::Running && !st.reduced_motion {
+                    Duration::from_millis(120)
+                } else {
+                    Duration::from_millis(500)
+                };
+                if tick.period() != period {
+                    tick.reset();
+                    tick = tokio::time::interval(period);
+                }
+                if last_background_poll.elapsed() >= Duration::from_secs(1) {
+                    last_background_poll = std::time::Instant::now();
                     if let Some(session_id) = session.as_ref().map(SessionId::as_str) {
                         if let Ok(events) = app.timeline().background_after(
                             session_id,
@@ -544,6 +574,7 @@ fn apply_turn_done(
         return false;
     }
     st.mode = Mode::Idle;
+    st.turn_started = None;
     st.turn_abort = None;
     st.active_turn_id = None;
     match result {
@@ -667,6 +698,7 @@ fn handle_key(
             st.active_turn_id = None;
             st.live_tool_events.clear();
             st.mode = Mode::Idle;
+            st.turn_started = None;
             st.pending_approvals = 0;
             st.system_sev("running turn cancelled by operator", Sev::Warn);
             st.toast("turn cancelled", Sev::Warn);
@@ -837,6 +869,22 @@ fn handle_key(
         return;
     }
 
+    // Ctrl+E toggles the activity detail overlay from anywhere. The overlay
+    // lives in `st.overlays`, so timeline scroll and input contents are
+    // untouched while it is open.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'))
+    {
+        let tabs = render::activity_detail_tabs(st);
+        if tabs.is_empty() {
+            st.toast("no activity recorded yet", Sev::Info);
+        } else {
+            st.overlays
+                .push(Overlay::ActivityDetail(Box::new(ActivityDetail::new(tabs))));
+        }
+        return;
+    }
+
     if matches!(key.code, KeyCode::F(6)) {
         st.focus = st.focus.next();
         st.context_drawer = st.focus == Focus::Context;
@@ -858,17 +906,6 @@ fn handle_key(
     }
 
     if st.focus == Focus::Timeline {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'))
-        {
-            if st
-                .selected_timeline_event()
-                .is_some_and(|event| matches!(event.kind, TimelineKind::ProviderActivity { .. }))
-            {
-                activate_selected_event(st, app);
-            }
-            return;
-        }
         match key.code {
             KeyCode::Char('k') | KeyCode::Up => {
                 select_previous_event(st);
@@ -880,6 +917,12 @@ fn handle_key(
             }
             KeyCode::Enter => {
                 activate_selected_event(st, app);
+                return;
+            }
+            // `d` cycles verbosity without leaving the timeline. Safe here
+            // because typing happens in Focus::Input, not Focus::Timeline.
+            KeyCode::Char('d') => {
+                run_command(st, "view cycle", app, session, ui_tx);
                 return;
             }
             KeyCode::Char('n') => {
@@ -1131,14 +1174,10 @@ fn load_older_timeline(st: &mut State, app: &Arc<App>, session: Option<&SessionI
 
 fn select_previous_event(st: &mut State) {
     let start = st.selected_event.unwrap_or(st.timeline.len());
-    if let Some(index) = (0..start).rev().find(|index| {
-        st.transcript_filter.matches(&st.timeline[*index])
-            && (st.thinking_enabled
-                || !matches!(
-                    st.timeline[*index].kind,
-                    TimelineKind::ReasoningSummary { .. }
-                ))
-    }) {
+    if let Some(index) = (0..start)
+        .rev()
+        .find(|index| st.event_visible(&st.timeline[*index]))
+    {
         st.selected_event = Some(index);
         focus_selected_event(st);
     }
@@ -1146,14 +1185,9 @@ fn select_previous_event(st: &mut State) {
 
 fn select_next_event(st: &mut State) {
     let start = st.selected_event.map_or(0, |index| index.saturating_add(1));
-    if let Some(index) = (start..st.timeline.len()).find(|index| {
-        st.transcript_filter.matches(&st.timeline[*index])
-            && (st.thinking_enabled
-                || !matches!(
-                    st.timeline[*index].kind,
-                    TimelineKind::ReasoningSummary { .. }
-                ))
-    }) {
+    if let Some(index) =
+        (start..st.timeline.len()).find(|index| st.event_visible(&st.timeline[*index]))
+    {
         st.selected_event = Some(index);
         focus_selected_event(st);
     }
@@ -1825,13 +1859,26 @@ fn handle_effect(
         }
         Effect::SetThinking(enabled) => {
             st.thinking_enabled = enabled;
+            // Reasoning is CollapsedDetail, so revealing it means at least
+            // Detailed mode; hiding it returns to the concise Default.
+            st.activity_mode = if enabled {
+                nexus_core::timeline::ActivityMode::Detailed
+            } else {
+                nexus_core::timeline::ActivityMode::Default
+            };
             st.toast(
                 format!(
-                    "reasoning summaries and traces {}",
-                    if enabled { "enabled" } else { "disabled" }
+                    "activity → {} (reasoning {})",
+                    st.activity_mode.as_str(),
+                    if enabled { "shown" } else { "hidden" }
                 ),
                 Sev::Ok,
             );
+        }
+        Effect::SetActivityMode(mode) => {
+            st.activity_mode = mode;
+            st.thinking_enabled = mode != nexus_core::timeline::ActivityMode::Default;
+            st.toast(format!("activity view → {}", mode.as_str()), Sev::Ok);
         }
         Effect::SetTranscriptDetail(detail) => {
             st.detail_level = detail;
@@ -2979,6 +3026,14 @@ fn help_report() -> Report {
         .line("in menus: ↑/↓ or j/k · Enter · Space toggle · / search")
         .line("Tab/Shift+Tab focus · ? controls · Ctrl+R refresh · Esc back")
         .line("approvals: [y]es · [s]ession · [n]o (deny is the default)")
+        .header("activity")
+        .line("Ctrl+E open/close the activity detail (tabs, search, copy mode)")
+        .line("Ctrl+S full status · on the timeline: d cycle verbosity · Enter inspect")
+        .line("/view default|detailed|debug — how much the timeline shows")
+        .line("  default   essential activity only")
+        .line("  detailed  adds reasoning summaries, plans, and stages")
+        .line("  debug     adds routing, policy, and provider diagnostics")
+        .line("in the detail overlay: Tab/1-9 tabs · ↑↓ PgUp/PgDn scroll · / search · c copy")
         .header("input modes")
         .line("plain text        message to the agent")
         .line("/command          slash command (see below)")
@@ -3123,6 +3178,7 @@ fn submit_objective(
     };
 
     st.mode = Mode::Running;
+    st.turn_started = Some(std::time::Instant::now());
     st.active_turn_id = Some(turn_id.clone());
     let turn_tx = turn_tx.clone();
     let approver = approver.clone();
