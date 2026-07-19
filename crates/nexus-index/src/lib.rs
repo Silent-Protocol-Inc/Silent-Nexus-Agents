@@ -67,6 +67,16 @@ impl Indexer {
         root: &Path,
         guard: &nexus_core::workspace::WorkspaceGuard,
     ) -> Result<IndexStatus> {
+        self.build_with_policy(root, guard, &nexus_core::config::PolicyConfig::default())
+    }
+
+    pub fn build_with_policy(
+        &self,
+        root: &Path,
+        guard: &nexus_core::workspace::WorkspaceGuard,
+        policy: &nexus_core::config::PolicyConfig,
+    ) -> Result<IndexStatus> {
+        let mut allowed_paths = std::collections::BTreeSet::new();
         for entry in ignore::WalkBuilder::new(root)
             .hidden(false)
             .git_ignore(true)
@@ -82,6 +92,21 @@ impl Indexer {
                 continue;
             };
             let rel = guard.display_relative(&real);
+            let classified = nexus_core::file_formats::classify(&real);
+            let decision = if classified.hard_denied {
+                "deny"
+            } else {
+                policy
+                    .read_formats
+                    .get(classified.id)
+                    .or_else(|| policy.read_formats.get("other"))
+                    .map(String::as_str)
+                    .unwrap_or(policy.reads.as_str())
+            };
+            if decision != "allow" {
+                continue;
+            }
+            allowed_paths.insert(rel.clone());
             let meta = match std::fs::metadata(&real) {
                 Ok(m) => m,
                 Err(_) => continue,
@@ -147,6 +172,21 @@ impl Indexer {
                 Ok(())
             })?;
         }
+        self.store.with(|conn| {
+            let mut statement = conn.prepare("SELECT path FROM index_files")?;
+            let indexed: Vec<String> = statement
+                .query_map([], |row| row.get(0))?
+                .filter_map(std::result::Result::ok)
+                .collect();
+            drop(statement);
+            for path in indexed {
+                if !allowed_paths.contains(&path) {
+                    conn.execute("DELETE FROM index_symbols WHERE path=?1", [&path])?;
+                    conn.execute("DELETE FROM index_files WHERE path=?1", [&path])?;
+                }
+            }
+            Ok(())
+        })?;
         self.store
             .meta_set("index_last_built", &nexus_core::now_rfc3339())?;
         self.status()

@@ -309,6 +309,8 @@ impl ModelProvider for OpenAiCompatProvider {
             embeddings: false,
             context_window: self.config.context_window,
             max_output_tokens: self.config.max_output_tokens,
+            context_limit_source: self.config.context_limit_source,
+            output_limit_source: self.config.output_limit_source,
             reasoning_controls: false,
             system_prompt: true,
             // Only the dedicated OpenAI adapter has a contract strong enough
@@ -383,6 +385,7 @@ impl ModelProvider for OpenAiCompatProvider {
                 .and_then(Value::as_str)
                 .unwrap_or("stop")
                 .to_string(),
+            provider_private: None,
         })
     }
 

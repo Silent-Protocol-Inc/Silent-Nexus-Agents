@@ -1,5 +1,5 @@
 //! The main input editor: cursor movement, history recall, and multiline
-//! support (Alt+Enter inserts a newline; Enter submits).
+//! support (Shift/Alt+Enter and detectable Ctrl+J insert a newline; Enter submits).
 
 /// Line editor state for the input box.
 #[derive(Default)]
@@ -43,6 +43,17 @@ impl InputEditor {
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        self.browse = None;
+    }
+
+    /// Insert terminal paste payload without interpreting any newline as a
+    /// submit action. Terminals disagree on whether pasted line endings are
+    /// CRLF, CR, or LF, so normalize all three forms here at the editor
+    /// boundary.
+    pub fn insert_paste(&mut self, pasted: &str) {
+        let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
+        self.text.insert_str(self.cursor, &normalized);
+        self.cursor += normalized.len();
         self.browse = None;
     }
 
@@ -229,5 +240,25 @@ mod tests {
         e.set_text("/status");
         e.take();
         assert_eq!(e.history_snapshot().len(), 1);
+    }
+
+    #[test]
+    fn paste_normalizes_line_endings_and_preserves_unicode() {
+        let mut e = InputEditor::default();
+        e.set_text("before ");
+        e.insert_paste("一\r\ntwo\rthree\n");
+        assert_eq!(e.text(), "before 一\ntwo\nthree\n");
+        assert_eq!(e.cursor(), e.text().len());
+        e.insert('✓');
+        assert_eq!(e.text(), "before 一\ntwo\nthree\n✓");
+    }
+
+    #[test]
+    fn paste_inserts_at_a_unicode_cursor_boundary() {
+        let mut e = InputEditor::default();
+        e.set_text("a界z");
+        e.left();
+        e.insert_paste("x\r\ny");
+        assert_eq!(e.text(), "a界x\nyz");
     }
 }

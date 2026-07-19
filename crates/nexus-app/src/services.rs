@@ -1920,6 +1920,34 @@ pub fn set_permission_mode(app: &App, mode: &str) -> Result<Report> {
                 .join(", ")
         ))
     })?;
+    if mode == "full-access" {
+        app.set_session_full_access(true);
+        app.audit().emit(
+            &nexus_core::ids::TraceId::generate(),
+            None,
+            nexus_core::events::AuditKind::ApprovalGrantChanged {
+                operation: "full_access_activated".into(),
+                scope: "attended_session".into(),
+                token: "session-only".into(),
+            },
+        );
+        return Ok(Report::new("permissions")
+            .field_sev("mode", mode, Sev::Warn)
+            .line_sev(
+                "Full Access is active only for this attended session; restart, new session, and resume reset to default",
+                Sev::Warn,
+            ));
+    }
+    app.reset_session_full_access();
+    app.audit().emit(
+        &nexus_core::ids::TraceId::generate(),
+        None,
+        nexus_core::events::AuditKind::ApprovalGrantChanged {
+            operation: "full_access_reset".into(),
+            scope: "attended_session".into(),
+            token: mode.into(),
+        },
+    );
     nexus_core::config::Config::update_managed_overrides(&app.paths, |root| {
         let policy = root
             .entry("policy".to_string())
@@ -1968,7 +1996,11 @@ pub fn permissions_report(app: &App) -> Report {
         "deny" => Sev::Err,
         _ => Sev::Warn,
     };
-    let mode = permission_mode(p);
+    let mode = if app.session_full_access() {
+        "full-access"
+    } else {
+        permission_mode(p)
+    };
     let mut r = Report::new("permissions")
         .field_sev(
             "mode",
@@ -2028,6 +2060,24 @@ pub fn revoke_workspace_permission(app: &App, token: &str) -> Result<Report> {
         },
     );
     Ok(Report::new("permissions").ok("workspace approval grant revoked"))
+}
+
+pub fn set_read_format(app: &App, format: &str, decision: &str, global: bool) -> Result<Report> {
+    nexus_core::config::Config::update_read_format(&app.paths, global, format, decision)?;
+    app.audit().emit(
+        &nexus_core::ids::TraceId::generate(),
+        None,
+        nexus_core::events::AuditKind::ApprovalGrantChanged {
+            operation: format!("read_format_{decision}"),
+            scope: if global { "global" } else { "workspace" }.into(),
+            token: format.to_string(),
+        },
+    );
+    Ok(Report::new("file read access")
+        .field("format", format)
+        .field("decision", decision)
+        .field("scope", if global { "global" } else { "workspace" })
+        .line("reload applies the updated layered policy"))
 }
 
 // -------------------------------------------------------------------- context

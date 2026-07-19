@@ -7,6 +7,7 @@
 use crate::app::App;
 use crate::report::{Report, Sev};
 use nexus_core::config::ModelConfig;
+use nexus_core::config::{LimitMode, LimitSource};
 use nexus_core::{NexusError, Result, SecretString};
 use nexus_models::{DiscoveredModel, ProbeError};
 use std::collections::BTreeMap;
@@ -137,20 +138,30 @@ fn configured_models_for(app: &App, pred: impl Fn(&ModelConfig) -> bool) -> Vec<
         .collect()
 }
 
-/// Build the provider list, probing local endpoints. One catalog call makes
-/// at most: 1 Ollama probe + 1 llama.cpp probe (each ≤3s, run concurrently).
-/// Remote providers are not probed here (that happens on selection) so the
-/// list stays fast and does not leak traffic to remote APIs unasked.
+/// Build the provider list without network access. Explicit refresh/probe
+/// actions perform discovery; ordinary menu construction uses cached config
+/// and never invents model rows.
 pub async fn catalog(app: &App) -> Vec<ProviderEntry> {
-    let ollama_endpoint =
-        config_endpoint_for(app, "ollama").unwrap_or_else(|| OLLAMA_DEFAULT.into());
+    let mut ollama_instances: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, model) in app
+        .config
+        .models
+        .iter()
+        .filter(|(_, model)| model.provider == "ollama")
+    {
+        ollama_instances
+            .entry(model.base_url.trim_end_matches('/').to_string())
+            .or_default()
+            .push(name.clone());
+    }
+    let ollama_endpoint = ollama_instances
+        .keys()
+        .next()
+        .cloned()
+        .filter(|endpoint| !endpoint.is_empty())
+        .unwrap_or_else(|| OLLAMA_DEFAULT.into());
     let llamacpp_endpoint =
         config_endpoint_for(app, "llamacpp").unwrap_or_else(|| LLAMACPP_DEFAULT.into());
-
-    let (ollama_probe, llamacpp_probe) = tokio::join!(
-        nexus_models::list_ollama_models(&ollama_endpoint, PROBE_TIMEOUT),
-        nexus_models::list_openai_models(&llamacpp_endpoint, None, PROBE_TIMEOUT),
-    );
 
     let mut out = Vec::new();
 
@@ -163,9 +174,30 @@ pub async fn catalog(app: &App) -> Vec<ProviderEntry> {
         auth_state: AuthRequirement::None.label().into(),
         authenticated: true,
         endpoint: Some(ollama_endpoint.clone()),
-        state: probe_to_state(ollama_probe),
-        configured_models: configured_models_for(app, |m| m.provider == "ollama"),
+        state: EndpointState::NotProbed("refresh to discover endpoint models".into()),
+        configured_models: ollama_instances
+            .get(ollama_endpoint.trim_end_matches('/'))
+            .cloned()
+            .unwrap_or_default(),
     });
+    for (index, (endpoint, configured_models)) in ollama_instances
+        .iter()
+        .filter(|(endpoint, _)| endpoint.as_str() != ollama_endpoint.trim_end_matches('/'))
+        .enumerate()
+    {
+        out.push(ProviderEntry {
+            id: format!("ollama:{}", index + 2),
+            label: format!("Ollama · {endpoint}"),
+            local: nexus_models::openai_compat::is_local_url(endpoint),
+            implemented: true,
+            auth: AuthRequirement::None,
+            auth_state: AuthRequirement::None.label().into(),
+            authenticated: true,
+            endpoint: Some(endpoint.clone()),
+            state: EndpointState::NotProbed("refresh to discover endpoint models".into()),
+            configured_models: configured_models.clone(),
+        });
+    }
 
     out.push(ProviderEntry {
         id: "llamacpp".into(),
@@ -176,7 +208,7 @@ pub async fn catalog(app: &App) -> Vec<ProviderEntry> {
         auth_state: AuthRequirement::None.label().into(),
         authenticated: true,
         endpoint: Some(llamacpp_endpoint.clone()),
-        state: probe_to_state(llamacpp_probe),
+        state: EndpointState::NotProbed("refresh to discover endpoint models".into()),
         configured_models: configured_models_for(app, |m| m.provider == "llamacpp"),
     });
 
@@ -340,6 +372,84 @@ pub async fn catalog(app: &App) -> Vec<ProviderEntry> {
     out
 }
 
+/// Explicit provider-wide refresh used by `/model`. Every configured provider
+/// instance is probed through its adapter; no model name is synthesized here.
+/// Failed inventories are non-authoritative and therefore never delete cache.
+pub async fn refresh_catalog(app: &App) -> Vec<ProviderEntry> {
+    use futures::{stream, StreamExt};
+
+    let entries = catalog(app).await;
+    let mut refreshed: Vec<ProviderEntry> =
+        stream::iter(entries.into_iter().map(|mut entry| async move {
+            let should_probe =
+                !entry.configured_models.is_empty() || (entry.id == "codex" && entry.authenticated);
+            if should_probe {
+                entry.state = probe_provider(app, &entry).await;
+            }
+            entry
+        }))
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    refreshed.sort_by(|left, right| left.id.cmp(&right.id));
+    let _ = reconcile_managed_inventory(app, &refreshed);
+    refreshed
+}
+
+fn reconcile_managed_inventory(app: &App, entries: &[ProviderEntry]) -> Result<()> {
+    let mut managed = nexus_core::config::Config::load_managed_models(&app.paths)?;
+    let original = toml::to_string(&managed).unwrap_or_default();
+    for entry in entries {
+        let EndpointState::Connected { models, .. } = &entry.state else {
+            continue;
+        };
+        for name in &entry.configured_models {
+            let Some(configured) = managed.get(name).cloned() else {
+                continue; // hand-written config is never rewritten here
+            };
+            let Some(discovered) = models.iter().find(|model| model.id == configured.model) else {
+                managed.remove(name);
+                continue;
+            };
+            if configured.limit_mode == LimitMode::Auto {
+                if let Some(model) = managed.get_mut(name) {
+                    apply_effective_limits(model, discovered);
+                }
+            }
+        }
+    }
+    if toml::to_string(&managed).unwrap_or_default() != original {
+        nexus_core::config::Config::save_managed_models(&app.paths, &managed)?;
+    }
+    Ok(())
+}
+
+fn bundled_limits(model_id: &str) -> Option<(usize, usize)> {
+    // Exact ids only. This table enriches a model already returned by a
+    // provider and must never be used to create discovery rows.
+    match model_id {
+        "gpt-4.1" | "gpt-4.1-mini" | "gpt-4.1-nano" => Some((1_047_576, 32_768)),
+        _ => None,
+    }
+}
+
+fn apply_effective_limits(config: &mut ModelConfig, discovered: &DiscoveredModel) {
+    if let Some(context) = discovered.context_window {
+        config.context_window = context;
+        config.context_limit_source = LimitSource::ProviderMetadata;
+    } else if let Some((context, _)) = bundled_limits(&discovered.id) {
+        config.context_window = context;
+        config.context_limit_source = LimitSource::BundledCatalog;
+    }
+    if let Some(output) = discovered.max_output_tokens {
+        config.max_output_tokens = output;
+        config.output_limit_source = LimitSource::ProviderMetadata;
+    } else if let Some((_, output)) = bundled_limits(&discovered.id) {
+        config.max_output_tokens = output;
+        config.output_limit_source = LimitSource::BundledCatalog;
+    }
+}
+
 fn is_preset_endpoint(endpoint: &str) -> bool {
     let endpoint = endpoint.trim_end_matches('/');
     OPENAI_PRESETS
@@ -383,18 +493,24 @@ pub async fn probe_provider(app: &App, entry: &ProviderEntry) -> EndpointState {
             .await;
             if status.authenticated == Some(true) {
                 EndpointState::Connected {
-                    models: ["sonnet", "opus", "haiku"]
-                        .into_iter()
-                        .map(|id| DiscoveredModel {
-                            id: id.into(),
+                    models: entry
+                        .configured_models
+                        .iter()
+                        .filter_map(|name| app.config.models.get(name))
+                        .map(|configured| DiscoveredModel {
+                            id: configured.model.clone(),
                             size_bytes: None,
                             family: Some("Claude subscription alias".into()),
                             parameter_size: None,
                             quantization: None,
-                            display_name: Some(id.to_string()),
+                            display_name: Some(configured.model.clone()),
                             description: Some(
                                 "resolved by the official Claude CLI at request time".into(),
                             ),
+                            context_window: None,
+                            max_output_tokens: None,
+                            context_limit_source: None,
+                            output_limit_source: None,
                         })
                         .collect(),
                     latency_ms: started.elapsed().as_millis() as u64,
@@ -404,7 +520,7 @@ pub async fn probe_provider(app: &App, entry: &ProviderEntry) -> EndpointState {
             }
         }
         _ if entry.endpoint.is_none() => EndpointState::NotProbed("no endpoint".into()),
-        "ollama" => probe_to_state(
+        id if id == "ollama" || id.starts_with("ollama:") => probe_to_state(
             nexus_models::list_ollama_models(
                 entry.endpoint.as_deref().unwrap_or(OLLAMA_DEFAULT),
                 PROBE_TIMEOUT,
@@ -427,6 +543,14 @@ pub async fn probe_provider(app: &App, entry: &ProviderEntry) -> EndpointState {
                             quantization: None,
                             display_name: Some(m.display_name).filter(|d| !d.is_empty()),
                             description: Some(m.description).filter(|d| !d.is_empty()),
+                            context_window: m.context_window,
+                            max_output_tokens: m.max_output_tokens,
+                            context_limit_source: m
+                                .context_window
+                                .map(|_| LimitSource::ProviderMetadata),
+                            output_limit_source: m
+                                .max_output_tokens
+                                .map(|_| LimitSource::ProviderMetadata),
                         })
                         .collect(),
                     latency_ms: started.elapsed().as_millis() as u64,
@@ -670,13 +794,19 @@ pub fn save_discovered_model(
     app: &App,
     provider_id: &str,
     base_url: &str,
-    model_id: &str,
+    discovered: &DiscoveredModel,
 ) -> Result<String> {
     let mut managed = nexus_core::config::Config::load_managed_models(&app.paths)?;
+    let model_id = discovered.id.as_str();
     let mut name = sanitize_model_name(model_id);
     let config_provider = match provider_id {
         "ollama" | "llamacpp" | "openai" | "codex" | "claude-plan" | "anthropic" => provider_id,
         _ => "openai_compatible",
+    };
+    let config_provider = if provider_id.starts_with("ollama:") {
+        "ollama"
+    } else {
+        config_provider
     };
     // Avoid clobbering an existing different entry.
     let mut n = 2;
@@ -700,31 +830,45 @@ pub fn save_discovered_model(
         base_url: base_url.to_string(),
         model: model_id.to_string(),
         role: "executor".into(),
+        limit_mode: LimitMode::Auto,
         ..Default::default()
     };
+    apply_effective_limits(&mut model, discovered);
     if let Some(env_var) = preset_env(provider_id) {
         model.api_key_env = Some(env_var.into());
         if app.credentials.exists(provider_id, "default") {
             model.api_key_ref = Some(format!("{provider_id}/default"));
         }
-        model.context_window = 128_000;
-        model.max_output_tokens = 8192;
+        if model.context_limit_source == LimitSource::ConfiguredConservative {
+            model.context_window = 128_000;
+        }
+        if model.output_limit_source == LimitSource::ConfiguredConservative {
+            model.max_output_tokens = 8192;
+        }
     }
     if provider_id == "anthropic" {
         model.api_key_env = Some("ANTHROPIC_API_KEY".into());
         if app.credentials.exists("anthropic", "default") {
             model.api_key_ref = Some("anthropic/default".into());
         }
-        model.context_window = 200_000;
-        model.max_output_tokens = 8192;
+        if model.context_limit_source == LimitSource::ConfiguredConservative {
+            model.context_window = 200_000;
+        }
+        if model.output_limit_source == LimitSource::ConfiguredConservative {
+            model.max_output_tokens = 8192;
+        }
     }
     if provider_id == "codex" {
         // The backend is implied by the provider; keep config free of it.
         model.base_url = String::new();
         // The plan listing reports no context length; a conservative window
         // keeps compaction honest rather than optimistic.
-        model.context_window = 128_000;
-        model.max_output_tokens = 8192;
+        if model.context_limit_source == LimitSource::ConfiguredConservative {
+            model.context_window = 128_000;
+        }
+        if model.output_limit_source == LimitSource::ConfiguredConservative {
+            model.max_output_tokens = 8192;
+        }
         model.reasoning_effort = crate::codex::cached_plan_models()
             .iter()
             .find(|m| m.id == model_id)
@@ -732,8 +876,12 @@ pub fn save_discovered_model(
     }
     if provider_id == "claude-plan" {
         model.base_url = String::new();
-        model.context_window = 200_000;
-        model.max_output_tokens = 8192;
+        if model.context_limit_source == LimitSource::ConfiguredConservative {
+            model.context_window = 200_000;
+        }
+        if model.output_limit_source == LimitSource::ConfiguredConservative {
+            model.max_output_tokens = 8192;
+        }
         model.role = "planner".into();
         model.native_tool_calls = Some(false);
     }
@@ -760,21 +908,36 @@ pub fn save_codex_model(app: &App, model_id: &str, effort: Option<&str>) -> Resu
     let effort = effort
         .map(String::from)
         .or_else(|| plan.and_then(|m| m.default_reasoning_effort.clone()));
-    managed.insert(
-        name.clone(),
-        ModelConfig {
-            provider: "codex".into(),
-            base_url: String::new(),
-            model: model_id.to_string(),
-            // The plan listing reports no context length; conservative keeps
-            // compaction honest rather than optimistic.
-            context_window: 128_000,
-            max_output_tokens: 8192,
-            role: "executor".into(),
-            reasoning_effort: effort,
-            ..Default::default()
-        },
-    );
+    let mut configured = ModelConfig {
+        provider: "codex".into(),
+        base_url: String::new(),
+        model: model_id.to_string(),
+        context_window: 128_000,
+        max_output_tokens: 8192,
+        role: "executor".into(),
+        reasoning_effort: effort,
+        limit_mode: LimitMode::Auto,
+        ..Default::default()
+    };
+    if let Some(plan) = plan {
+        let discovered = DiscoveredModel {
+            id: plan.id.clone(),
+            size_bytes: None,
+            family: None,
+            parameter_size: None,
+            quantization: None,
+            display_name: Some(plan.display_name.clone()),
+            description: Some(plan.description.clone()),
+            context_window: plan.context_window,
+            max_output_tokens: plan.max_output_tokens,
+            context_limit_source: plan.context_window.map(|_| LimitSource::ProviderMetadata),
+            output_limit_source: plan
+                .max_output_tokens
+                .map(|_| LimitSource::ProviderMetadata),
+        };
+        apply_effective_limits(&mut configured, &discovered);
+    }
+    managed.insert(name.clone(), configured);
     nexus_core::config::Config::save_managed_models(&app.paths, &managed)?;
     Ok(name)
 }
@@ -812,13 +975,17 @@ pub async fn test_model(app: &App, name: &str) -> Result<Report> {
         messages: vec![nexus_models::ChatMessage::user(
             "Reply with the single word: ready",
         )],
-        max_tokens: Some(8),
+        max_tokens: Some(256),
         ..Default::default()
     };
     let started = std::time::Instant::now();
     let mut stream = provider.stream(request).await?;
     let mut first_token_ms: Option<u128> = None;
     let mut text = String::new();
+    let mut tool_call_seen = false;
+    let mut completion_tokens = 0usize;
+    let mut done_seen = false;
+    let mut finish_reason = String::new();
     while let Some(event) = stream.next().await {
         match event? {
             nexus_models::StreamEvent::TextDelta(t) => {
@@ -827,8 +994,17 @@ pub async fn test_model(app: &App, name: &str) -> Result<Report> {
                 }
                 text.push_str(&t);
             }
-            nexus_models::StreamEvent::Done { .. } => break,
-            _ => {}
+            nexus_models::StreamEvent::Done {
+                usage,
+                finish_reason: reason,
+            } => {
+                done_seen = true;
+                completion_tokens = usage.completion_tokens;
+                finish_reason = reason;
+                break;
+            }
+            nexus_models::StreamEvent::ToolCallDelta { .. } => tool_call_seen = true,
+            nexus_models::StreamEvent::ProviderPrivateDelta(_) => {}
         }
     }
     let total = started.elapsed().as_millis();
@@ -850,6 +1026,28 @@ pub async fn test_model(app: &App, name: &str) -> Result<Report> {
             },
         );
     let trimmed = text.trim();
+    if !done_seen {
+        return Err(nexus_core::NexusError::Provider {
+            provider: provider.kind().into(),
+            message: "model stream ended without a terminal response".into(),
+        });
+    }
+    if trimmed.is_empty() && !tool_call_seen {
+        return Err(nexus_core::NexusError::Provider {
+            provider: provider.kind().into(),
+            message: if completion_tokens >= 256 {
+                "model consumed its test budget without final text or a tool call".into()
+            } else {
+                "model produced no final text or tool call".into()
+            },
+        });
+    }
+    if finish_reason == "length" {
+        return Err(nexus_core::NexusError::Provider {
+            provider: provider.kind().into(),
+            message: "model exhausted its test output budget before a terminal answer".into(),
+        });
+    }
     if !trimmed.is_empty() {
         let mut sample: String = trimmed.chars().take(60).collect();
         if trimmed.chars().count() > 60 {
@@ -878,7 +1076,13 @@ pub fn models_report(app: &App) -> Report {
                 m.provider.clone(),
                 m.model.clone(),
                 m.role.clone(),
-                format!("{}k ctx", m.context_window / 1024),
+                format!(
+                    "{}k ctx ({}) · {} out ({})",
+                    m.context_window / 1024,
+                    m.context_limit_source,
+                    m.max_output_tokens,
+                    m.output_limit_source
+                ),
                 if m.base_url.is_empty() {
                     "(default)".into()
                 } else {

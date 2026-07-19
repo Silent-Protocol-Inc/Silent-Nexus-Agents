@@ -119,6 +119,7 @@ impl MockProvider {
                 tool_calls: vec![],
                 usage,
                 finish_reason: "stop".into(),
+                provider_private: None,
             }),
             MockScript::ToolCall { name, arguments } => Ok(ModelResponse {
                 content: String::new(),
@@ -129,6 +130,7 @@ impl MockProvider {
                 }],
                 usage,
                 finish_reason: "tool_calls".into(),
+                provider_private: None,
             }),
             MockScript::TextThenToolCall {
                 text,
@@ -143,6 +145,7 @@ impl MockProvider {
                 }],
                 usage,
                 finish_reason: "tool_calls".into(),
+                provider_private: None,
             }),
             MockScript::Error(message) => Err(NexusError::Provider {
                 provider: "mock".into(),
@@ -185,6 +188,8 @@ impl ModelProvider for MockProvider {
             embeddings: false,
             context_window: self.context_window,
             max_output_tokens: 2048,
+            context_limit_source: nexus_core::config::LimitSource::ConfiguredConservative,
+            output_limit_source: nexus_core::config::LimitSource::ConfiguredConservative,
             reasoning_controls: false,
             system_prompt: self.system_prompt,
             parallel_tool_calls: self.native_tool_calls,

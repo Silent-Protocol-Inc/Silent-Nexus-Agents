@@ -109,6 +109,12 @@ pub struct ModelConfig {
     pub context_window: usize,
     /// Maximum completion tokens per request.
     pub max_output_tokens: usize,
+    /// Whether limits are operator-owned or refreshed from provider metadata.
+    pub limit_mode: LimitMode,
+    /// Provenance for the effective cached context limit.
+    pub context_limit_source: LimitSource,
+    /// Provenance for the effective cached output limit.
+    pub output_limit_source: LimitSource,
     /// Role hint for routing: `router`, `executor`, `planner`, `verifier`, `embedder`.
     pub role: String,
     /// Override native tool-calling support detection. When `false`, the
@@ -140,6 +146,9 @@ impl Default for ModelConfig {
             auth: None,
             context_window: 8192,
             max_output_tokens: 1024,
+            limit_mode: LimitMode::Manual,
+            context_limit_source: LimitSource::ConfiguredConservative,
+            output_limit_source: LimitSource::ConfiguredConservative,
             role: "executor".into(),
             native_tool_calls: None,
             temperature: None,
@@ -147,6 +156,37 @@ impl Default for ModelConfig {
             timeout_secs: 120,
             tls_verify: true,
         }
+    }
+}
+
+/// Ownership of model token limits. Missing fields deserialize as `manual`,
+/// preserving every existing 1.x configuration verbatim.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitMode {
+    Auto,
+    #[default]
+    Manual,
+}
+
+/// Origin of an effective model limit. These values are safe to persist and
+/// display; they contain no endpoint or credential data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitSource {
+    ProviderMetadata,
+    BundledCatalog,
+    #[default]
+    ConfiguredConservative,
+}
+
+impl std::fmt::Display for LimitSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ProviderMetadata => "provider metadata",
+            Self::BundledCatalog => "bundled catalog",
+            Self::ConfiguredConservative => "configured conservative",
+        })
     }
 }
 
@@ -168,6 +208,9 @@ pub struct RoutingConfig {
 pub struct PolicyConfig {
     /// Decision for workspace reads: allow | ask | deny.
     pub reads: String,
+    /// Per-format workspace read decisions. Workspace config naturally
+    /// overlays global keys through the schema-v1 layered TOML merge.
+    pub read_formats: BTreeMap<String, String>,
     /// Decision for workspace writes.
     pub writes: String,
     /// Decision for shell commands not otherwise classified.
@@ -192,6 +235,7 @@ impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
             reads: "allow".into(),
+            read_formats: BTreeMap::new(),
             writes: "ask".into(),
             commands: "ask".into(),
             network: "allow".into(),
@@ -583,6 +627,60 @@ impl Config {
         Ok(())
     }
 
+    /// Update one read-format rule without replacing unrelated hand-written
+    /// configuration. Workspace is the interactive default; `global=true`
+    /// writes the user defaults file explicitly.
+    pub fn update_read_format(
+        paths: &ConfigPaths,
+        global: bool,
+        format: &str,
+        decision: &str,
+    ) -> Result<()> {
+        if format.trim().is_empty() || !["allow", "ask", "deny"].contains(&decision) {
+            return Err(NexusError::Config(
+                "format must be non-empty and decision must be allow|ask|deny".into(),
+            ));
+        }
+        let target = if global {
+            &paths.global_file
+        } else {
+            &paths.project_file
+        };
+        let mut table = if target.exists() {
+            let text = std::fs::read_to_string(target)?;
+            toml::from_str::<toml::value::Table>(&text).map_err(|error| NexusError::ConfigFile {
+                path: target.display().to_string(),
+                message: friendly_toml_error(&error),
+            })?
+        } else {
+            let mut table = toml::value::Table::new();
+            table.insert(
+                "version".into(),
+                toml::Value::Integer(CONFIG_VERSION.into()),
+            );
+            table
+        };
+        let policy = table
+            .entry("policy")
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+        let policy = policy.as_table_mut().ok_or_else(|| {
+            NexusError::Config("existing `policy` value must be a TOML table".into())
+        })?;
+        let formats = policy
+            .entry("read_formats")
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+        let formats = formats.as_table_mut().ok_or_else(|| {
+            NexusError::Config("existing `policy.read_formats` value must be a TOML table".into())
+        })?;
+        formats.insert(format.to_string(), toml::Value::String(decision.into()));
+        let text = toml::to_string_pretty(&table)
+            .map_err(|error| NexusError::Config(format!("serializing config: {error}")))?;
+        if let Some(parent) = target.parent() {
+            crate::permissions::repair_private_tree(parent)?;
+        }
+        crate::atomic::atomic_write_private(target, text.as_bytes())
+    }
+
     /// Validate cross-field invariants with actionable messages.
     pub fn validate(&self) -> Result<()> {
         let decision_fields = [
@@ -598,6 +696,13 @@ impl Config {
             if !["allow", "ask", "deny"].contains(&v.as_str()) {
                 return Err(NexusError::Config(format!(
                     "{name} must be one of allow|ask|deny, got `{v}`"
+                )));
+            }
+        }
+        for (format, decision) in &self.policy.read_formats {
+            if format.trim().is_empty() || !["allow", "ask", "deny"].contains(&decision.as_str()) {
+                return Err(NexusError::Config(format!(
+                    "policy.read_formats.{format} must be one of allow|ask|deny"
                 )));
             }
         }

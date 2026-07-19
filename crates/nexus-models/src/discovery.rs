@@ -1,11 +1,13 @@
 //! Provider endpoint probing and model discovery for the interactive
 //! `/connect` flows. Read-only: never installs, starts, or downloads anything.
 
+use futures::{stream, StreamExt};
+use nexus_core::config::LimitSource;
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
 /// A model reported by a provider endpoint.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveredModel {
     pub id: String,
     /// On-disk size in bytes (Ollama reports this; OpenAI-style listings don't).
@@ -19,6 +21,13 @@ pub struct DiscoveredModel {
     /// Provider-supplied description of what the model is for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Effective provider-reported context size, when authoritative metadata
+    /// is available. Static catalogs are applied by the app layer only after
+    /// a provider has returned this model id.
+    pub context_window: Option<usize>,
+    pub max_output_tokens: Option<usize>,
+    pub context_limit_source: Option<LimitSource>,
+    pub output_limit_source: Option<LimitSource>,
 }
 
 /// Why an endpoint probe failed, classified so the UI can offer the right
@@ -192,7 +201,7 @@ pub async fn list_ollama_models_with_tls(
             detail: "no `models` array — this is not an Ollama endpoint".into(),
         });
     };
-    let models = entries
+    let models: Vec<DiscoveredModel> = entries
         .iter()
         .filter_map(|m| {
             let details = m.get("details");
@@ -213,9 +222,43 @@ pub async fn list_ollama_models_with_tls(
                     .map(String::from),
                 display_name: None,
                 description: None,
+                context_window: None,
+                max_output_tokens: None,
+                context_limit_source: None,
+                output_limit_source: None,
             })
         })
         .collect();
+    // `/api/tags` is the authoritative inventory. Enrich every returned model
+    // through the same `/api/show` path regardless of name, family, endpoint
+    // location, or quantization. A broken show response affects only that row.
+    let show_client = client(timeout, tls_verify)?;
+    let show_base = base.as_str().trim_end_matches('/').to_string();
+    let models = stream::iter(models.into_iter().map(|mut model| {
+        let client = show_client.clone();
+        let base = show_base.clone();
+        async move {
+            if let Ok(response) = client
+                .post(format!("{base}/api/show"))
+                .json(&serde_json::json!({"model": model.id}))
+                .send()
+                .await
+            {
+                if response.status().is_success() {
+                    if let Ok(value) = response.json::<serde_json::Value>().await {
+                        model.context_window = ollama_context_limit(&value);
+                        if model.context_window.is_some() {
+                            model.context_limit_source = Some(LimitSource::ProviderMetadata);
+                        }
+                    }
+                }
+            }
+            model
+        }
+    }))
+    .buffer_unordered(8)
+    .collect()
+    .await;
     Ok(ProbeOutcome {
         models,
         latency_ms: started.elapsed().as_millis() as u64,
@@ -279,6 +322,29 @@ pub async fn list_openai_models_with_tls(
                 quantization: None,
                 display_name: None,
                 description: None,
+                context_window: compatible_limit(m, &["context_length", "max_context_length"]),
+                max_output_tokens: compatible_limit(
+                    m,
+                    &["max_output_tokens", "max_completion_tokens"],
+                )
+                .or_else(|| {
+                    m.get("top_provider")
+                        .and_then(|provider| compatible_limit(provider, &["max_completion_tokens"]))
+                }),
+                context_limit_source: compatible_limit(
+                    m,
+                    &["context_length", "max_context_length"],
+                )
+                .map(|_| LimitSource::ProviderMetadata),
+                output_limit_source: compatible_limit(
+                    m,
+                    &["max_output_tokens", "max_completion_tokens"],
+                )
+                .or_else(|| {
+                    m.get("top_provider")
+                        .and_then(|provider| compatible_limit(provider, &["max_completion_tokens"]))
+                })
+                .map(|_| LimitSource::ProviderMetadata),
             })
         })
         .collect();
@@ -286,6 +352,29 @@ pub async fn list_openai_models_with_tls(
         models,
         latency_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+fn compatible_limit(value: &serde_json::Value, keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|number| number.as_u64())
+            .and_then(|number| usize::try_from(number).ok())
+            .filter(|number| *number > 0)
+    })
+}
+
+fn ollama_context_limit(value: &serde_json::Value) -> Option<usize> {
+    value
+        .get("model_info")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|info| info.iter())
+        .filter(|(key, _)| key.ends_with(".context_length"))
+        .filter_map(|(_, value)| value.as_u64())
+        .filter_map(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .max()
 }
 
 /// Human-readable size like `4.7 GB`.
@@ -307,7 +396,7 @@ pub fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -330,6 +419,44 @@ mod tests {
         assert_eq!(out.models.len(), 1);
         assert_eq!(out.models[0].id, "qwen3:4b");
         assert_eq!(out.models[0].parameter_size.as_deref(), Some("4B"));
+    }
+
+    #[tokio::test]
+    async fn ollama_enriches_every_discovered_model_without_name_rules() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    {"name":"arbitrary-one:latest","details":{}},
+                    {"name":"another-model:v2","details":{}}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        for (name, context) in [
+            ("arbitrary-one:latest", 12_345usize),
+            ("another-model:v2", 67_890usize),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/api/show"))
+                .and(body_json(serde_json::json!({"model": name})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "model_info": {"any_arch.context_length": context}
+                })))
+                .mount(&server)
+                .await;
+        }
+        let out = list_ollama_models(&server.uri(), Duration::from_secs(2))
+            .await
+            .expect("probe");
+        let limits: std::collections::BTreeMap<_, _> = out
+            .models
+            .into_iter()
+            .map(|model| (model.id, model.context_window))
+            .collect();
+        assert_eq!(limits["arbitrary-one:latest"], Some(12_345));
+        assert_eq!(limits["another-model:v2"], Some(67_890));
     }
 
     #[tokio::test]

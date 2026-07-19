@@ -4,6 +4,37 @@ All notable changes to NEXUS are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 Semantic Versioning.
 
+## [1.3.0] — 2026-07-19
+
+Feature and reliability release for mobile input, provider-discovered model
+metadata, Ollama streaming, and format-aware read controls.
+
+### Added
+
+- Termius-compatible bracketed paste with multiline Unicode input and explicit
+  newline key combinations.
+- Provider-wide `/model` refresh. Selectable models come only from successful
+  endpoint inventories; every discovered Ollama model is enriched through
+  `/api/show` without model-name rules.
+- Backward-compatible automatic model limits with effective context/output
+  provenance and conservative exact-ID fallback behavior.
+- Schema-v1 `[policy.read_formats]` controls, searchable TUI configuration,
+  normalized format-aware grants, traversal skipping, index purging, and
+  sandbox masks.
+
+### Fixed
+
+- Ollama thinking defaults, `done_reason`, streamed error objects, header/idle
+  timeouts, empty model tests, and retry safety after visible output.
+- Full Access is attended-session-only and resets on bootstrap, new sessions,
+  compacted sessions, and resumed sessions.
+
+### Security
+
+- Sensitive environment files, credentials, private keys, `.git`, and `.nexus`
+  remain hard-denied even during Full Access. Weak host execution fails closed
+  when restricted-file masking cannot be proven.
+
 ## [1.2.0] — 2026-07-18
 
 Critical reliability release restoring the complete effective agent tool

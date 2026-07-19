@@ -14,12 +14,14 @@ The policy engine (`nexus-policy`) decides, for every proposed action, one of:
 2. **Policy scopes** (global → user → project → agent → goal → session). A scope
    may only make policy *stricter* — deny tools, restrict paths. It can never
    grant what a broader layer denies.
-3. **Allowlist.** Exact command prefixes the operator has pre-approved.
-4. **Session grants.** The exact normalized argv of a command the operator
+3. **File formats.** Locked sensitive paths deny first; workspace format rules
+   override global rules and then fall back to `policy.reads`.
+4. **Allowlist.** Exact command prefixes the operator has pre-approved.
+5. **Session grants.** The exact normalized argv, paths, and formats the operator
    approved "for the session" earlier. Grants are stored against that session,
    survive later turns/resume, do not widen to other arguments for the same
    program, and never cover destructive-or-higher risk.
-5. **Category defaults.** Per-category decisions from config: `reads`, `writes`,
+6. **Category defaults.** Per-category decisions from config: `reads`, `writes`,
    `commands`, `network`, `downloads`, `destructive`, `external`.
 
 ## Invariants
@@ -46,6 +48,12 @@ external    = "ask"     # may not be "allow"
 denied_commands = ["sudo", "rm -rf /"]
 allowed_commands = ["cargo check", "cargo test"]
 denied_paths = [".ssh", ".aws/credentials"]
+
+[policy.read_formats]
+rust = "allow"
+toml = "ask"
+silent = "ask"
+other = "deny"
 ```
 
 Defaults are conservative: reads allowed, everything with side effects asks.

@@ -23,8 +23,8 @@ mod views;
 
 use approver::{ApprovalRequest, TuiApprover};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -112,6 +112,7 @@ struct TermGuard {
     active: bool,
     alt_screen: bool,
     mouse: bool,
+    bracketed_paste: bool,
 }
 impl TermGuard {
     fn restore(&mut self) {
@@ -120,6 +121,9 @@ impl TermGuard {
         }
         let _ = disable_raw_mode();
         let mut out = std::io::stdout();
+        if self.bracketed_paste {
+            let _ = out.execute(DisableBracketedPaste);
+        }
         if self.mouse {
             let _ = out.execute(DisableMouseCapture);
         }
@@ -165,10 +169,12 @@ async fn run_with_target(
         stdout.execute(EnterAlternateScreen)?;
     }
     stdout.execute(EnableMouseCapture)?;
+    stdout.execute(EnableBracketedPaste)?;
     let mut guard = TermGuard {
         active: true,
         alt_screen: !inline,
         mouse: true,
+        bracketed_paste: true,
     };
     let backend = CrosstermBackend::new(stdout);
     let viewport = if inline {
@@ -615,6 +621,12 @@ fn handle_key(
             }
             return;
         }
+        Event::Paste(text) => {
+            if st.overlays.is_empty() && st.focus == Focus::Input && st.pending.is_none() {
+                st.input.insert_paste(&text);
+            }
+            return;
+        }
         Event::Resize(..) => return, // next draw adapts
         _ => return,
     };
@@ -927,7 +939,16 @@ fn handle_key(
         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             st.input.delete_word()
         }
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => st.input.insert('\n'),
+        KeyCode::Enter
+            if key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+        {
+            st.input.insert('\n')
+        }
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            st.input.insert('\n')
+        }
         KeyCode::Enter => {
             let line = st.input.take();
             let trimmed = line.trim().to_string();
@@ -1767,6 +1788,7 @@ fn handle_effect(
         Effect::Compact => match session.as_ref() {
             Some(id) => match nexus_app::services::compact_session(app, id.as_str()) {
                 Ok((new_id, report)) => {
+                    app.reset_session_full_access();
                     *session = Some(SessionId::from(new_id.clone()));
                     st.session_id = Some(new_id);
                     st.push_report(&report);
@@ -1832,6 +1854,7 @@ fn handle_effect(
 }
 
 fn attach_session(st: &mut State, id: &str, app: &Arc<App>, session: &mut Option<SessionId>) {
+    app.reset_session_full_access();
     match app.sessions().get(id) {
         Ok(meta) => {
             *session = Some(SessionId::from(id.to_string()));
@@ -2145,26 +2168,23 @@ fn handle_action(
         UiAction::UseDiscovered {
             provider,
             base_url,
-            model_id,
-        } => {
-            match nexus_app::providers::save_discovered_model(app, &provider, &base_url, &model_id)
-            {
-                Ok(name) => {
-                    let _ = app.update_ui_state({
-                        let name = name.clone();
-                        move |s| s.active_model = Some(name)
-                    });
-                    if let Some(id) = session.as_ref() {
-                        let _ = app.sessions().set_model(id.as_str(), &name);
-                        let _ = app.sessions().set_status(id.as_str(), "active");
-                    }
-                    st.toast(format!("saved + selected `{name}`"), Sev::Ok);
-                    st.close_overlays();
-                    spawn_reload(st, app, ui_tx);
+            model,
+        } => match nexus_app::providers::save_discovered_model(app, &provider, &base_url, &model) {
+            Ok(name) => {
+                let _ = app.update_ui_state({
+                    let name = name.clone();
+                    move |s| s.active_model = Some(name)
+                });
+                if let Some(id) = session.as_ref() {
+                    let _ = app.sessions().set_model(id.as_str(), &name);
+                    let _ = app.sessions().set_status(id.as_str(), "active");
                 }
-                Err(e) => st.system_sev(format!("model save: {e}"), Sev::Err),
+                st.toast(format!("saved + selected `{name}`"), Sev::Ok);
+                st.close_overlays();
+                spawn_reload(st, app, ui_tx);
             }
-        }
+            Err(e) => st.system_sev(format!("model save: {e}"), Sev::Err),
+        },
         UiAction::PickCodexEffort { model_id } => {
             let plan = nexus_app::codex::cached_plan_models();
             match plan.iter().find(|m| m.id == model_id) {
@@ -2557,8 +2577,15 @@ fn start_load(
             push_menu(st, app, menus::transcript_menu(st.transcript_filter));
         }
         LoadRequest::Permissions => {
-            let mode = nexus_app::services::permission_mode(&app.config.policy);
+            let mode = if app.session_full_access() {
+                "full-access"
+            } else {
+                nexus_app::services::permission_mode(&app.config.policy)
+            };
             push_menu(st, app, menus::permissions_menu(mode));
+        }
+        LoadRequest::ReadFormats => {
+            push_menu(st, app, menus::read_formats_menu(&app.config.policy));
         }
         LoadRequest::Sandbox => {
             push_menu(st, app, menus::sandbox_menu(&app.config.sandbox));
@@ -2653,7 +2680,11 @@ fn start_load(
             let generation = st.generation;
             st.busy += 1;
             tokio::spawn(async move {
-                let entries = nexus_app::providers::catalog(&app2).await;
+                let entries = if is_login || is_connect {
+                    nexus_app::providers::catalog(&app2).await
+                } else {
+                    nexus_app::providers::refresh_catalog(&app2).await
+                };
                 let data = if is_login {
                     Loaded::Login(entries)
                 } else if is_connect {
@@ -2698,7 +2729,7 @@ fn apply_loaded(st: &mut State, data: Loaded, app: &Arc<App>) {
                 .config
                 .models
                 .iter()
-                .map(|(name, model)| {
+                .filter_map(|(name, model)| {
                     let entry = entries.iter().find(|entry| {
                         entry
                             .configured_models
@@ -2706,11 +2737,21 @@ fn apply_loaded(st: &mut State, data: Loaded, app: &Arc<App>) {
                             .any(|configured| configured == name)
                             || entry.id == model.provider
                     });
+                    let confirmed = entry.is_some_and(|entry| {
+                        matches!(
+                            &entry.state,
+                            nexus_app::providers::EndpointState::Connected { models, .. }
+                                if models.iter().any(|candidate| candidate.id == model.model)
+                        )
+                    });
+                    if !confirmed && model.provider != "mock" {
+                        return None;
+                    }
                     let availability = entry.map_or_else(
                         || "configured; provider status unavailable".to_string(),
                         |entry| format!("{} · {}", entry.auth_state, entry.summary()),
                     );
-                    menus::ConfiguredModelCard {
+                    Some(menus::ConfiguredModelCard {
                         name: name.clone(),
                         provider: model.provider.clone(),
                         model_id: model.model.clone(),
@@ -2718,7 +2759,7 @@ fn apply_loaded(st: &mut State, data: Loaded, app: &Arc<App>) {
                             .as_ref()
                             .and_then(|manager| manager.capabilities(name).ok()),
                         availability,
-                    }
+                    })
                 })
                 .collect();
             replace_or_push_menu(st, app, menus::model_menu(&configured, &entries, &active));
@@ -2900,7 +2941,7 @@ fn apply_device_event(st: &mut State, ev: DeviceLoginEvent) {
 fn help_report() -> Report {
     let mut r = Report::untitled()
         .header("keys")
-        .line("Enter send · Alt+Enter newline · ↑/↓ history · ←/→ cursor")
+        .line("Enter send · Shift/Alt+Enter newline · Ctrl+J when detectable · ↑/↓ history")
         .line("/ (empty input) or Ctrl+K command palette · ? this help")
         .line("PgUp/PgDn scroll transcript · End follow · Ctrl+C quit")
         .line("in menus: ↑/↓ or j/k · Enter · Space toggle · / search")
@@ -2966,6 +3007,7 @@ fn submit_objective(
 
     // Create the session lazily on first turn.
     if session.is_none() {
+        app.reset_session_full_access();
         match app
             .sessions()
             .create(&app.workspace_key, &role_name, &app.any_model_name())
@@ -3807,6 +3849,14 @@ mod tests {
         assert!(pressed_key(event(KeyEventKind::Press)).is_some());
         assert!(pressed_key(event(KeyEventKind::Repeat)).is_none());
         assert!(pressed_key(event(KeyEventKind::Release)).is_none());
+    }
+
+    #[test]
+    fn bracketed_paste_uses_termius_compatible_escape_sequences() {
+        let mut bytes = Vec::new();
+        bytes.execute(EnableBracketedPaste).expect("enable");
+        bytes.execute(DisableBracketedPaste).expect("disable");
+        assert_eq!(bytes, b"\x1b[?2004h\x1b[?2004l");
     }
 
     #[test]

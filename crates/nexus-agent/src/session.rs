@@ -617,6 +617,7 @@ fn reconstruct_message(
             tool_calls: vec![],
             tool_call_id,
             name: tool_name,
+            provider_private: None,
         },
         _ => {
             // Assistant: may carry embedded tool calls.
@@ -642,6 +643,7 @@ fn reconstruct_message(
                         tool_calls,
                         tool_call_id: None,
                         name: None,
+                        provider_private: None,
                     };
                 }
             }

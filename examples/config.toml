@@ -28,6 +28,7 @@ model = "local-small"
 role = "executor"
 context_window = 8192
 max_output_tokens = 1024
+limit_mode = "manual"                    # existing values remain operator-owned
 native_tool_calls = false                # use the compatibility protocol
 timeout_secs = 120
 
@@ -49,6 +50,7 @@ timeout_secs = 180
 # role = "executor"
 # context_window = 128000
 # max_output_tokens = 4096
+# limit_mode = "auto"                    # refresh provider metadata explicitly
 
 # Reuse Codex auth instead of putting an API key in this file.
 # Run `snx auth login` for an interactive menu, or use:

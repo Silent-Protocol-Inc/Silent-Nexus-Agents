@@ -107,6 +107,8 @@ impl ModelProvider for ClaudePlanProvider {
             embeddings: false,
             context_window: self.config.context_window,
             max_output_tokens: self.config.max_output_tokens,
+            context_limit_source: self.config.context_limit_source,
+            output_limit_source: self.config.output_limit_source,
             reasoning_controls: true,
             // The CLI receives one serialized prompt rather than a dedicated
             // system channel, so callers must use compatibility prompting.

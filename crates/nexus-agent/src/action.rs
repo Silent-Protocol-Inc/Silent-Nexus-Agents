@@ -189,6 +189,7 @@ mod tests {
             tool_calls: calls,
             usage: Usage::default(),
             finish_reason: "stop".into(),
+            provider_private: None,
         }
     }
 

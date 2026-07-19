@@ -61,7 +61,7 @@ pub enum UiAction {
     UseDiscovered {
         provider: String,
         base_url: String,
-        model_id: String,
+        model: nexus_models::DiscoveredModel,
     },
     /// Open the reasoning-effort picker for a codex plan model (falls through
     /// to the plan default when the model reports no effort choices).
@@ -119,6 +119,7 @@ pub enum LoadRequest {
     Transcript,
     Help,
     Permissions,
+    ReadFormats,
     Sandbox,
     Init,
     Config,
@@ -1264,6 +1265,7 @@ impl Progress {
 // ------------------------------------------------------------------ overlays
 
 /// The overlay stack element.
+#[allow(clippy::large_enum_variant)]
 pub enum Overlay {
     Palette(Palette),
     Menu(Box<Menu>),

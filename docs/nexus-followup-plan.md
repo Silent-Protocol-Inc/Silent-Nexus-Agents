@@ -1,17 +1,17 @@
 # NEXUS follow-up plan
 
-The following work is intentionally excluded from v1.2.0 so the critical tool
-access and scoped-approval fixes can ship without unrelated UI risk.
+The following work remains after v1.3.0 and is intentionally isolated from the
+completed input, model-limit, provider-refresh, and file-format permission work.
 
-## Input and provider behavior
+## Timeline reasoning UX
 
-- Make multiline input reliable in mobile terminals, including Termius.
-- Discover and apply hosted-provider token limits automatically.
+- Add a selectable `Thinking…` row under the main execution timeline. `Ctrl+E`
+  expands safe summaries and operational status only; hidden chain-of-thought
+  is never displayed or persisted.
 
 ## Configuration
 
 - Complete the interactive `/config` experience.
-- Add correct per-language configuration-file handling.
 - Introduce a default unrestricted `nexus` agent through a separately reviewed
   permission and safety design.
 
@@ -22,4 +22,4 @@ access and scoped-approval fixes can ship without unrelated UI risk.
 - Resolve the current branding compile gaps and complete its tests.
 
 The six-file branding snapshot is preserved locally on
-`wip/branding-followup-2026-07-18` and is not part of v1.2.0.
+`wip/branding-followup-2026-07-18` and is not part of v1.3.0.

@@ -38,7 +38,8 @@ Each model entry accepts:
 - `base_url` and `model`;
 - `api_key_env` or `api_key_ref` (never an inline secret);
 - optional `auth = "codex"`;
-- `context_window`, `max_output_tokens`, `role`, `native_tool_calls`,
+- `context_window`, `max_output_tokens`, `limit_mode`, cached limit provenance,
+  `role`, `native_tool_calls`,
   `temperature`, `reasoning_effort`, `timeout_secs`, and `tls_verify`.
 
 Hosted credentials are resolved into zeroized secret buffers and registered
@@ -57,6 +58,12 @@ approval-only host execution.
 
 Built-in denials cannot be overridden: privilege escalation and generic
 terminal Git commit/push/remote/alias/unrecognized operations remain denied.
+
+`[policy.read_formats]` maps stable format ids such as `rust`, `toml`,
+`silent`, and `other` to `allow`, `ask`, or `deny`. Workspace keys override
+global defaults. Sensitive environment files, credentials, private keys,
+`.git`, and `.nexus` are locked denials. Full Access overrides ordinary format
+rules only for the current attended session and never overrides locked paths.
 
 ## Sandbox
 

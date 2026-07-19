@@ -1,5 +1,6 @@
 //! Provider-neutral chat and completion types.
 
+use nexus_core::config::LimitSource;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +36,10 @@ pub struct ChatMessage {
     /// For `Role::Tool` messages: the tool name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Provider-private continuation state. It is intentionally never
+    /// serialized, persisted, exported, or rendered.
+    #[serde(skip)]
+    pub provider_private: Option<String>,
 }
 
 impl ChatMessage {
@@ -45,6 +50,7 @@ impl ChatMessage {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            provider_private: None,
         }
     }
     pub fn user(content: impl Into<String>) -> Self {
@@ -54,6 +60,7 @@ impl ChatMessage {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            provider_private: None,
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -63,6 +70,7 @@ impl ChatMessage {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            provider_private: None,
         }
     }
     pub fn tool_result(call_id: &str, name: &str, content: impl Into<String>) -> Self {
@@ -72,6 +80,7 @@ impl ChatMessage {
             tool_calls: vec![],
             tool_call_id: Some(call_id.to_string()),
             name: Some(name.to_string()),
+            provider_private: None,
         }
     }
 }
@@ -121,6 +130,9 @@ pub struct ModelResponse {
     pub usage: Usage,
     /// Provider's stated finish reason (`stop`, `length`, `tool_calls`, …).
     pub finish_reason: String,
+    /// Ephemeral provider-private continuation state for the current request.
+    #[serde(skip)]
+    pub provider_private: Option<String>,
 }
 
 /// Stable, serializable reference to a configured model.
@@ -155,6 +167,9 @@ pub type Completion = ModelResponse;
 pub enum StreamEvent {
     /// A chunk of assistant text.
     TextDelta(String),
+    /// Ephemeral provider-private state; consumers must never display or
+    /// persist it.
+    ProviderPrivateDelta(String),
     /// A chunk of a tool call being assembled. `index` groups deltas of the
     /// same call; name/arguments accumulate.
     ToolCallDelta {
@@ -243,6 +258,10 @@ pub struct ModelCapabilities {
     pub embeddings: bool,
     pub context_window: usize,
     pub max_output_tokens: usize,
+    #[serde(default)]
+    pub context_limit_source: LimitSource,
+    #[serde(default)]
+    pub output_limit_source: LimitSource,
     /// Reasoning-effort style controls, when the endpoint honors them.
     pub reasoning_controls: bool,
     /// Whether the adapter preserves dedicated system-role instructions.
@@ -374,6 +393,7 @@ mod tests {
             tool_calls: Vec::new(),
             usage: Usage::default(),
             finish_reason: "stop".into(),
+            provider_private: None,
         };
         let legacy: Completion = response;
         let _: ModelResponse = legacy;
@@ -386,5 +406,14 @@ mod tests {
         assert_eq!(serialized["provider"], "primary");
         assert_eq!(serialized["model"], "model-a");
         assert_eq!(serialized.as_object().map(|o| o.len()), Some(2));
+    }
+
+    #[test]
+    fn provider_private_state_is_never_serialized() {
+        let mut message = ChatMessage::assistant("visible");
+        message.provider_private = Some("hidden".into());
+        let serialized = serde_json::to_string(&message).expect("serialize message");
+        assert!(!serialized.contains("hidden"));
+        assert!(!serialized.contains("provider_private"));
     }
 }

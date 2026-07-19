@@ -14,6 +14,7 @@ pub mod brand;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod file_formats;
 pub mod git;
 pub mod gpu;
 pub mod harness;

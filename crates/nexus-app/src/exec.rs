@@ -1071,6 +1071,15 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             [] => view_or(View::Permissions, services::permissions_report(app)),
             ["show"] => Effect::Report(services::permissions_report(app)),
             ["revoke", token] => Effect::Report(services::revoke_workspace_permission(app, token)?),
+            ["format", format, decision] => {
+                Effect::ReloadApp(services::set_read_format(app, format, decision, false)?)
+            }
+            ["format", format, decision, "global"] => {
+                Effect::ReloadApp(services::set_read_format(app, format, decision, true)?)
+            }
+            [mode] if *mode == "full-access" => {
+                Effect::Report(services::set_permission_mode(app, mode)?)
+            }
             [mode] => Effect::ReloadApp(services::set_permission_mode(app, mode)?),
             _ => usage(def),
         },

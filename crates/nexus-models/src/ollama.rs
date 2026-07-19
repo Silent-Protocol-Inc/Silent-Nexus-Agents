@@ -20,8 +20,10 @@ pub struct OllamaProvider {
 impl OllamaProvider {
     pub fn new(config: &ModelConfig) -> Result<Self> {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs))
-            .connect_timeout(Duration::from_secs(10))
+            // Do not impose a total response deadline: generation may remain
+            // healthy for much longer than the header timeout. Streaming uses
+            // an idle-between-chunks timeout below.
+            .connect_timeout(Duration::from_secs(config.timeout_secs.clamp(1, 10)))
             .danger_accept_invalid_certs(!config.tls_verify)
             .build()
             .map_err(|e| NexusError::Provider {
@@ -87,6 +89,9 @@ impl OllamaProvider {
                     Role::Tool => "tool",
                 };
                 let mut v = json!({"role": role, "content": m.content});
+                if let Some(thinking) = m.provider_private.as_deref() {
+                    v["thinking"] = json!(thinking);
+                }
                 if !m.tool_calls.is_empty() {
                     v["tool_calls"] = json!(m
                         .tool_calls
@@ -112,6 +117,11 @@ impl OllamaProvider {
                 "num_predict": request.max_tokens.unwrap_or(self.config.max_output_tokens),
             }
         });
+        body["think"] = match self.config.reasoning_effort.as_deref() {
+            Some("on") => json!(true),
+            Some(effort @ ("low" | "medium" | "high")) => json!(effort),
+            _ => json!(false),
+        };
         if let Some(t) = request.temperature.or(self.config.temperature) {
             body["options"]["temperature"] = json!(t);
         }
@@ -179,13 +189,59 @@ impl OllamaProvider {
         }
     }
 
-    fn parse_stream_line(line: &str) -> Result<Vec<StreamEvent>> {
+    fn visible_content(content: &str) -> String {
+        // Older Ollama/model combinations may ignore `think: false` and put
+        // private deliberation in `message.content`, sometimes without an
+        // opening tag. Buffering until the terminal record lets us remove it
+        // before any text reaches callers.
+        content
+            .rfind("</think>")
+            .map(|end| content[end + "</think>".len()..].to_string())
+            .unwrap_or_else(|| content.to_string())
+    }
+
+    fn finalize_buffered_content(
+        events: Vec<StreamEvent>,
+        buffered: &mut String,
+    ) -> Vec<StreamEvent> {
+        let mut output = Vec::new();
+        for event in events {
+            match event {
+                StreamEvent::TextDelta(delta) => buffered.push_str(&delta),
+                done @ StreamEvent::Done { .. } => {
+                    let visible = Self::visible_content(buffered);
+                    buffered.clear();
+                    if !visible.is_empty() {
+                        output.push(StreamEvent::TextDelta(visible));
+                    }
+                    output.push(done);
+                }
+                other => output.push(other),
+            }
+        }
+        output
+    }
+
+    fn parse_stream_line(line: &str, retain_thinking: bool) -> Result<Vec<StreamEvent>> {
         let value = serde_json::from_str::<Value>(line).map_err(|error| NexusError::Provider {
             provider: "ollama".into(),
             message: format!("invalid stream line: {error}"),
         })?;
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(NexusError::Provider {
+                provider: "ollama".into(),
+                message: format!("stream error: {error}"),
+            });
+        }
         let (content, calls) = Self::parse_message(&value);
         let mut events = Vec::new();
+        if retain_thinking {
+            if let Some(thinking) = value.pointer("/message/thinking").and_then(Value::as_str) {
+                if !thinking.is_empty() {
+                    events.push(StreamEvent::ProviderPrivateDelta(thinking.to_string()));
+                }
+            }
+        }
         if !content.is_empty() {
             events.push(StreamEvent::TextDelta(content));
         }
@@ -200,7 +256,11 @@ impl OllamaProvider {
         if value.get("done").and_then(Value::as_bool).unwrap_or(false) {
             events.push(StreamEvent::Done {
                 usage: Self::parse_usage(&value),
-                finish_reason: "stop".into(),
+                finish_reason: value
+                    .get("done_reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stop")
+                    .to_string(),
             });
         }
         Ok(events)
@@ -225,7 +285,9 @@ impl ModelProvider for OllamaProvider {
             embeddings: true,
             context_window: self.config.context_window,
             max_output_tokens: self.config.max_output_tokens,
-            reasoning_controls: false,
+            context_limit_source: self.config.context_limit_source,
+            output_limit_source: self.config.output_limit_source,
+            reasoning_controls: true,
             system_prompt: true,
             parallel_tool_calls: false,
             json_schema: false,
@@ -257,22 +319,25 @@ impl ModelProvider for OllamaProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<Completion> {
         let body = self.build_body(&request, false);
-        let response = self
-            .client
-            .post(format!("{}/api/chat", self.base_url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    NexusError::ModelTimeout(self.config.timeout_secs)
-                } else {
-                    NexusError::Provider {
-                        provider: "ollama".into(),
-                        message: format!("request failed: {e}"),
-                    }
+        let response = tokio::time::timeout(
+            Duration::from_secs(self.config.timeout_secs.max(1)),
+            self.client
+                .post(format!("{}/api/chat", self.base_url))
+                .json(&body)
+                .send(),
+        )
+        .await
+        .map_err(|_| NexusError::ModelTimeout(self.config.timeout_secs.max(1)))?
+        .map_err(|e| {
+            if e.is_timeout() {
+                NexusError::ModelTimeout(self.config.timeout_secs)
+            } else {
+                NexusError::Provider {
+                    provider: "ollama".into(),
+                    message: format!("request failed: {e}"),
                 }
-            })?;
+            }
+        })?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -285,16 +350,35 @@ impl ModelProvider for OllamaProvider {
             provider: "ollama".into(),
             message: format!("invalid JSON: {e}"),
         })?;
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(NexusError::Provider {
+                provider: "ollama".into(),
+                message: error.to_string(),
+            });
+        }
         let (content, tool_calls) = Self::parse_message(&value);
+        let content = Self::visible_content(&content);
         Ok(Completion {
             content,
             tool_calls,
             usage: Self::parse_usage(&value),
             finish_reason: if value.get("done").and_then(Value::as_bool).unwrap_or(true) {
-                "stop".into()
+                value
+                    .get("done_reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stop")
+                    .to_string()
             } else {
                 "length".into()
             },
+            provider_private: self
+                .config
+                .reasoning_effort
+                .as_deref()
+                .filter(|effort| matches!(*effort, "on" | "low" | "medium" | "high"))
+                .and_then(|_| value.pointer("/message/thinking").and_then(Value::as_str))
+                .filter(|thinking| !thinking.is_empty())
+                .map(ToString::to_string),
         })
     }
 
@@ -303,16 +387,19 @@ impl ModelProvider for OllamaProvider {
         request: CompletionRequest,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
         let body = self.build_body(&request, true);
-        let response = self
-            .client
-            .post(format!("{}/api/chat", self.base_url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| NexusError::Provider {
-                provider: "ollama".into(),
-                message: format!("request failed: {e}"),
-            })?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(self.config.timeout_secs.max(1)),
+            self.client
+                .post(format!("{}/api/chat", self.base_url))
+                .json(&body)
+                .send(),
+        )
+        .await
+        .map_err(|_| NexusError::ModelTimeout(self.config.timeout_secs.max(1)))?
+        .map_err(|e| NexusError::Provider {
+            provider: "ollama".into(),
+            message: format!("request failed: {e}"),
+        })?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -322,16 +409,32 @@ impl ModelProvider for OllamaProvider {
             });
         }
         let byte_stream = response.bytes_stream();
+        let idle_timeout = Duration::from_secs(self.config.timeout_secs.max(1));
+        let retain_thinking = matches!(
+            self.config.reasoning_effort.as_deref(),
+            Some("on" | "low" | "medium" | "high")
+        );
         // NDJSON: one JSON object per line.
         let stream = futures::stream::unfold(
-            (byte_stream, String::new(), Vec::<StreamEvent>::new()),
-            move |(mut bytes, mut buf, mut pending)| async move {
+            (
+                byte_stream,
+                String::new(),
+                Vec::<StreamEvent>::new(),
+                String::new(),
+            ),
+            move |(mut bytes, mut buf, mut pending, mut content)| async move {
                 loop {
                     if let Some(ev) = pending.pop() {
-                        return Some((Ok(ev), (bytes, buf, pending)));
+                        return Some((Ok(ev), (bytes, buf, pending, content)));
                     }
-                    match bytes.next().await {
-                        Some(Ok(chunk)) => {
+                    match tokio::time::timeout(idle_timeout, bytes.next()).await {
+                        Err(_) => {
+                            return Some((
+                                Err(NexusError::ModelTimeout(idle_timeout.as_secs())),
+                                (bytes, buf, pending, content),
+                            ));
+                        }
+                        Ok(Some(Ok(chunk))) => {
                             buf.push_str(&String::from_utf8_lossy(&chunk));
                             let mut events = Vec::new();
                             while let Some(pos) = buf.find('\n') {
@@ -340,26 +443,31 @@ impl ModelProvider for OllamaProvider {
                                 if line.is_empty() {
                                     continue;
                                 }
-                                match OllamaProvider::parse_stream_line(line) {
-                                    Ok(mut parsed) => events.append(&mut parsed),
+                                match OllamaProvider::parse_stream_line(line, retain_thinking) {
+                                    Ok(parsed) => {
+                                        events.extend(OllamaProvider::finalize_buffered_content(
+                                            parsed,
+                                            &mut content,
+                                        ))
+                                    }
                                     Err(error) => {
-                                        return Some((Err(error), (bytes, buf, pending)));
+                                        return Some((Err(error), (bytes, buf, pending, content)));
                                     }
                                 }
                             }
                             events.reverse();
                             pending = events;
                         }
-                        Some(Err(e)) => {
+                        Ok(Some(Err(e))) => {
                             return Some((
                                 Err(NexusError::Provider {
                                     provider: "ollama".into(),
                                     message: format!("stream interrupted: {e}"),
                                 }),
-                                (bytes, buf, pending),
+                                (bytes, buf, pending, content),
                             ));
                         }
-                        None => {
+                        Ok(None) => {
                             // `bytes_stream` is not required to end with a
                             // newline. Ollama and reverse proxies may close
                             // immediately after the terminal JSON object, so
@@ -369,13 +477,20 @@ impl ModelProvider for OllamaProvider {
                             if line.is_empty() {
                                 return None;
                             }
-                            match OllamaProvider::parse_stream_line(line) {
-                                Ok(mut events) => {
+                            match OllamaProvider::parse_stream_line(line, retain_thinking) {
+                                Ok(events) => {
+                                    let mut events = OllamaProvider::finalize_buffered_content(
+                                        events,
+                                        &mut content,
+                                    );
                                     events.reverse();
                                     pending = events;
                                 }
                                 Err(error) => {
-                                    return Some((Err(error), (bytes, String::new(), pending)));
+                                    return Some((
+                                        Err(error),
+                                        (bytes, String::new(), pending, content),
+                                    ));
                                 }
                             }
                         }
@@ -444,5 +559,93 @@ impl ModelProvider for OllamaProvider {
                 latency_ms: None,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(effort: Option<&str>) -> OllamaProvider {
+        let config = ModelConfig {
+            provider: "ollama".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "qwen3:4b".into(),
+            reasoning_effort: effort.map(str::to_string),
+            ..Default::default()
+        };
+        OllamaProvider::new(&config).expect("provider")
+    }
+
+    #[test]
+    fn thinking_is_off_by_default_and_explicit_effort_is_mapped() {
+        assert_eq!(
+            provider(None).build_body(&ModelRequest::default(), true)["think"],
+            false
+        );
+        assert_eq!(
+            provider(Some("on")).build_body(&ModelRequest::default(), true)["think"],
+            true
+        );
+        assert_eq!(
+            provider(Some("low")).build_body(&ModelRequest::default(), true)["think"],
+            "low"
+        );
+    }
+
+    #[test]
+    fn thinking_is_not_rendered_and_done_reason_is_preserved() {
+        let events = OllamaProvider::parse_stream_line(
+            r#"{"message":{"thinking":"private","content":"ready"},"done":true,"done_reason":"length","eval_count":8}"#,
+            false,
+        ).expect("line");
+        assert!(matches!(&events[0], StreamEvent::TextDelta(text) if text == "ready"));
+        assert!(
+            matches!(&events[1], StreamEvent::Done { finish_reason, .. } if finish_reason == "length")
+        );
+        assert!(!format!("{events:?}").contains("private"));
+    }
+
+    #[test]
+    fn explicit_thinking_is_provider_private_only() {
+        let events = OllamaProvider::parse_stream_line(
+            r#"{"message":{"thinking":"private","content":"ready"},"done":true}"#,
+            true,
+        )
+        .expect("line");
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ProviderPrivateDelta(text) if text == "private"
+        ));
+        assert!(matches!(&events[1], StreamEvent::TextDelta(text) if text == "ready"));
+    }
+
+    #[test]
+    fn legacy_content_thinking_is_removed_before_stream_output() {
+        let mut buffered = String::new();
+        assert!(OllamaProvider::finalize_buffered_content(
+            vec![StreamEvent::TextDelta("private reasoning".into())],
+            &mut buffered,
+        )
+        .is_empty());
+        let events = OllamaProvider::finalize_buffered_content(
+            vec![
+                StreamEvent::TextDelta("</think>\n\nready".into()),
+                StreamEvent::Done {
+                    usage: Usage::default(),
+                    finish_reason: "stop".into(),
+                },
+            ],
+            &mut buffered,
+        );
+        assert!(matches!(&events[0], StreamEvent::TextDelta(text) if text.trim() == "ready"));
+        assert!(matches!(&events[1], StreamEvent::Done { .. }));
+    }
+
+    #[test]
+    fn streamed_error_object_fails() {
+        let error = OllamaProvider::parse_stream_line(r#"{"error":"model runner crashed"}"#, false)
+            .expect_err("must fail");
+        assert!(error.to_string().contains("model runner crashed"));
     }
 }

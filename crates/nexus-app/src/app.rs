@@ -22,6 +22,7 @@ use nexus_policy::PolicyEngine;
 use nexus_sandbox::SandboxManager;
 use nexus_tools::{ToolContext, ToolRegistry};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Everything a command needs, built once from configuration.
@@ -48,6 +49,9 @@ pub struct App {
     /// Model the operator pinned via `/connect` / `snx model use`, when it still
     /// exists in the configuration. Pinning overrides task routing.
     pub pinned_model: Option<String>,
+    /// Attended-process-only Full Access override. It is never serialized and
+    /// is reset at bootstrap and whenever a session is attached/resumed.
+    session_full_access: AtomicBool,
 }
 
 impl App {
@@ -63,6 +67,16 @@ impl App {
         nexus_core::permissions::repair_private_tree(&bootstrap_paths.auth_dir)?;
         nexus_core::permissions::repair_private_tree(&bootstrap_paths.state_dir)?;
         let (mut config, paths) = Config::load(&workspace)?;
+        if crate::services::permission_mode(&config.policy) == "full-access" {
+            let defaults = nexus_core::config::PolicyConfig::default();
+            config.policy.reads = defaults.reads;
+            config.policy.writes = defaults.writes;
+            config.policy.commands = defaults.commands;
+            config.policy.network = defaults.network;
+            config.policy.downloads = defaults.downloads;
+            config.policy.destructive = defaults.destructive;
+            config.policy.external = defaults.external;
+        }
         let credentials = CredentialStore::new(&paths.auth_dir);
         let ui_state = UiStateFile::load(&paths.ui_state_file)?;
         let allow_existing_codex = ui_state.state.codex_use_existing;
@@ -177,17 +191,39 @@ impl App {
             credentials,
             ui_state: Mutex::new(ui_state),
             pinned_model,
+            session_full_access: AtomicBool::new(false),
         })
+    }
+
+    pub fn set_session_full_access(&self, enabled: bool) {
+        self.session_full_access.store(enabled, Ordering::Release);
+    }
+
+    pub fn session_full_access(&self) -> bool {
+        self.session_full_access.load(Ordering::Acquire)
+    }
+
+    pub fn reset_session_full_access(&self) {
+        self.set_session_full_access(false);
     }
 
     /// Build the tool execution context bound to an optional session.
     pub fn tool_context(&self, session: Option<nexus_core::SessionId>) -> ToolContext {
+        let mut config = (*self.config).clone();
+        if self.session_full_access() {
+            config.policy.reads = "allow".into();
+            config.policy.writes = "allow".into();
+            config.policy.commands = "allow".into();
+            config.policy.network = "allow".into();
+            config.policy.downloads = "allow".into();
+            config.policy.read_formats.clear();
+        }
         ToolContext {
             workspace: self.guard.clone(),
             sandbox: self.sandbox.clone(),
             artifacts: self.artifacts.clone(),
             redactor: self.redactor.clone(),
-            config: self.config.clone(),
+            config: Arc::new(config),
             store: self.store.clone(),
             session,
             authorization: nexus_tools::ExecutionAuthorization::default(),
@@ -197,6 +233,14 @@ impl App {
     /// Construct the full agent runtime for a session.
     pub fn runtime(&self, session: Option<nexus_core::SessionId>) -> Result<AgentRuntime> {
         let mut runtime_config = (*self.config).clone();
+        if self.session_full_access() {
+            runtime_config.policy.reads = "allow".into();
+            runtime_config.policy.writes = "allow".into();
+            runtime_config.policy.commands = "allow".into();
+            runtime_config.policy.network = "allow".into();
+            runtime_config.policy.downloads = "allow".into();
+            runtime_config.policy.read_formats.clear();
+        }
         if let Some(session_id) = session.as_ref() {
             if let Ok(meta) = self.sessions().get(session_id.as_str()) {
                 if runtime_config.models.contains_key(&meta.model) {

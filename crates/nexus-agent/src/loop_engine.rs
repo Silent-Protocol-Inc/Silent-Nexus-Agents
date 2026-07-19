@@ -1333,6 +1333,7 @@ impl AgentLoop {
         let mut calls: Vec<(Option<String>, String, String)> = Vec::new();
         let mut usage = Usage::default();
         let mut finish_reason = String::from("stop");
+        let mut provider_private = String::new();
         let mut display = StreamDisplayBuffer::new(native_tool_calls);
 
         while let Some(event) = stream.next().await {
@@ -1355,6 +1356,7 @@ impl AgentLoop {
                         self.emit(LoopEvent::AssistantTextDelta(safe_delta));
                     }
                 }
+                StreamEvent::ProviderPrivateDelta(delta) => provider_private.push_str(&delta),
                 StreamEvent::ToolCallDelta {
                     index,
                     id,
@@ -1401,6 +1403,7 @@ impl AgentLoop {
             tool_calls,
             usage,
             finish_reason,
+            provider_private: (!provider_private.is_empty()).then_some(provider_private),
         })
     }
 
@@ -2242,6 +2245,7 @@ impl AgentLoop {
                     // Record the assistant's tool request.
                     let mut assistant_msg =
                         ChatMessage::assistant(self.safe_model_text(&completion.content));
+                    assistant_msg.provider_private = completion.provider_private.clone();
                     assistant_msg.tool_calls.push(call.clone());
                     self.runtime
                         .sessions
@@ -2430,6 +2434,7 @@ impl AgentLoop {
             tool: "plan.approve".into(),
             risk: nexus_core::RiskLevel::Write,
             paths: Vec::new(),
+            formats: Vec::new(),
             command: None,
             command_analysis: None,
             destination: None,
@@ -2600,6 +2605,42 @@ impl AgentLoop {
         self.runtime.tools.validate_args(&call.name, &args)?;
 
         let mut action_req = tool.action_request(&args)?;
+        if action_req.risk == nexus_core::RiskLevel::Read && !action_req.paths.is_empty() {
+            let mut normalized = Vec::new();
+            let mut formats = std::collections::BTreeSet::new();
+            for raw in &action_req.paths {
+                let Ok(path) = self.runtime.tool_ctx.workspace.resolve_existing(raw) else {
+                    normalized.push(raw.clone());
+                    continue;
+                };
+                normalized.push(self.runtime.tool_ctx.workspace.display_relative(&path));
+                if path.is_file() {
+                    formats.insert(nexus_core::file_formats::classify(&path).id.to_string());
+                } else if path.is_dir() {
+                    for entry in ignore::WalkBuilder::new(&path)
+                        .hidden(false)
+                        .git_ignore(true)
+                        .build()
+                        .flatten()
+                    {
+                        if entry.file_type().is_some_and(|kind| kind.is_file()) {
+                            formats.insert(
+                                nexus_core::file_formats::classify(entry.path())
+                                    .id
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            action_req.paths = normalized;
+            action_req.formats = formats.into_iter().collect();
+            if !action_req.formats.is_empty() {
+                action_req
+                    .summary
+                    .push_str(&format!(" · formats {}", action_req.formats.join(", ")));
+            }
+        }
         if action_req.risk > self.agent_max_risk() {
             return Err(NexusError::PolicyDenied(format!(
                 "agent `{}` caps risk at `{}`; invocation escalated to `{}`",

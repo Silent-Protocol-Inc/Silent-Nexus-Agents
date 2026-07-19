@@ -1175,7 +1175,8 @@ pub async fn index(app: &App, cmd: IndexCmd, json: bool) -> Result<()> {
     let indexer = app.indexer();
     match cmd {
         IndexCmd::Build => {
-            let status = indexer.build(&app.workspace, &app.guard)?;
+            let status =
+                indexer.build_with_policy(&app.workspace, &app.guard, &app.config.policy)?;
             ui.ok(&format!(
                 "indexed {} files, {} symbols",
                 status.files, status.symbols

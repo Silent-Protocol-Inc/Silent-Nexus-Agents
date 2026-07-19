@@ -638,6 +638,7 @@ mod tests {
             tool: "fs.delete".into(),
             risk: RiskLevel::Destructive,
             paths: vec!["a".into()],
+            formats: vec![],
             command: None,
             command_analysis: None,
             destination: None,

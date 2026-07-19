@@ -451,6 +451,8 @@ impl ModelProvider for CodexResponsesProvider {
             embeddings: false,
             context_window: self.config.context_window,
             max_output_tokens: self.config.max_output_tokens,
+            context_limit_source: self.config.context_limit_source,
+            output_limit_source: self.config.output_limit_source,
             reasoning_controls: true,
             system_prompt: true,
             parallel_tool_calls: self.config.native_tool_calls.unwrap_or(true),
@@ -476,6 +478,7 @@ impl ModelProvider for CodexResponsesProvider {
         while let Some(event) = stream.next().await {
             match event? {
                 StreamEvent::TextDelta(t) => content.push_str(&t),
+                StreamEvent::ProviderPrivateDelta(_) => {}
                 StreamEvent::ToolCallDelta {
                     id,
                     name,
@@ -500,6 +503,7 @@ impl ModelProvider for CodexResponsesProvider {
             tool_calls: calls,
             usage,
             finish_reason: finish,
+            provider_private: None,
         })
     }
 

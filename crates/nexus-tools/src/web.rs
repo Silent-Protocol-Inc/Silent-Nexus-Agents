@@ -166,6 +166,7 @@ impl Tool for WebTool {
                 .and_then(Value::as_str)
                 .map(|p| vec![p.to_string()])
                 .unwrap_or_default(),
+            formats: vec![],
             command: None,
             command_analysis: None,
             destination,

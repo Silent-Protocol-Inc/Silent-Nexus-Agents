@@ -373,6 +373,10 @@ pub struct PlanModel {
     #[serde(default)]
     pub reasoning_efforts: Vec<EffortInfo>,
     pub is_default: bool,
+    #[serde(default)]
+    pub context_window: Option<usize>,
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
 }
 
 /// Run `codex app-server` against the ISOLATED profile and issue the given
@@ -562,6 +566,15 @@ pub async fn list_plan_models() -> Result<Vec<PlanModel>> {
                     .get("isDefault")
                     .and_then(|d| d.as_bool())
                     .unwrap_or(false),
+                context_window: model_usize(m, &["contextWindow", "context_window"]),
+                max_output_tokens: model_usize(
+                    m,
+                    &[
+                        "maxOutputTokens",
+                        "max_output_tokens",
+                        "maxCompletionTokens",
+                    ],
+                ),
             })
         })
         .collect();
@@ -579,6 +592,16 @@ pub async fn list_plan_models() -> Result<Vec<PlanModel>> {
         }
     }
     Ok(models)
+}
+
+fn model_usize(value: &serde_json::Value, keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|number| usize::try_from(number).ok())
+            .filter(|number| *number > 0)
+    })
 }
 
 // ----------------------------------------------------------------- usage

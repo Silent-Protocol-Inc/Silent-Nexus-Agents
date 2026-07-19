@@ -20,6 +20,7 @@ use nexus_policy::{commands, ActionRequest};
 use nexus_sandbox::{ExecSpec, FilesystemAccess, NetworkMode};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 struct RunProgram {
@@ -105,7 +106,74 @@ fn build_spec(
         "restricted" => NetworkMode::Restricted,
         _ => NetworkMode::Off,
     };
-    let sensitive_path_masks = ctx.workspace.sensitive_paths_for_masking()?;
+    let mut sensitive_path_masks = ctx.workspace.sensitive_paths_for_masking()?;
+    for entry in ignore::WalkBuilder::new(ctx.workspace.root())
+        .hidden(false)
+        .git_ignore(false)
+        .build()
+        .flatten()
+    {
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let classified = nexus_core::file_formats::classify(entry.path());
+        let decision = if classified.hard_denied {
+            "deny"
+        } else {
+            ctx.config
+                .policy
+                .read_formats
+                .get(classified.id)
+                .or_else(|| ctx.config.policy.read_formats.get("other"))
+                .map(String::as_str)
+                .unwrap_or(ctx.config.policy.reads.as_str())
+        };
+        if decision == "deny" {
+            if let Ok(relative) = entry.path().strip_prefix(ctx.workspace.root()) {
+                sensitive_path_masks.push(relative.to_path_buf());
+            }
+        }
+    }
+    sensitive_path_masks.sort();
+    sensitive_path_masks.dedup();
+    // A small proved write-only command shape cannot observe masked content.
+    // Keep attended host execution useful for creating ordinary paths while
+    // failing closed for every command that may read workspace files.
+    let proved_write_only = !shell
+        && analysis.commands.len() == 1
+        && analysis.commands[0]
+            .first()
+            .and_then(|program| Path::new(program).file_name())
+            .and_then(|program| program.to_str())
+            .is_some_and(|program| matches!(program, "touch" | "mkdir"))
+        && analysis.commands[0].iter().skip(1).all(|argument| {
+            let path = Path::new(argument);
+            if argument.starts_with('-')
+                || path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return false;
+            }
+            let classified = nexus_core::file_formats::classify(path);
+            !classified.hard_denied
+                && ctx
+                    .config
+                    .policy
+                    .read_formats
+                    .get(classified.id)
+                    .or_else(|| ctx.config.policy.read_formats.get("other"))
+                    .map(String::as_str)
+                    .unwrap_or(ctx.config.policy.reads.as_str())
+                    != "deny"
+        });
+    if !ctx.sandbox.strong_isolation() && !sensitive_path_masks.is_empty() && !proved_write_only {
+        return Err(NexusError::PolicyDenied(
+            "host execution cannot prove restricted-file masking; enable the container sandbox"
+                .into(),
+        ));
+    }
     Ok(ExecSpec {
         program,
         args,
@@ -202,6 +270,7 @@ impl Tool for RunProgram {
             tool: self.meta.name.clone(),
             risk,
             paths: vec![],
+            formats: vec![],
             command: Some(command_line.clone()),
             command_analysis: Some(analysis),
             destination: None,
@@ -252,6 +321,7 @@ impl Tool for RunShell {
             tool: self.meta.name.clone(),
             risk,
             paths: vec![],
+            formats: vec![],
             command: Some(command.clone()),
             command_analysis: Some(analysis),
             destination: None,
@@ -283,6 +353,7 @@ mod tests {
     async fn run_program_executes_in_sandbox() {
         let dir = tempfile::tempdir().expect("tempdir");
         let ctx = context(dir.path());
+        std::fs::remove_dir_all(dir.path().join(".nexus")).expect("remove test state");
         let mut r = ToolRegistry::new();
         register(&mut r);
         let out = r
@@ -314,6 +385,7 @@ mod tests {
     async fn output_includes_stderr_and_status() {
         let dir = tempfile::tempdir().expect("tempdir");
         let ctx = context(dir.path());
+        std::fs::remove_dir_all(dir.path().join(".nexus")).expect("remove test state");
         let mut r = ToolRegistry::new();
         register(&mut r);
         let out = r
@@ -331,6 +403,7 @@ mod tests {
     fn execution_uses_the_configured_shared_output_budget() {
         let directory = tempfile::tempdir().expect("directory");
         let ctx = context(directory.path());
+        std::fs::remove_dir_all(directory.path().join(".nexus")).expect("remove test state");
         let arguments = json!({});
         let analysis = commands::analyze_argv("echo", &["ok".into()]);
         let spec = build_spec(

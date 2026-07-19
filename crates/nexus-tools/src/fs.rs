@@ -295,6 +295,7 @@ impl Tool for FsTool {
             tool: self.meta.name.clone(),
             risk: self.meta.risk,
             paths,
+            formats: Vec::new(),
             command: None,
             command_analysis: None,
             destination: None,
@@ -304,9 +305,10 @@ impl Tool for FsTool {
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput> {
         let guard = ctx.workspace.clone();
+        let policy = ctx.config.policy.clone();
         let op = self.op;
         // Filesystem work is synchronous; run on the blocking pool.
-        let raw = tokio::task::spawn_blocking(move || execute_sync(op, &guard, &args))
+        let raw = tokio::task::spawn_blocking(move || execute_sync(op, &guard, &policy, &args))
             .await
             .map_err(|e| NexusError::other(format!("fs task join: {e}")))??;
         finalize_output(ctx, &self.meta, raw.0, raw.1).await
@@ -316,6 +318,7 @@ impl Tool for FsTool {
 fn execute_sync(
     op: FsOp,
     guard: &nexus_core::workspace::WorkspaceGuard,
+    policy: &nexus_core::config::PolicyConfig,
     args: &Value,
 ) -> Result<(String, Value)> {
     match op {
@@ -328,6 +331,7 @@ fn execute_sync(
                 .clamp(1, 4) as usize;
             let root = guard.resolve_existing(rel)?;
             let mut lines = Vec::new();
+            let mut skipped = 0usize;
             let walker = ignore::WalkBuilder::new(&root)
                 .max_depth(Some(depth))
                 .hidden(false)
@@ -341,6 +345,12 @@ fn execute_sync(
                 let Ok(real) = guard.resolve_existing(path) else {
                     continue;
                 };
+                if entry.file_type().is_some_and(|kind| kind.is_file())
+                    && read_format_decision(policy, &real) == "deny"
+                {
+                    skipped += 1;
+                    continue;
+                }
                 let ft = entry.file_type();
                 let kind = if ft.map(|t| t.is_dir()).unwrap_or(false) {
                     "dir "
@@ -356,10 +366,14 @@ fn execute_sync(
             }
             lines.sort();
             let count = lines.len();
-            Ok((lines.join("\n"), json!({"entries": count})))
+            Ok((
+                lines.join("\n"),
+                json!({"entries": count, "skipped_restricted": skipped}),
+            ))
         }
         FsOp::ReadFile => {
             let path = guard.resolve_existing(arg_str(args, "path")?)?;
+            ensure_readable(policy, &path)?;
             let content = std::fs::read_to_string(&path).map_err(|e| NexusError::ToolFailed {
                 tool: "fs.read_file".into(),
                 message: format!("{}: {e}", path.display()),
@@ -398,6 +412,7 @@ fn execute_sync(
                 .clamp(1, 500) as usize;
             let root = guard.resolve_existing(rel)?;
             let mut hits = Vec::new();
+            let mut skipped = 0usize;
             let walker = ignore::WalkBuilder::new(&root)
                 .hidden(false)
                 .git_ignore(true)
@@ -410,6 +425,10 @@ fn execute_sync(
                 let Ok(real) = guard.resolve_existing(entry.path()) else {
                     continue;
                 };
+                if read_format_decision(policy, &real) == "deny" {
+                    skipped += 1;
+                    continue;
+                }
                 let Ok(content) = std::fs::read_to_string(&real) else {
                     continue; // binary or unreadable
                 };
@@ -444,7 +463,7 @@ fn execute_sync(
                 } else {
                     hits.join("\n")
                 },
-                json!({"matches": count, "capped": count >= max}),
+                json!({"matches": count, "capped": count >= max, "skipped_restricted": skipped}),
             ))
         }
         FsOp::FindFiles => {
@@ -460,6 +479,7 @@ fn execute_sync(
             let rel = args.get("path").and_then(Value::as_str).unwrap_or(".");
             let root = guard.resolve_existing(rel)?;
             let mut found = Vec::new();
+            let mut skipped = 0usize;
             let walker = ignore::WalkBuilder::new(&root)
                 .hidden(false)
                 .git_ignore(true)
@@ -468,6 +488,12 @@ fn execute_sync(
                 let Ok(real) = guard.resolve_existing(entry.path()) else {
                     continue;
                 };
+                if entry.file_type().is_some_and(|kind| kind.is_file())
+                    && read_format_decision(policy, &real) == "deny"
+                {
+                    skipped += 1;
+                    continue;
+                }
                 let rel_path = guard.display_relative(&real);
                 if matcher.is_match(&rel_path) {
                     found.push(rel_path);
@@ -484,11 +510,12 @@ fn execute_sync(
                 } else {
                     found.join("\n")
                 },
-                json!({"files": count}),
+                json!({"files": count, "skipped_restricted": skipped}),
             ))
         }
         FsOp::Stat => {
             let path = guard.resolve_existing(arg_str(args, "path")?)?;
+            ensure_readable(policy, &path)?;
             let m = std::fs::metadata(&path)?;
             let modified = m
                 .modified()
@@ -516,6 +543,7 @@ fn execute_sync(
         }
         FsOp::Hash => {
             let path = guard.resolve_existing(arg_str(args, "path")?)?;
+            ensure_readable(policy, &path)?;
             let bytes = std::fs::read(&path)?;
             let hash = hex::encode(sha2::Sha256::digest(&bytes));
             Ok((
@@ -703,6 +731,36 @@ fn execute_sync(
             ))
         }
     }
+}
+
+fn read_format_decision<'a>(
+    policy: &'a nexus_core::config::PolicyConfig,
+    path: &std::path::Path,
+) -> &'a str {
+    let classified = nexus_core::file_formats::classify(path);
+    if classified.hard_denied {
+        return "deny";
+    }
+    policy
+        .read_formats
+        .get(classified.id)
+        .or_else(|| policy.read_formats.get("other"))
+        .map(String::as_str)
+        .unwrap_or(policy.reads.as_str())
+}
+
+fn ensure_readable(
+    policy: &nexus_core::config::PolicyConfig,
+    path: &std::path::Path,
+) -> Result<()> {
+    if read_format_decision(policy, path) == "deny" {
+        return Err(NexusError::PathDenied(format!(
+            "read denied for `{}` (format {})",
+            path.display(),
+            nexus_core::file_formats::classify(path).id
+        )));
+    }
+    Ok(())
 }
 
 /// UI-only change summary attached to a mutating op's metadata.
@@ -923,7 +981,7 @@ mod tests {
         .await
         .expect("list");
         assert!(listed.content.contains("visible.txt"));
-        assert!(listed.content.contains(".env.example"));
+        assert!(!listed.content.contains(".env.example"));
         assert!(!listed.content.contains(".env\n"));
         assert!(!listed.content.contains(".git"));
         assert!(!listed.content.contains(".nexus"));
@@ -937,7 +995,7 @@ mod tests {
         .await
         .expect("find");
         assert!(found.content.contains("visible.txt"));
-        assert!(found.content.contains(".env.example"));
+        assert!(!found.content.contains(".env.example"));
         assert!(!found.content.lines().any(|line| line == ".env"));
         assert!(!found.content.contains(".git"));
         assert!(!found.content.contains(".nexus"));

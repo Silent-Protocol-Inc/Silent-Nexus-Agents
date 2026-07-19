@@ -24,6 +24,9 @@ pub struct ActionRequest {
     pub risk: RiskLevel,
     /// Workspace-relative paths this action touches, when applicable.
     pub paths: Vec<String>,
+    /// Stable file-format ids included in this operation.
+    #[serde(default)]
+    pub formats: Vec<String>,
     /// Normalized command line (terminal tools).
     pub command: Option<String>,
     /// Structured analysis for terminal commands. Raw shell and unprovable
@@ -137,7 +140,8 @@ impl PolicyEngine {
             }
             (None, _) if action.session_grant_allowed() => {
                 let paths = serde_json::to_string(&action.paths).unwrap_or_default();
-                format!("path:{}:{paths}", action.tool)
+                let formats = serde_json::to_string(&action.formats).unwrap_or_default();
+                format!("path:{}:{paths}:{formats}", action.tool)
             }
             _ => format!("once-only:{}", action.tool),
         }
@@ -163,6 +167,60 @@ impl PolicyEngine {
                 .or_else(|| commands::hard_denied(cmd, &self.config.denied_commands));
             if let Some(reason) = denied {
                 return PolicyOutcome::new(Decision::Deny, "builtin", reason);
+            }
+        }
+
+        if action.risk == RiskLevel::Read && !action.paths.is_empty() {
+            for path in &action.paths {
+                if nexus_core::file_formats::classify(std::path::Path::new(path)).hard_denied {
+                    return PolicyOutcome::new(
+                        Decision::Deny,
+                        "hard_safety",
+                        format!("read of locked path `{path}` is denied"),
+                    );
+                }
+            }
+            let traversal = matches!(
+                action.tool.as_str(),
+                "fs.list_dir" | "fs.search_text" | "fs.find_files" | "repo.status" | "repo.diff"
+            );
+            let mut ask = Vec::new();
+            for format in &action.formats {
+                let decision = self
+                    .config
+                    .read_formats
+                    .get(format)
+                    .or_else(|| self.config.read_formats.get("other"))
+                    .map(String::as_str)
+                    .unwrap_or(self.config.reads.as_str());
+                if decision == "deny" && !traversal {
+                    return PolicyOutcome::new(
+                        Decision::Deny,
+                        "read_format",
+                        format!("format `{format}` is denied"),
+                    );
+                }
+                if decision == "ask" {
+                    ask.push(format.clone());
+                }
+            }
+            if !ask.is_empty() {
+                ask.sort();
+                ask.dedup();
+                if self.session_grants.read().is_ok_and(|grants| {
+                    grants.contains(&Self::grant_token(action)) && action.session_grant_allowed()
+                }) {
+                    return PolicyOutcome::new(
+                        Decision::AllowSession,
+                        "session_grant",
+                        "approved formats and normalized paths earlier this session",
+                    );
+                }
+                return PolicyOutcome::new(
+                    Decision::Ask,
+                    "read_format",
+                    format!("read formats require approval: {}", ask.join(", ")),
+                );
             }
         }
 
@@ -321,6 +379,7 @@ mod tests {
             tool: tool.into(),
             risk,
             paths: vec![],
+            formats: vec![],
             command: None,
             command_analysis: None,
             destination: None,
@@ -332,6 +391,33 @@ mod tests {
     fn reads_allowed_by_default() {
         let out = engine().evaluate(&action("fs.read_file", RiskLevel::Read));
         assert_eq!(out.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn format_rules_bind_grants_and_new_denials_win() {
+        let mut config = PolicyConfig::default();
+        config.read_formats.insert("toml".into(), "ask".into());
+        let engine = PolicyEngine::new(config);
+        let mut request = action("fs.read_file", RiskLevel::Read);
+        request.paths = vec!["Cargo.toml".into()];
+        request.formats = vec!["toml".into()];
+        assert_eq!(engine.evaluate(&request).decision, Decision::Ask);
+        engine.grant_session(&PolicyEngine::grant_token(&request));
+        assert_eq!(engine.evaluate(&request).decision, Decision::AllowSession);
+
+        let mut denied = PolicyConfig::default();
+        denied.read_formats.insert("toml".into(), "deny".into());
+        let denied_engine = PolicyEngine::new(denied);
+        denied_engine.grant_session(&PolicyEngine::grant_token(&request));
+        assert_eq!(denied_engine.evaluate(&request).decision, Decision::Deny);
+    }
+
+    #[test]
+    fn hard_sensitive_paths_are_never_unlockable() {
+        let mut request = action("fs.read_file", RiskLevel::Read);
+        request.paths = vec![".env.example".into()];
+        request.formats = vec!["other".into()];
+        assert_eq!(engine().evaluate(&request).decision, Decision::Deny);
     }
 
     #[test]

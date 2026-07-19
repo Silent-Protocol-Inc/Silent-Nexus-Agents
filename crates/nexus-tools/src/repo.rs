@@ -343,6 +343,7 @@ impl Tool for RepoTool {
             tool: self.meta.name.clone(),
             risk: self.meta.risk,
             paths: path.map(|p| vec![p.to_string()]).unwrap_or_default(),
+            formats: Vec::new(),
             command: None,
             command_analysis: None,
             destination: None,

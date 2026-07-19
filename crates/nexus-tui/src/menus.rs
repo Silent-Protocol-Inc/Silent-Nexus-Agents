@@ -517,10 +517,13 @@ fn configured_model_detail(card: &ConfiguredModelCard) -> String {
         );
     };
     format!(
-        "model {} · {} · context {} · tools {} · structured {} · schema {} · vision {} · streaming {} · {:?} · privacy {:?} · latency {:?} · cost {:?} · fallback {:?}",
+        "model {} · {} · context {} ({}) · output {} ({}) · tools {} · structured {} · schema {} · vision {} · streaming {} · {:?} · privacy {:?} · latency {:?} · cost {:?} · fallback {:?}",
         card.model_id,
         card.availability,
         capabilities.context_window,
+        capabilities.context_limit_source,
+        capabilities.max_output_tokens,
+        capabilities.output_limit_source,
         capability_marker(capabilities.native_tool_calls),
         capability_marker(capabilities.structured_output),
         capability_marker(capabilities.json_schema),
@@ -617,7 +620,7 @@ pub fn model_menu(
                         UiAction::UseDiscovered {
                             provider: e.id.clone(),
                             base_url: e.endpoint.clone().unwrap_or_default(),
-                            model_id: m.id.clone(),
+                            model: m.clone(),
                         },
                     )
                     .badge(e.label.clone())
@@ -750,7 +753,7 @@ pub fn provider_menu(
                 UiAction::UseDiscovered {
                     provider: entry.id.clone(),
                     base_url: entry.endpoint.clone().unwrap_or_default(),
-                    model_id: m.id.clone(),
+                    model: m.clone(),
                 }
             };
             items.push(
@@ -1312,6 +1315,13 @@ pub fn permissions_menu(active_mode: &str) -> Menu {
     }
     items.push(
         MenuItem::new(
+            "  File read access…",
+            UiAction::Load(LoadRequest::ReadFormats),
+        )
+        .detail("per-format allow, ask, deny rules; workspace scope by default"),
+    );
+    items.push(
+        MenuItem::new(
             "  Show effective policy…",
             UiAction::RunCommand("permissions show".into()),
         )
@@ -1320,6 +1330,79 @@ pub fn permissions_menu(active_mode: &str) -> Menu {
     Menu::new("permissions — approval mode", items)
         .route("/permissions")
         .hint("Enter applies and persists · destructive actions always ask · Esc close")
+}
+
+pub fn read_formats_menu(policy: &nexus_core::config::PolicyConfig) -> Menu {
+    const FORMATS: &[&str] = &[
+        "rust",
+        "toml",
+        "silent",
+        "python",
+        "javascript",
+        "typescript",
+        "go",
+        "jvm",
+        "c_cpp",
+        "ruby",
+        "php",
+        "shell",
+        "markup",
+        "web",
+        "json",
+        "yaml",
+        "xml",
+        "configuration",
+        "data",
+        "sql",
+        "text",
+        "document",
+        "image",
+        "media",
+        "archive",
+        "binary",
+        "special",
+        "other",
+    ];
+    let mut items = vec![
+        MenuItem::new(
+            "🔒 Sensitive environment and credential files",
+            UiAction::RunCommand("permissions show".into()),
+        )
+        .disabled("hard safety denial — Full Access cannot unlock these"),
+        MenuItem::new(
+            "🔒 .git and .nexus",
+            UiAction::RunCommand("permissions show".into()),
+        )
+        .disabled("hard safety denial — internal state is never model-readable"),
+    ];
+    for format in FORMATS {
+        let current = policy
+            .read_formats
+            .get(*format)
+            .map(String::as_str)
+            .unwrap_or(policy.reads.as_str());
+        let next = match current {
+            "allow" => "ask",
+            "ask" => "deny",
+            _ => "allow",
+        };
+        items.push(
+            MenuItem::new(
+                format!("{format} · {current}"),
+                UiAction::RunCommand(format!("permissions format {format} {next}")),
+            )
+            .badge(if policy.read_formats.contains_key(*format) {
+                "workspace/effective"
+            } else {
+                "inherited fallback"
+            })
+            .detail(format!("Enter changes workspace rule to {next}")),
+        );
+    }
+    Menu::new("file read access", items)
+        .route("/config/permissions/read-formats")
+        .searchable()
+        .hint("Enter cycles workspace rule · use /permissions format FORMAT VALUE global for global defaults")
 }
 
 /// `/sandbox` — isolation backend and network mode, with a self-test row.

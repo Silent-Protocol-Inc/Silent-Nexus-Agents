@@ -85,6 +85,10 @@ pub async fn list_models(
                     .and_then(Value::as_str)
                     .map(String::from),
                 description: None,
+                context_window: None,
+                max_output_tokens: None,
+                context_limit_source: None,
+                output_limit_source: None,
             })
         })
         .collect::<Vec<_>>();
@@ -219,6 +223,8 @@ impl ModelProvider for AnthropicProvider {
             embeddings: false,
             context_window: self.config.context_window,
             max_output_tokens: self.config.max_output_tokens,
+            context_limit_source: self.config.context_limit_source,
+            output_limit_source: self.config.output_limit_source,
             reasoning_controls: false,
             system_prompt: true,
             parallel_tool_calls: self.config.native_tool_calls.unwrap_or(true),
@@ -476,6 +482,7 @@ fn parse_completion(value: &Value) -> Completion {
             .and_then(Value::as_str)
             .unwrap_or("stop")
             .to_string(),
+        provider_private: None,
     }
 }
 
@@ -602,6 +609,7 @@ mod tests {
                 }],
                 tool_call_id: None,
                 name: None,
+                provider_private: None,
             },
             ChatMessage::tool_result("call-1", "fs_read", "contents"),
         ];
