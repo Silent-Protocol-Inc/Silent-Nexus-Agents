@@ -76,6 +76,18 @@ cargo audit
 cargo deny check
 mkdir -p target
 cargo tree -d --locked > target/release-dependency-duplicates.txt
+# The committed config schema is a published artifact, but nothing regenerates
+# it. Two consecutive releases shipped a schema missing a whole config block, so
+# the gate now fails when it drifts from what the binary actually generates.
+cargo run --quiet --locked --offline -p nexus-cli -- config schema \
+  > target/config.schema.generated.json
+diff -u schemas/config.schema.json target/config.schema.generated.json || {
+  echo "error: schemas/config.schema.json is stale; regenerate with:" >&2
+  echo "       snx config schema > schemas/config.schema.json" >&2
+  exit 1
+}
+echo "config schema: committed copy matches the generated schema"
+
 scripts/secret-scan.sh
 scripts/generate-spdx.py target/silent-nexus.spdx.json
 scripts/validate-spdx.py target/silent-nexus.spdx.json
