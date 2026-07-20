@@ -4093,6 +4093,91 @@ pub fn welcome_report() -> Report {
         )
 }
 
+// ------------------------------------------------------------------- thinking
+
+/// Effective deliberation settings. Shared by `/thinking status`, the CLI, and
+/// the interactive menu so the three surfaces cannot describe it differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThinkingStatus {
+    pub mode: nexus_core::ThinkingMode,
+    pub deep_planning: bool,
+    pub summarize_provider_reasoning: bool,
+    pub minimum_duration_ms: u64,
+}
+
+impl ThinkingStatus {
+    pub fn description(&self) -> &'static str {
+        self.mode.description()
+    }
+}
+
+pub fn thinking_status(app: &App) -> ThinkingStatus {
+    ThinkingStatus {
+        mode: app.read_ui_state(|state| state.thinking()),
+        deep_planning: app.config.thinking.deep_planning,
+        summarize_provider_reasoning: app.config.thinking.summarize_provider_reasoning,
+        minimum_duration_ms: app.config.thinking.minimum_duration_ms,
+    }
+}
+
+/// Persist a deliberation mode. The single write path for both surfaces.
+pub fn set_thinking(app: &App, mode: nexus_core::ThinkingMode) -> Result<ThinkingStatus> {
+    app.update_ui_state(|state| state.thinking_mode = mode.as_str().into())?;
+    Ok(thinking_status(app))
+}
+
+pub fn thinking_report(app: &App) -> Report {
+    let status = thinking_status(app);
+    Report::new("thinking")
+        .field("mode", status.mode.as_str())
+        .field("deep planning", yes_no(status.deep_planning))
+        .field("summaries", yes_no(status.summarize_provider_reasoning))
+        .field("min duration", format!("{}ms", status.minimum_duration_ms))
+        .line(status.description())
+        .line_sev(
+            "Hidden chain-of-thought is never requested or displayed.",
+            Sev::Dim,
+        )
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+/// One contextual next step for an operator opening a configured workspace, or
+/// `None` when there is genuinely nothing to point at — a quiet timeline is
+/// better than filler. First match wins.
+pub fn next_step_hint(app: &App) -> Option<String> {
+    if let Some(goal_id) = app.read_ui_state(|state| state.active_goal.clone()) {
+        let title = app
+            .goals()
+            .get(&goal_id)
+            .ok()
+            .map(|goal| goal.title)
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(goal_id);
+        let title: String = title.chars().take(48).collect();
+        return Some(format!(
+            "Goal in progress — \"{title}\". /goal to review, or say what's next."
+        ));
+    }
+    if app.read_ui_state(|state| state.last_session.is_some()) {
+        return Some("/resume picks up your last session, or start something new.".into());
+    }
+    let changed = crate::gitx::modified_files(&app.workspace).len();
+    if changed > 0 {
+        let plural = if changed == 1 { "" } else { "s" };
+        return Some(format!(
+            "{changed} uncommitted change{plural} here — /diff to review, /commit to record."
+        ));
+    }
+    None
+}
+
 // ---------------------------------------------------------------------- usage
 
 fn fmt_reset(unix: i64) -> String {

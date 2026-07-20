@@ -1,5 +1,57 @@
 # Changelog
 
+## [2.4.0] — 2026-07-20
+
+### Added
+
+- `/thinking off|on|auto` (and `snx thinking …`) replaces the on/off reasoning
+  toggle with a real deliberation mode. `off` is quiet and fast, `on` always
+  shows what the agent is doing and prefers grounded staged execution, and
+  `auto` — the new default — decides per request. `/thinking status` reports the
+  effective settings; the bare command opens a three-mode selector that previews
+  what `auto` would decide for whatever is currently typed in the input box.
+- Thinking phases (understanding, planning, searching, executing, waiting,
+  verifying, finalizing) derived from structured runtime state. Phases are a
+  pure projection recomputed each frame, so a transition updates the one live
+  component instead of appending a timeline entry.
+- A summarization engine that turns execution state into concise, action-oriented
+  lines — "Inspecting workspace files.", "Preparing repository comparison.",
+  "Recovering after failed request." — capped at three rendered lines. It reports
+  what the harness is doing rather than paraphrasing model prose, and prefers a
+  provider's own summary where one exists.
+- The deterministic `auto` decision reuses the existing task classifier, so the
+  same request always resolves the same way. Greetings and simple factual asks
+  stay quiet; coding, research, planning, verification, and anything with
+  structural signals (writes, multiple files, network reach) show the component.
+- `[thinking]` configuration: `mode`, `deep_planning`,
+  `summarize_provider_reasoning`, and `minimum_duration_ms` (an anti-flicker
+  floor so sub-second turns never flash the component). Presentation settings
+  stay in `[tui.activity]` — no key is defined in two places.
+- A `THINK fast|deep|auto` status-bar segment, and the resolved decision with its
+  reason in the Ctrl+E activity detail.
+- First-run onboarding for a configured workspace that has never been opened
+  interactively, and a single contextual next step for returning operators
+  (active goal, resumable session, or uncommitted changes). When there is
+  nothing to point at, the timeline stays quiet rather than showing filler.
+
+### Changed
+
+- Deliberation mode influences *optional* deliberation only. `off` skips
+  grounding and staged planning for work carrying no risk flags and lowers retry
+  tolerance; `on` prefers grounded, verified execution. Safety ceilings
+  (`max_steps`, tool/model-call, failure, token, cost, and duration budgets) are
+  never widened, and no mode can take destructive, multi-file, migration, or
+  external work out of an approved plan.
+- UI state migrated to version 7. An explicit 2.3.0 `thinking_enabled = false`
+  is preserved as `off`; the default `true` becomes `auto`.
+- `/thinking toggle` is kept as a documented alias and now cycles off → on → auto.
+
+### Fixed
+
+- `/view` and `/thinking` are independent controls again. Each previously
+  overwrote the other: changing timeline verbosity silently changed reasoning
+  visibility, and setting thinking forced a verbosity. Both directions are cut.
+
 ## [2.3.0] — 2026-07-20
 
 - Redesigned the inference, live-activity, tool-execution, and progress timeline

@@ -94,6 +94,13 @@ pub enum Command {
         name: Option<String>,
     },
 
+    /// Show or set deliberation depth: how much execution insight is shown and
+    /// how much optional planning the agent performs.
+    Thinking {
+        /// `off`, `on`, or `auto` (omit, or `status`, to show the current mode).
+        mode: Option<String>,
+    },
+
     /// Persistent, verifiable goals.
     #[command(subcommand)]
     Goal(GoalCmd),
@@ -629,6 +636,43 @@ mod tests {
     #[test]
     fn command_tree_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_every_thinking_mode() {
+        for word in ["off", "on", "auto", "status"] {
+            let cli = Cli::try_parse_from(["snx", "thinking", word]).expect("parse");
+            match cli.command {
+                Some(Command::Thinking { mode }) => assert_eq!(mode.as_deref(), Some(word)),
+                _ => panic!("expected thinking"),
+            }
+        }
+    }
+
+    #[test]
+    fn bare_thinking_reports_status() {
+        let cli = Cli::try_parse_from(["snx", "thinking"]).expect("parse");
+        match cli.command {
+            Some(Command::Thinking { mode }) => assert!(mode.is_none()),
+            _ => panic!("expected thinking"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_thinking_mode_parses_and_is_rejected_at_runtime() {
+        // clap accepts any string; the mode is validated by ThinkingMode so the
+        // error can name all three valid values.
+        let cli = Cli::try_parse_from(["snx", "thinking", "sometimes"]).expect("parse");
+        match cli.command {
+            Some(Command::Thinking { mode }) => {
+                assert!(mode
+                    .as_deref()
+                    .expect("mode present")
+                    .parse::<nexus_core::ThinkingMode>()
+                    .is_err());
+            }
+            _ => panic!("expected thinking"),
+        }
     }
 
     #[test]

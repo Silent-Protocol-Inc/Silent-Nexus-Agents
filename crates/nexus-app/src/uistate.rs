@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const UI_STATE_VERSION: u32 = 6;
+pub const UI_STATE_VERSION: u32 = 7;
 const HISTORY_CAP: usize = 200;
 const RECENT_COMMANDS_CAP: usize = 12;
 
@@ -41,9 +41,21 @@ pub struct UiState {
     pub active_agent: Option<String>,
     /// Last selected provider in the `/connect` view.
     pub last_provider: Option<String>,
-    /// Show provider reasoning summaries and operational traces. This never
-    /// requests or exposes hidden chain-of-thought.
-    pub thinking_enabled: bool,
+    /// Deliberation mode chosen via `/thinking`: `off`, `on`, or `auto`. This
+    /// never requests or exposes hidden chain-of-thought — it controls how much
+    /// of the harness's own execution state is shown and how much optional
+    /// deliberation the loop performs.
+    pub thinking_mode: String,
+    /// The v6 boolean this replaced. Read once during migration, then cleared
+    /// and never written again. It exists only because `UiState` derives
+    /// `serde(default)` without `deny_unknown_fields`: without a field to land
+    /// in, a v6 file's explicit `false` would be silently discarded and the
+    /// operator's choice lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_enabled: Option<bool>,
+    /// True once the harness has completed a first interactive launch, so the
+    /// onboarding banner shows exactly once.
+    pub first_run_completed: bool,
     /// Timeline verbosity chosen via `/view`: `default`, `detailed`, or `debug`.
     /// Default keeps the timeline to essential activity; diagnostics stay one
     /// keystroke away rather than flooding the transcript.
@@ -83,7 +95,9 @@ impl Default for UiState {
             active_goal: None,
             active_agent: None,
             last_provider: None,
-            thinking_enabled: true,
+            thinking_mode: nexus_core::ThinkingMode::default().as_str().into(),
+            thinking_enabled: None,
+            first_run_completed: false,
             activity_mode: "default".into(),
             selected_persona: None,
             profile_name: "default".into(),
@@ -110,7 +124,7 @@ impl UiState {
     fn migrate(&mut self) {
         if self.version < 2 {
             // `serde(default)` supplies the safe default for the new field.
-            self.thinking_enabled = true;
+            self.thinking_enabled = Some(true);
         }
         if self.version < 3 && self.profile_name.trim().is_empty() {
             self.profile_name = "default".into();
@@ -124,7 +138,30 @@ impl UiState {
         if self.version < 6 && self.activity_mode.trim().is_empty() {
             self.activity_mode = "default".into();
         }
+        if self.version < 7 {
+            // v6 stored a boolean. `true` was the shipped default nobody
+            // chose, so it maps to the new default; an explicit `false` is a
+            // real preference and becomes `off`.
+            self.thinking_mode =
+                nexus_core::ThinkingMode::from_legacy_bool(self.thinking_enabled.unwrap_or(true))
+                    .as_str()
+                    .into();
+            // An existing state file is itself proof of a prior launch, so a
+            // returning operator never sees the first-run banner.
+            self.first_run_completed = true;
+        }
+        // Never re-emit the legacy key, whatever version we loaded.
+        self.thinking_enabled = None;
+        if self.thinking_mode.trim().is_empty() {
+            self.thinking_mode = nexus_core::ThinkingMode::default().as_str().into();
+        }
         self.version = UI_STATE_VERSION;
+    }
+
+    /// The persisted deliberation mode, falling back to the default if the
+    /// stored string is unrecognized rather than failing the whole load.
+    pub fn thinking(&self) -> nexus_core::ThinkingMode {
+        self.thinking_mode.parse().unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -262,8 +299,74 @@ mod tests {
         let raw = r#"{ "version": 5, "thinking_enabled": true }"#;
         let mut state: UiState = serde_json::from_str(raw).expect("legacy state");
         state.migrate();
-        assert_eq!(state.version, 6);
+        assert_eq!(state.version, UI_STATE_VERSION);
         assert_eq!(state.activity_mode, "default");
+    }
+
+    #[test]
+    fn v6_default_thinking_becomes_auto() {
+        // `true` was the shipped default nobody chose: it must land on the new
+        // default rather than forcing every existing operator into `on`.
+        let raw = r#"{ "version": 6, "thinking_enabled": true }"#;
+        let mut state: UiState = serde_json::from_str(raw).expect("legacy state");
+        state.migrate();
+        assert_eq!(state.thinking(), nexus_core::ThinkingMode::Auto);
+    }
+
+    #[test]
+    fn v6_explicit_opt_out_is_preserved_as_off() {
+        // The regression the shadow field exists to prevent: without it serde
+        // drops the unknown key and this operator silently gets `auto`.
+        let raw = r#"{ "version": 6, "thinking_enabled": false }"#;
+        let mut state: UiState = serde_json::from_str(raw).expect("legacy state");
+        state.migrate();
+        assert_eq!(state.thinking(), nexus_core::ThinkingMode::Off);
+    }
+
+    #[test]
+    fn migrated_state_never_re_emits_the_legacy_key() {
+        let raw = r#"{ "version": 6, "thinking_enabled": false }"#;
+        let mut state: UiState = serde_json::from_str(raw).expect("legacy state");
+        state.migrate();
+        let json = serde_json::to_string(&state).expect("serialize");
+        assert!(
+            !json.contains("thinking_enabled"),
+            "the v6 key must not survive into a v7 file: {json}"
+        );
+        assert!(json.contains("thinking_mode"));
+    }
+
+    #[test]
+    fn an_existing_state_file_is_never_treated_as_a_first_run() {
+        let raw = r#"{ "version": 6 }"#;
+        let mut state: UiState = serde_json::from_str(raw).expect("legacy state");
+        state.migrate();
+        assert!(
+            state.first_run_completed,
+            "a returning operator must not see the onboarding banner"
+        );
+    }
+
+    #[test]
+    fn a_fresh_state_is_a_first_run_on_auto() {
+        let state = UiState::default();
+        assert!(!state.first_run_completed);
+        assert_eq!(state.thinking(), nexus_core::ThinkingMode::Auto);
+    }
+
+    #[test]
+    fn an_unreadable_thinking_mode_falls_back_to_the_default() {
+        let raw = r#"{ "version": 7, "thinking_mode": "enthusiastic" }"#;
+        let state: UiState = serde_json::from_str(raw).expect("state");
+        assert_eq!(state.thinking(), nexus_core::ThinkingMode::Auto);
+    }
+
+    #[test]
+    fn an_explicit_v7_mode_round_trips() {
+        let raw = r#"{ "version": 7, "thinking_mode": "off" }"#;
+        let mut state: UiState = serde_json::from_str(raw).expect("state");
+        state.migrate();
+        assert_eq!(state.thinking(), nexus_core::ThinkingMode::Off);
     }
 
     #[test]

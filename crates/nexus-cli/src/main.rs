@@ -136,6 +136,7 @@ async fn dispatch(args: Cli) -> anyhow::Result<()> {
         Command::Branch(command) => commands::branch(&app, command).await,
         Command::Commit(args) => commands::commit(&app, args).await,
         Command::Theme { name } => commands::theme(&app, name).await,
+        Command::Thinking { mode } => commands::thinking(&app, mode).await,
         Command::Goal(c) => commands::goal(&app, c, json).await,
         Command::Session(c) => commands::session(&app, c, json).await,
         Command::Persona(c) => commands::persona(&app, c, json).await,

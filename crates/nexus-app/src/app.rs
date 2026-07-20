@@ -313,6 +313,10 @@ impl App {
                 max_recursion_depth: self.config.limits.max_recursion_depth,
             },
             recursion_depth: 0,
+            // An explicit `/thinking` choice is persisted in UI state and
+            // outranks the config default from then on.
+            thinking: self.read_ui_state(|state| state.thinking()),
+            deep_planning: self.config.thinking.deep_planning,
         })
     }
 

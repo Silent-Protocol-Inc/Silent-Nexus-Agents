@@ -472,15 +472,26 @@ fn format_elapsed(elapsed: std::time::Duration) -> String {
 /// and a hint pointing at the full detail. Collapses to a single row on
 /// narrow terminals.
 fn processing_lines(st: &State, t: &Theme, width: usize) -> Vec<Line<'static>> {
-    let state_label = st.activity_state_label();
+    // The deliberation gate: `/thinking off` renders nothing, `auto` defers to
+    // the resolved per-turn decision, and every mode waits out the anti-flicker
+    // floor so a sub-second turn never flashes the component.
+    if !st.thinking_visible() {
+        return Vec::new();
+    }
+
+    let phase = st.thinking_state();
+    let state_label = phase.title();
     let elapsed = st.turn_started.map(|s| format_elapsed(s.elapsed()));
 
-    // Mobile: one row, no preview, no track.
+    // Mobile: one row, no preview, no track. Elapsed only when the row has
+    // width to spare — portrait stays as quiet as possible.
     if width < 40 {
         let mut text = format!("◢ {state_label}");
         if let Some(elapsed) = &elapsed {
-            text.push_str(" · ");
-            text.push_str(elapsed);
+            if width >= 28 {
+                text.push_str(" · ");
+                text.push_str(elapsed);
+            }
         }
         return vec![Line::from(Span::styled(text, t.primary()))];
     }
@@ -499,6 +510,13 @@ fn processing_lines(st: &State, t: &Theme, width: usize) -> Vec<Line<'static>> {
     };
 
     let track = activity_track(st);
+    // Waiting is the one phase blocked on the operator, so it is the one phase
+    // whose heading asks for attention.
+    let heading_style = if phase.is_blocked() {
+        t.warning()
+    } else {
+        t.primary()
+    };
     let mut head = vec![
         Span::styled(format!("  {marker} "), t.secondary()),
         Span::styled(
@@ -507,7 +525,7 @@ fn processing_lines(st: &State, t: &Theme, width: usize) -> Vec<Line<'static>> {
             } else {
                 format!("{heading} ")
             },
-            t.primary(),
+            heading_style,
         ),
     ];
     head.extend(track);
@@ -516,21 +534,25 @@ fn processing_lines(st: &State, t: &Theme, width: usize) -> Vec<Line<'static>> {
     }
     let mut lines = vec![Line::from(head)];
 
-    let preview = st.activity_preview();
+    let wrap_width = width.saturating_sub(6).max(8);
+    let preview = crate::thinking::summarize(st, phase, wrap_width);
     if preview.is_empty() || width < 56 {
         return lines;
     }
-    let wrap_width = width.saturating_sub(6).max(8);
+    // The hard cap is three rendered rows; configuration may lower it.
+    let cap = st
+        .preview_lines
+        .clamp(1, crate::thinking::MAX_PREVIEW_LINES);
     let mut rows = 0usize;
     let mut truncated = false;
     for entry in &preview {
-        if rows >= st.preview_lines.max(1) {
+        if rows >= cap {
             truncated = true;
             break;
         }
         let clean = nexus_core::sanitize::sanitize_terminal(entry);
         for chunk in wrap_words(&clean, wrap_width) {
-            if rows >= st.preview_lines.max(1) {
+            if rows >= cap {
                 truncated = true;
                 break;
             }
@@ -1634,6 +1656,16 @@ fn draw_footer(
         3,
         true,
     ));
+    // Informational, so it drops before anything the operator must see.
+    segs.push(mk(
+        "THINK",
+        "THK",
+        "T",
+        st.thinking_mode.bar_value().to_string(),
+        SegColor::Muted,
+        3,
+        true,
+    ));
     let help = match rl.width_class {
         WidthClass::Wide => "Enter send · PgUp/PgDn scroll · ? help",
         WidthClass::Desktop | WidthClass::Compact => "Enter send · ? help",
@@ -1835,9 +1867,28 @@ pub(crate) fn activity_detail_tabs(st: &State) -> Vec<ActivityTab> {
     // Activity: the whole turn in order, so the tab is never empty when
     // anything happened at all.
     if !events.is_empty() {
+        // Lead with the deliberation decision so the choice is inspectable
+        // here rather than being invisible or, worse, spamming the timeline.
+        let mut lines = vec![format!(
+            "thinking · mode {} · {}{}",
+            st.thinking_mode.as_str(),
+            match st.thinking_mode {
+                nexus_core::ThinkingMode::Auto => match st.thinking_show {
+                    Some(true) => "shown",
+                    Some(false) => "hidden",
+                    None => "undecided",
+                },
+                nexus_core::ThinkingMode::On => "shown",
+                nexus_core::ThinkingMode::Off => "hidden",
+            },
+            st.thinking_reason
+                .map(|reason| format!(" · {reason}"))
+                .unwrap_or_default()
+        )];
+        lines.extend(events.iter().map(|event| describe(event)));
         tabs.push(ActivityTab {
             title: "Activity".into(),
-            lines: events.iter().map(|event| describe(event)).collect(),
+            lines,
         });
     }
     tabs.extend(collect("Reasoning", &|kind| {
@@ -2917,7 +2968,7 @@ mod tests {
                     permission_mode: "default".into(),
                 },
                 vec![],
-                true,
+                nexus_core::ThinkingMode::Auto,
             );
             state.push_overlay(Overlay::Menu(Box::new(
                 Menu::new(
@@ -2951,6 +3002,10 @@ mod tests {
         state.turn_started = Some(std::time::Instant::now());
         state.reduced_motion = false;
         state.active_work.objective = Some("Ship the 2.3.0 release".into());
+        // Open the deliberation gate so these tests exercise rendering rather
+        // than the visibility decision, which has its own tests below.
+        state.thinking_mode = nexus_core::ThinkingMode::On;
+        state.thinking_min_duration = std::time::Duration::ZERO;
         state
     }
 
@@ -2961,10 +3016,13 @@ mod tests {
         for budget in [1usize, 3, 5] {
             state.preview_lines = budget;
             let lines = processing_lines(&state, &state.theme.clone(), 80);
+            // The configured budget may lower the preview but never raise it
+            // past the three-line ceiling.
+            let effective = budget.min(crate::thinking::MAX_PREVIEW_LINES);
             // One status row + preview rows + one hint row.
             assert_eq!(
                 lines.len(),
-                budget + 2,
+                effective + 2,
                 "budget {budget} produced {} rows",
                 lines.len()
             );
@@ -2973,6 +3031,137 @@ mod tests {
                 "the operator is always told where the detail lives",
             );
         }
+    }
+
+    #[test]
+    fn thinking_off_renders_no_activity_component_at_all() {
+        let mut state = activity_state();
+        state.thinking_mode = nexus_core::ThinkingMode::Off;
+        assert!(
+            processing_lines(&state, &state.theme.clone(), 120).is_empty(),
+            "off must stay quiet, not merely abbreviate"
+        );
+    }
+
+    #[test]
+    fn thinking_on_always_renders_regardless_of_the_task() {
+        let mut state = activity_state();
+        state.thinking_mode = nexus_core::ThinkingMode::On;
+        state.thinking_show = Some(false);
+        assert!(
+            !processing_lines(&state, &state.theme.clone(), 120).is_empty(),
+            "on ignores the per-turn decision"
+        );
+    }
+
+    #[test]
+    fn thinking_auto_follows_the_resolved_decision() {
+        let mut state = activity_state();
+        state.thinking_mode = nexus_core::ThinkingMode::Auto;
+
+        state.thinking_show = Some(true);
+        assert!(!processing_lines(&state, &state.theme.clone(), 120).is_empty());
+
+        state.thinking_show = Some(false);
+        assert!(processing_lines(&state, &state.theme.clone(), 120).is_empty());
+
+        // Unresolved stays quiet rather than guessing.
+        state.thinking_show = None;
+        assert!(processing_lines(&state, &state.theme.clone(), 120).is_empty());
+    }
+
+    #[test]
+    fn a_sub_second_turn_never_flashes_the_component() {
+        let mut state = activity_state();
+        state.thinking_mode = nexus_core::ThinkingMode::On;
+        state.thinking_min_duration = std::time::Duration::from_millis(500);
+        state.turn_started = Some(std::time::Instant::now());
+        assert!(
+            processing_lines(&state, &state.theme.clone(), 120).is_empty(),
+            "the anti-flicker floor must suppress a just-started turn"
+        );
+
+        // Once the floor has passed, the component appears.
+        state.turn_started =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(900));
+        assert!(!processing_lines(&state, &state.theme.clone(), 120).is_empty());
+    }
+
+    #[test]
+    fn an_idle_harness_renders_no_activity_component() {
+        let mut state = activity_state();
+        state.mode = Mode::Idle;
+        assert!(processing_lines(&state, &state.theme.clone(), 120).is_empty());
+    }
+
+    #[test]
+    fn the_preview_never_exceeds_three_rendered_rows() {
+        let mut state = activity_state();
+        state.preview_lines = 10;
+        state.active_work.objective = Some("word ".repeat(400));
+        let lines = processing_lines(&state, &state.theme.clone(), 120);
+        // status row + at most three preview rows + hint row
+        assert!(
+            lines.len() <= crate::thinking::MAX_PREVIEW_LINES + 2,
+            "rendered {} rows",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn mobile_portrait_stays_one_row_without_elapsed() {
+        let mut state = activity_state();
+        state.turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
+        let lines = processing_lines(&state, &state.theme.clone(), 26);
+        assert_eq!(lines.len(), 1);
+        let text = line_text(&lines[0]);
+        assert!(!text.contains('·'), "portrait must omit elapsed: {text}");
+    }
+
+    #[test]
+    fn mobile_landscape_shows_elapsed_on_its_single_row() {
+        let mut state = activity_state();
+        state.turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
+        let lines = processing_lines(&state, &state.theme.clone(), 36);
+        assert_eq!(lines.len(), 1);
+        assert!(line_text(&lines[0]).contains('·'));
+    }
+
+    #[test]
+    fn the_status_bar_reports_the_active_thinking_mode() {
+        let mut state = activity_state();
+        for (mode, expected) in [
+            (nexus_core::ThinkingMode::Off, "fast"),
+            (nexus_core::ThinkingMode::On, "deep"),
+            (nexus_core::ThinkingMode::Auto, "auto"),
+        ] {
+            state.thinking_mode = mode;
+            let text = render_state_text(&mut state, 80, 24);
+            assert!(
+                text.contains(expected),
+                "status bar should report `{expected}` for {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_activity_detail_reports_the_deliberation_decision() {
+        let mut state = activity_state();
+        state.thinking_mode = nexus_core::ThinkingMode::Auto;
+        state.thinking_show = Some(true);
+        state.thinking_reason = Some("class=coding");
+        let tabs = activity_detail_tabs(&state);
+        let activity = tabs
+            .iter()
+            .find(|tab| tab.title == "Activity")
+            .expect("activity tab");
+        assert!(
+            activity.lines[0].contains("mode auto"),
+            "{:?}",
+            activity.lines[0]
+        );
+        assert!(activity.lines[0].contains("shown"));
+        assert!(activity.lines[0].contains("class=coding"));
     }
 
     #[test]
@@ -3007,7 +3196,7 @@ mod tests {
             !text.contains("NEXUS ACTIVITY"),
             "a real reasoning channel earns the live state label: {text}",
         );
-        assert!(text.contains(state.activity_state_label()), "{text}");
+        assert!(text.contains(state.thinking_state().title()), "{text}");
     }
 
     #[test]
@@ -3251,7 +3440,7 @@ mod tests {
                 permission_mode: "default".into(),
             },
             vec![],
-            true,
+            nexus_core::ThinkingMode::Auto,
         );
         state.session_id = Some("session_snapshot".into());
         state.focus = Focus::Timeline;
@@ -3393,7 +3582,7 @@ mod tests {
             (45, 20, 10_867_498_953_966_715_543),
             (60, 18, 14_614_356_305_927_070_958),
             (60, 20, 13_128_974_092_938_649_675),
-            (80, 24, 7_204_910_961_854_061_004),
+            (80, 24, 5_739_261_042_750_705_702),
             (100, 30, 11_943_346_917_770_416_418),
             (120, 40, 374_212_053_389_028_937),
             (160, 50, 5_225_851_684_132_558_617),
@@ -3491,7 +3680,7 @@ mod tests {
     fn thinking_toggle_hides_only_reasoning_not_operational_events() {
         let mut state = representative_state();
         state.timeline.clear();
-        state.thinking_enabled = false;
+        state.thinking_mode = nexus_core::ThinkingMode::Off;
         state.push_local_event(
             TimelineStatus::Completed,
             "reasoning".into(),

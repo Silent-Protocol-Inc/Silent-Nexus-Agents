@@ -297,6 +297,48 @@ impl WorkEstimate {
         self
     }
 
+    /// Apply the operator's deliberation preference.
+    ///
+    /// This moves *optional* deliberation only. It never touches safety
+    /// ceilings (`TurnLimits`), and the guard on the `Off` arm means it can
+    /// never demote work that carries a risk flag: anything that
+    /// [`WorkEstimate::classify`] would send to `Planned` keeps its flags and
+    /// keeps its plan, so approval gates are unaffected by a UI setting.
+    pub fn for_thinking(
+        mut self,
+        mode: crate::thinking::ThinkingMode,
+        deep_planning: bool,
+    ) -> Self {
+        use crate::thinking::ThinkingMode;
+        match mode {
+            ThinkingMode::Off => {
+                let risky = self.writes
+                    || self.destructive
+                    || self.multi_file
+                    || self.cross_subsystem
+                    || self.migration
+                    || self.external
+                    || self.subagents
+                    || self.background_work;
+                if !risky {
+                    self.predictable = true;
+                    self.needs_grounding = false;
+                    self.rationale.push("thinking off: direct execution".into());
+                }
+            }
+            ThinkingMode::Auto => {}
+            ThinkingMode::On => {
+                if deep_planning {
+                    self.predictable = false;
+                    self.needs_grounding = true;
+                    self.rationale
+                        .push("thinking on: grounded, staged execution".into());
+                }
+            }
+        }
+        self
+    }
+
     pub fn classify(&self) -> WorkBreakdownKind {
         if self.multi_file
             || self.cross_subsystem
@@ -2402,6 +2444,151 @@ mod tests {
             })
             .expect("session");
         (store.clone(), OrchestrationStore::new(store), session)
+    }
+
+    #[test]
+    fn thinking_off_demotes_only_risk_free_work() {
+        let estimate = WorkEstimate {
+            predicted_actions: 1,
+            writes: false,
+            predictable: false,
+            needs_grounding: true,
+            ..Default::default()
+        }
+        .for_thinking(crate::thinking::ThinkingMode::Off, true);
+        assert!(estimate.predictable);
+        assert!(!estimate.needs_grounding);
+        assert_eq!(estimate.classify(), WorkBreakdownKind::Direct);
+    }
+
+    #[test]
+    fn thinking_off_never_demotes_risky_work() {
+        // The safety property: no value of /thinking may take work out of a
+        // plan, because the plan is what the operator approves.
+        let risky = [
+            (
+                "writes",
+                WorkEstimate {
+                    writes: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "destructive",
+                WorkEstimate {
+                    destructive: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "multi_file",
+                WorkEstimate {
+                    multi_file: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "cross_subsystem",
+                WorkEstimate {
+                    cross_subsystem: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "migration",
+                WorkEstimate {
+                    migration: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "external",
+                WorkEstimate {
+                    external: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "subagents",
+                WorkEstimate {
+                    subagents: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "background_work",
+                WorkEstimate {
+                    background_work: true,
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (flag, estimate) in risky {
+            let after = estimate
+                .clone()
+                .for_thinking(crate::thinking::ThinkingMode::Off, true);
+            assert_eq!(
+                after, estimate,
+                "thinking off must leave `{flag}` work completely untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn thinking_on_adds_grounding() {
+        let estimate = WorkEstimate {
+            predicted_actions: 1,
+            predictable: true,
+            ..Default::default()
+        }
+        .for_thinking(crate::thinking::ThinkingMode::On, true);
+        assert!(!estimate.predictable);
+        assert!(estimate.needs_grounding);
+    }
+
+    #[test]
+    fn thinking_on_respects_deep_planning_disabled() {
+        let estimate = WorkEstimate {
+            predictable: true,
+            ..Default::default()
+        }
+        .for_thinking(crate::thinking::ThinkingMode::On, false);
+        assert!(
+            estimate.predictable,
+            "deep_planning = false must be honored"
+        );
+    }
+
+    #[test]
+    fn thinking_auto_changes_nothing() {
+        let base = WorkEstimate {
+            predicted_actions: 3,
+            writes: true,
+            needs_grounding: true,
+            ..Default::default()
+        };
+        let after = base
+            .clone()
+            .for_thinking(crate::thinking::ThinkingMode::Auto, true);
+        assert_eq!(base, after);
+    }
+
+    #[test]
+    fn weak_model_grounding_survives_thinking_off() {
+        // Order matters in the loop: constrained_for_weak_model runs first,
+        // and thinking off must not undo the grounding it forced.
+        let estimate = WorkEstimate {
+            predicted_actions: 2,
+            writes: true,
+            ..Default::default()
+        }
+        .constrained_for_weak_model()
+        .for_thinking(crate::thinking::ThinkingMode::Off, true);
+        assert!(
+            estimate.needs_grounding,
+            "a constrained model's grounding must outrank the thinking preference"
+        );
+        assert!(!estimate.predictable);
     }
 
     #[test]

@@ -311,8 +311,8 @@ pub enum Effect {
     ResumeGoal(String),
     /// Apply a theme by name (already persisted).
     SetTheme(String),
-    /// Toggle provider reasoning summaries and operational traces.
-    SetThinking(bool),
+    /// Set the deliberation mode. Independent of [`Effect::SetActivityMode`].
+    SetThinking(nexus_core::ThinkingMode),
     SetActivityMode(nexus_core::timeline::ActivityMode),
     SetTranscriptDetail(nexus_core::timeline::TranscriptDetail),
     SetTranscriptFilter(nexus_core::timeline::TranscriptFilter),
@@ -1307,31 +1307,22 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             ),
         },
         CommandId::Thinking => match args.first().copied() {
-            Some("on") | Some("show") => {
-                app.update_ui_state(|state| state.thinking_enabled = true)?;
-                Effect::SetThinking(true)
-            }
-            Some("off") | Some("hide") => {
-                app.update_ui_state(|state| state.thinking_enabled = false)?;
-                Effect::SetThinking(false)
-            }
+            Some("status") => Effect::Report(services::thinking_report(app)),
+            // `toggle` shipped in 2.3.0 as a boolean flip; it stays working as
+            // a three-way cycle rather than breaking existing muscle memory.
             Some("toggle") => {
-                let enabled = !app.read_ui_state(|state| state.thinking_enabled);
-                app.update_ui_state(|state| state.thinking_enabled = enabled)?;
-                Effect::SetThinking(enabled)
+                let next = app.read_ui_state(|state| state.thinking()).cycle();
+                services::set_thinking(app, next)?;
+                Effect::SetThinking(next)
             }
-            None => view_or(
-                View::Thinking,
-                Report::new("thinking").field(
-                    "reasoning summaries & traces",
-                    if app.read_ui_state(|state| state.thinking_enabled) {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    },
-                ),
-            ),
-            _ => usage(def),
+            Some(word) => match word.parse::<nexus_core::ThinkingMode>() {
+                Ok(mode) => {
+                    services::set_thinking(app, mode)?;
+                    Effect::SetThinking(mode)
+                }
+                Err(_) => usage(def),
+            },
+            None => view_or(View::Thinking, services::thinking_report(app)),
         },
 
         CommandId::Btw => {

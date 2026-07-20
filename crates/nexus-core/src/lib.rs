@@ -28,6 +28,7 @@ pub mod risk;
 pub mod sanitize;
 pub mod secret;
 pub mod store;
+pub mod thinking;
 pub mod timeline;
 pub mod workspace;
 
@@ -36,6 +37,7 @@ pub use harness::HarnessRepository;
 pub use ids::*;
 pub use risk::{Decision, RiskLevel};
 pub use secret::SecretString;
+pub use thinking::ThinkingMode;
 
 /// Current UTC timestamp in RFC 3339 format with millisecond precision.
 pub fn now_rfc3339() -> String {

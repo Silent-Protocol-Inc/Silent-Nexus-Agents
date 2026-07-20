@@ -20,6 +20,7 @@ mod menus;
 mod render;
 mod state;
 mod theme;
+mod thinking;
 mod views;
 
 use approver::{ApprovalRequest, TuiApprover};
@@ -270,7 +271,7 @@ async fn event_loop(
         app.config.general.reduced_motion,
         build_bar(&app),
         history,
-        app.read_ui_state(|state| state.thinking_enabled),
+        app.read_ui_state(|state| state.thinking()),
     );
     // Timeline verbosity: the operator's last `/view` choice wins, falling back
     // to config. Default keeps the timeline to essential activity.
@@ -279,6 +280,11 @@ async fn event_loop(
     )
     .or_else(|| nexus_core::timeline::ActivityMode::parse(&app.config.tui.activity.mode))
     .unwrap_or_default();
+    // Behavioral half of the deliberation settings. The presentation half
+    // (preview lines, animation, reduced motion) stays in `[tui.activity]`.
+    st.thinking_min_duration =
+        std::time::Duration::from_millis(app.config.thinking.minimum_duration_ms);
+    st.summarize_provider_reasoning = app.config.thinking.summarize_provider_reasoning;
     let activity = &app.config.tui.activity;
     st.preview_lines = usize::from(activity.reasoning_preview_lines).max(1);
     st.animation = activity.animation.clone();
@@ -316,13 +322,42 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut last_background_poll = std::time::Instant::now();
 
-    // First run: no models configured yet — greet and offer onboarding.
+    // What the operator sees on opening, in three cases. The point is to give
+    // a real next step when one exists and stay quiet when none does.
+    let first_run = app.read_ui_state(|state| !state.first_run_completed);
     if app.config.models.is_empty() {
+        // Nothing configured: onboarding is the only useful next step.
         st.system_sev(
             "FIRST RUN :: no models configured yet — /setup gets you talking to an agent",
             Sev::Warn,
         );
         push_menu(&mut st, &app, menus::welcome_menu());
+    } else if first_run {
+        // Configured but never opened interactively (inherited config, or
+        // `snx setup` run headless). Orient rather than nag.
+        st.system_sev(
+            format!(
+                "{} READY :: {}",
+                nexus_core::brand::MARK,
+                st.bar.model_label
+            ),
+            Sev::Ok,
+        );
+        st.system("New here? /help lists the keys, Ctrl+K opens the palette, or just describe what you want to change.");
+    } else if let Some(hint) = nexus_app::services::next_step_hint(&app) {
+        // Returning operator with something real to point at.
+        st.system(hint);
+    }
+    if first_run {
+        let seed = app.config.thinking.mode;
+        if let Err(e) = app.update_ui_state(|state| {
+            state.first_run_completed = true;
+            // Seed the deliberation preference from config once; from here on
+            // the operator's own `/thinking` choice is authoritative.
+            state.thinking_mode = seed.as_str().into();
+        }) {
+            tracing::warn!("recording first run: {e}");
+        }
     }
     if let Some(id) = initial_target {
         if app.sessions().get(&id).is_ok() {
@@ -1857,27 +1892,15 @@ fn handle_effect(
             st.set_theme(&name);
             st.toast(format!("theme: {name}"), Sev::Ok);
         }
-        Effect::SetThinking(enabled) => {
-            st.thinking_enabled = enabled;
-            // Reasoning is CollapsedDetail, so revealing it means at least
-            // Detailed mode; hiding it returns to the concise Default.
-            st.activity_mode = if enabled {
-                nexus_core::timeline::ActivityMode::Detailed
-            } else {
-                nexus_core::timeline::ActivityMode::Default
-            };
-            st.toast(
-                format!(
-                    "activity → {} (reasoning {})",
-                    st.activity_mode.as_str(),
-                    if enabled { "shown" } else { "hidden" }
-                ),
-                Sev::Ok,
-            );
+        // Deliberation and timeline verbosity are independent controls. Neither
+        // arm may touch the other's field: changing one silently changing the
+        // other is exactly the behavior this replaced.
+        Effect::SetThinking(mode) => {
+            st.set_thinking_mode(mode);
+            st.toast(format!("thinking → {}", mode.as_str()), Sev::Ok);
         }
         Effect::SetActivityMode(mode) => {
-            st.activity_mode = mode;
-            st.thinking_enabled = mode != nexus_core::timeline::ActivityMode::Default;
+            st.set_activity_mode(mode);
             st.toast(format!("activity view → {}", mode.as_str()), Sev::Ok);
         }
         Effect::SetTranscriptDetail(detail) => {
@@ -2681,7 +2704,8 @@ fn start_load(
             push_menu(st, app, menus::theme_menu(&st.theme_name));
         }
         LoadRequest::Thinking => {
-            push_menu(st, app, menus::thinking_menu(st.thinking_enabled));
+            let preview = menus::thinking_preview(st.thinking_mode, st.input.text());
+            push_menu(st, app, menus::thinking_menu(st.thinking_mode, &preview));
         }
         LoadRequest::Details => {
             push_menu(st, app, menus::details_menu(st.detail_level));
@@ -3179,6 +3203,8 @@ fn submit_objective(
 
     st.mode = Mode::Running;
     st.turn_started = Some(std::time::Instant::now());
+    // A previous turn's decision must never leak into this one.
+    st.reset_thinking_resolution();
     st.active_turn_id = Some(turn_id.clone());
     let turn_tx = turn_tx.clone();
     let approver = approver.clone();
@@ -3314,7 +3340,13 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
                 );
             }
         }
-        LoopEvent::ReasoningSummary(t) if st.thinking_enabled => {
+        // Presentation-only: records the resolved decision for the live
+        // component. Deliberately writes no timeline entry.
+        LoopEvent::ThinkingResolved { show, reason, .. } => {
+            st.thinking_show = Some(show);
+            st.thinking_reason = Some(reason);
+        }
+        LoopEvent::ReasoningSummary(t) if st.thinking_mode != nexus_core::ThinkingMode::Off => {
             if let Some(id) = st.live_assistant_events.remove(&turn_key) {
                 st.update_event(
                     &id,
@@ -3847,7 +3879,7 @@ mod tests {
                 permission_mode: "default".into(),
             },
             Vec::new(),
-            true,
+            nexus_core::ThinkingMode::Auto,
         )
     }
 

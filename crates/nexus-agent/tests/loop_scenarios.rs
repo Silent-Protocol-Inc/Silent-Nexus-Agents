@@ -153,6 +153,11 @@ fn runtime_with_manager(
             ..TurnLimits::default()
         },
         recursion_depth: 0,
+        // Auto is a no-op for both the work estimate and the turn limits, so
+        // these scenarios exercise the same behavior they did before the
+        // deliberation control existed.
+        thinking: nexus_core::thinking::ThinkingMode::Auto,
+        deep_planning: true,
     };
     (runtime, session_id)
 }

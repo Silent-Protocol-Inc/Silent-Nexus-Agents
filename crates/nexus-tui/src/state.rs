@@ -4,6 +4,7 @@
 use crate::approver::ApprovalRequest;
 use crate::input::InputEditor;
 use crate::theme::{ColorSupport, Theme};
+use crate::thinking::ThinkingState;
 use crate::views::Overlay;
 use nexus_app::Sev;
 use nexus_core::brand;
@@ -151,7 +152,18 @@ pub struct State {
     /// Abort handle for the active agent turn. Context-changing commands are
     /// blocked until this turn finishes or is explicitly cancelled.
     pub turn_abort: Option<tokio::task::AbortHandle>,
-    pub thinking_enabled: bool,
+    /// Deliberation mode (`/thinking`). Independent of [`Self::activity_mode`]:
+    /// neither control may change the other.
+    pub thinking_mode: nexus_core::ThinkingMode,
+    /// Anti-flicker floor before the live component may render.
+    pub thinking_min_duration: std::time::Duration,
+    /// Resolved AUTO decision for the active turn, from `ThinkingResolved`.
+    pub thinking_show: Option<bool>,
+    /// Why the decision went the way it did; shown in the detail panel only.
+    pub thinking_reason: Option<&'static str>,
+    /// Whether provider-supplied summaries may be previewed
+    /// (`[thinking].summarize_provider_reasoning`).
+    pub summarize_provider_reasoning: bool,
     /// Timeline verbosity: Default (concise) hides reasoning/diagnostics.
     pub activity_mode: ActivityMode,
     /// When the active turn started, for the live elapsed counter.
@@ -173,7 +185,7 @@ impl State {
         reduced_motion: bool,
         bar: StatusBar,
         history: Vec<String>,
-        thinking_enabled: bool,
+        thinking_mode: nexus_core::ThinkingMode,
     ) -> Self {
         let active_work = ActiveWorkSnapshot::empty(bar.workspace.clone());
         let mut s = Self {
@@ -231,7 +243,11 @@ impl State {
             generation: 0,
             cancel_login: None,
             turn_abort: None,
-            thinking_enabled,
+            thinking_mode,
+            thinking_min_duration: std::time::Duration::from_millis(500),
+            thinking_show: None,
+            thinking_reason: None,
+            summarize_provider_reasoning: true,
             activity_mode: ActivityMode::default(),
             turn_started: None,
             preview_lines: 3,
@@ -251,27 +267,81 @@ impl State {
         self.transcript_filter.matches(event) && self.activity_mode.shows(event.kind.visibility())
     }
 
-    /// What the agent is doing right now, derived from structured runtime
-    /// state rather than guessed from prose.
-    pub fn activity_state_label(&self) -> &'static str {
+    /// The current thinking phase, derived from structured runtime state
+    /// rather than guessed from prose.
+    ///
+    /// This is a **pure read**: it mutates nothing and records nothing. That is
+    /// why a phase transition updates one widget instead of appending a
+    /// timeline entry — the widget is recomputed from this every frame, so
+    /// there is no transition event that could spam the transcript.
+    pub fn thinking_state(&self) -> ThinkingState {
         let work = &self.active_work;
         if !work.waiting_approvals.is_empty() || work.turn_state.contains("waiting") {
-            return "WAITING";
+            return ThinkingState::Waiting;
         }
         if let Some(tool) = &work.active_foreground_tool {
             return if tool.starts_with("web.") || tool.contains("search") {
-                "SEARCHING"
+                ThinkingState::Searching
             } else {
-                "EXECUTING"
+                ThinkingState::Executing
             };
         }
         if !work.validation_pending.is_empty() {
-            return "VERIFYING";
+            return ThinkingState::Verifying;
         }
-        match &work.work {
-            Some(plan) if !plan.approved => "PLANNING",
-            _ => "PROCESSING",
+        if let Some(plan) = &work.work {
+            if !plan.approved {
+                return ThinkingState::Planning;
+            }
         }
+        // Assistant text is streaming with no tool in flight: the answer is
+        // being composed.
+        if !self.live_assistant_events.is_empty() {
+            return ThinkingState::Finalizing;
+        }
+        ThinkingState::Understanding
+    }
+
+    /// Whether the live activity component may render right now.
+    ///
+    /// The minimum-duration floor does double duty: it stops sub-second turns
+    /// from flashing the component, and it covers the few milliseconds AUTO
+    /// needs to classify, so `thinking_show` is always resolved before the
+    /// component can appear.
+    pub fn thinking_visible(&self) -> bool {
+        if self.mode != Mode::Running {
+            return false;
+        }
+        match self.turn_started {
+            Some(started) if started.elapsed() >= self.thinking_min_duration => {}
+            _ => return false,
+        }
+        match self.thinking_mode {
+            nexus_core::ThinkingMode::Off => false,
+            nexus_core::ThinkingMode::On => true,
+            nexus_core::ThinkingMode::Auto => self.thinking_show.unwrap_or(false),
+        }
+    }
+
+    /// Clear the per-turn deliberation resolution. Called when a turn starts so
+    /// a previous turn's decision can never leak into the next one.
+    pub fn reset_thinking_resolution(&mut self) {
+        self.thinking_show = None;
+        self.thinking_reason = None;
+    }
+
+    /// Set the deliberation mode.
+    ///
+    /// Deliberately touches nothing else. `/thinking` and `/view` are separate
+    /// controls, and an earlier version of this code had each silently
+    /// overwrite the other — see `view_and_thinking_stay_independent`.
+    pub fn set_thinking_mode(&mut self, mode: nexus_core::ThinkingMode) {
+        self.thinking_mode = mode;
+    }
+
+    /// Set the timeline verbosity. Touches nothing else, for the same reason.
+    pub fn set_activity_mode(&mut self, mode: ActivityMode) {
+        self.activity_mode = mode;
     }
 
     /// True when the active turn carries a real provider reasoning channel.
@@ -688,8 +758,94 @@ mod tests {
                 permission_mode: "default".into(),
             },
             Vec::new(),
-            false,
+            nexus_core::ThinkingMode::Off,
         )
+    }
+
+    #[test]
+    fn view_and_thinking_stay_independent() {
+        // Regression guard. Before 2.4.0 each control silently overwrote the
+        // other: `/view` changed reasoning visibility and `/thinking` forced a
+        // timeline verbosity. Both directions must stay severed.
+        let mut state = state();
+        state.set_thinking_mode(nexus_core::ThinkingMode::On);
+        state.set_activity_mode(ActivityMode::Default);
+
+        state.set_activity_mode(ActivityMode::Debug);
+        assert_eq!(
+            state.thinking_mode,
+            nexus_core::ThinkingMode::On,
+            "/view must not change the deliberation mode"
+        );
+
+        state.set_thinking_mode(nexus_core::ThinkingMode::Off);
+        assert_eq!(
+            state.activity_mode,
+            ActivityMode::Debug,
+            "/thinking must not change the timeline verbosity"
+        );
+    }
+
+    #[test]
+    fn thinking_phases_follow_structured_state_in_priority_order() {
+        use crate::thinking::ThinkingState;
+        let mut state = state();
+
+        // Nothing happening yet.
+        assert_eq!(state.thinking_state(), ThinkingState::Understanding);
+
+        // Streaming an answer with no tool in flight.
+        state
+            .live_assistant_events
+            .insert("turn".into(), "event".into());
+        assert_eq!(state.thinking_state(), ThinkingState::Finalizing);
+        state.live_assistant_events.clear();
+
+        state.active_work.validation_pending = vec!["cargo test".into()];
+        assert_eq!(state.thinking_state(), ThinkingState::Verifying);
+
+        state.active_work.active_foreground_tool = Some("fs.read_file".into());
+        assert_eq!(
+            state.thinking_state(),
+            ThinkingState::Executing,
+            "an active tool outranks a pending validation"
+        );
+
+        state.active_work.active_foreground_tool = Some("web.search".into());
+        assert_eq!(state.thinking_state(), ThinkingState::Searching);
+
+        state.active_work.waiting_approvals = vec!["terminal.run".into()];
+        assert_eq!(
+            state.thinking_state(),
+            ThinkingState::Waiting,
+            "waiting on the operator outranks everything"
+        );
+    }
+
+    #[test]
+    fn reading_the_phase_never_mutates_state_or_the_timeline() {
+        let mut state = state();
+        state.active_work.active_foreground_tool = Some("terminal.run".into());
+        let before = state.timeline.len();
+        for _ in 0..25 {
+            let _ = state.thinking_state();
+            let _ = state.thinking_state().title();
+        }
+        assert_eq!(
+            state.timeline.len(),
+            before,
+            "phase transitions must update one widget, never append events"
+        );
+    }
+
+    #[test]
+    fn a_new_turn_clears_the_previous_resolution() {
+        let mut state = state();
+        state.thinking_show = Some(true);
+        state.thinking_reason = Some("class=coding");
+        state.reset_thinking_resolution();
+        assert_eq!(state.thinking_show, None);
+        assert_eq!(state.thinking_reason, None);
     }
 
     #[test]

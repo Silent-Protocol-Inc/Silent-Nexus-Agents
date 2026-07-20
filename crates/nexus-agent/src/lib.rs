@@ -18,6 +18,7 @@ pub mod custom_agents;
 pub mod loop_engine;
 pub mod session;
 pub mod subagent;
+pub mod thinking;
 
 pub use action::{AgentAction, COMPAT_INSTRUCTIONS};
 pub use agents::AgentRole;
@@ -53,4 +54,9 @@ pub struct AgentRuntime {
     /// Current delegation nesting. The main agent starts at zero and each
     /// orchestrated child receives a runtime incremented by exactly one.
     pub recursion_depth: u8,
+    /// Operator's deliberation preference. Affects optional planning,
+    /// grounding, and retry tolerance only — never a safety ceiling.
+    pub thinking: nexus_core::thinking::ThinkingMode,
+    /// Whether `on`/`auto` may promote a turn to grounded, staged execution.
+    pub deep_planning: bool,
 }

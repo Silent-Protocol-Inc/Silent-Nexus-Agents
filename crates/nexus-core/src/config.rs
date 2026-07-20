@@ -11,6 +11,7 @@
 //! variable (`api_key_env`) or a keyring entry name (`api_key_ref`).
 
 use crate::error::{NexusError, Result};
+use crate::thinking::ThinkingMode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -38,6 +39,51 @@ pub struct Config {
     pub mcp: BTreeMap<String, McpServerConfig>,
     /// Terminal UI preferences, e.g. `[tui.activity]`.
     pub tui: TuiConfig,
+    /// Deliberation behavior (`[thinking]`).
+    pub thinking: ThinkingConfig,
+}
+
+/// How much *optional* deliberation the harness performs, and whether the live
+/// activity component renders.
+///
+/// This block owns behavior only. Presentation of the activity component —
+/// preview line count, expand shortcut, animation, reduced motion — lives in
+/// [`ActivityConfig`] (`[tui.activity]`) and is deliberately not duplicated
+/// here, so there is exactly one source of truth per knob.
+///
+/// Note that `[thinking].mode` and `[tui.activity].mode` are **different
+/// axes** and take different values. `[thinking].mode` is `off|on|auto` and
+/// controls deliberation; `[tui.activity].mode` is `default|detailed|debug`
+/// and controls timeline verbosity (`/view`). Changing one never changes the
+/// other.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct ThinkingConfig {
+    /// Deliberation mode: `off`, `on`, or `auto`. This is the default for a
+    /// fresh workspace; an explicit `/thinking` choice is stored in UI state
+    /// and takes precedence from then on.
+    pub mode: ThinkingMode,
+    /// Allow `on`/`auto` to promote a turn to grounded, staged execution.
+    pub deep_planning: bool,
+    /// Render provider-supplied reasoning *summaries* when a provider emits
+    /// them. Raw provider reasoning is destroyed at ingestion and is never
+    /// shown regardless of this setting.
+    pub summarize_provider_reasoning: bool,
+    /// Anti-flicker floor: leave the activity component hidden until a turn
+    /// has run at least this long, so sub-second turns never flash it. Zero
+    /// disables the delay.
+    pub minimum_duration_ms: u64,
+}
+
+impl Default for ThinkingConfig {
+    fn default() -> Self {
+        Self {
+            mode: ThinkingMode::Auto,
+            deep_planning: true,
+            summarize_provider_reasoning: true,
+            minimum_duration_ms: 500,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -825,6 +871,14 @@ impl Config {
                 activity.animation
             )));
         }
+        // A long floor would hide the component for entire turns rather than
+        // just smoothing sub-second flicker, which is not what it is for.
+        if self.thinking.minimum_duration_ms > 5_000 {
+            return Err(NexusError::Config(format!(
+                "thinking.minimum_duration_ms must be 0-5000, got {}",
+                self.thinking.minimum_duration_ms
+            )));
+        }
         let decision_fields = [
             ("policy.reads", &self.policy.reads),
             ("policy.writes", &self.policy.writes),
@@ -1073,6 +1127,81 @@ mod tests {
         Config::default()
             .validate()
             .expect("defaults must be valid");
+    }
+
+    #[test]
+    fn thinking_defaults_are_auto_and_deliberate() {
+        let thinking = Config::default().thinking;
+        assert_eq!(thinking.mode, ThinkingMode::Auto);
+        assert!(thinking.deep_planning);
+        assert!(thinking.summarize_provider_reasoning);
+        assert_eq!(thinking.minimum_duration_ms, 500);
+    }
+
+    #[test]
+    fn thinking_block_parses_from_toml() {
+        let config: Config = toml::from_str(
+            r#"
+            [thinking]
+            mode = "on"
+            deep_planning = false
+            minimum_duration_ms = 250
+            "#,
+        )
+        .expect("parses");
+        assert_eq!(config.thinking.mode, ThinkingMode::On);
+        assert!(!config.thinking.deep_planning);
+        assert_eq!(config.thinking.minimum_duration_ms, 250);
+        // Unset keys still come from Default, not from zero values.
+        assert!(config.thinking.summarize_provider_reasoning);
+        config.validate().expect("valid");
+    }
+
+    #[test]
+    fn config_without_thinking_block_uses_defaults() {
+        // A 2.3.0 config predates the block entirely and must still load.
+        let config: Config = toml::from_str("[general]\ntheme = \"nexus-dark\"\n").expect("parses");
+        assert_eq!(config.thinking.mode, ThinkingMode::Auto);
+        config.validate().expect("valid");
+    }
+
+    #[test]
+    fn thinking_block_rejects_unknown_keys() {
+        let err = toml::from_str::<Config>("[thinking]\nshow_raw_reasoning = true\n")
+            .expect_err("unknown key must be rejected");
+        assert!(err.to_string().contains("show_raw_reasoning"));
+    }
+
+    #[test]
+    fn thinking_mode_rejects_unknown_value() {
+        assert!(toml::from_str::<Config>("[thinking]\nmode = \"sometimes\"\n").is_err());
+    }
+
+    #[test]
+    fn excessive_minimum_duration_is_rejected() {
+        let mut config = Config::default();
+        config.thinking.minimum_duration_ms = 6_000;
+        let err = config.validate().expect_err("must fail").to_string();
+        assert!(err.contains("minimum_duration_ms"));
+    }
+
+    #[test]
+    fn thinking_and_activity_modes_are_independent_axes() {
+        // The two `mode` keys share a name but not a value space; a config
+        // setting both must round-trip each independently.
+        let config: Config = toml::from_str(
+            r#"
+            [thinking]
+            mode = "off"
+
+            [tui.activity]
+            mode = "debug"
+            "#,
+        )
+        .expect("parses");
+        assert_eq!(config.thinking.mode, ThinkingMode::Off);
+        assert_eq!(config.tui.activity.mode, "debug");
+        config.validate().expect("valid");
     }
 
     #[test]

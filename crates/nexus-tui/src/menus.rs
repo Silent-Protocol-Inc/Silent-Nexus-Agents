@@ -1596,22 +1596,50 @@ pub fn theme_menu(active: &str) -> Menu {
         .hint("Enter applies immediately and persists · Esc close")
 }
 
-pub fn thinking_menu(enabled: bool) -> Menu {
-    let items = vec![
+/// What AUTO would decide for the text currently in the input box.
+///
+/// Pure and local: it reuses the same deterministic classifier and work
+/// estimate the loop uses, so the preview cannot disagree with the real
+/// decision, and it costs no provider call.
+pub fn thinking_preview(mode: nexus_core::ThinkingMode, input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || mode != nexus_core::ThinkingMode::Auto {
+        return "Hidden chain-of-thought is never requested or displayed · Enter applies · Esc close"
+            .into();
+    }
+    let signals = nexus_agent::thinking::AutoSignals::for_objective(trimmed);
+    let shown = nexus_agent::thinking::auto_shows_thinking(&signals);
+    let excerpt: String = trimmed.chars().take(32).collect();
+    let ellipsis = if trimmed.chars().count() > 32 {
+        "…"
+    } else {
+        ""
+    };
+    format!(
+        "auto on \"{excerpt}{ellipsis}\" → thinking {} · Enter applies · Esc close",
+        if shown { "shown" } else { "hidden" }
+    )
+}
+
+pub fn thinking_menu(active: nexus_core::ThinkingMode, preview: &str) -> Menu {
+    use nexus_core::ThinkingMode;
+    let items = [
+        (ThinkingMode::Auto, "auto (recommended)"),
+        (ThinkingMode::On, "on"),
+        (ThinkingMode::Off, "off"),
+    ]
+    .into_iter()
+    .map(|(mode, label)| {
         MenuItem::new(
-            format!("{} enabled", if enabled { "●" } else { " " }),
-            UiAction::RunCommand("thinking on".into()),
+            format!("{} {label}", if mode == active { "●" } else { " " }),
+            UiAction::RunCommand(format!("thinking {}", mode.as_str())),
         )
-        .detail("show provider reasoning summaries and operational traces"),
-        MenuItem::new(
-            format!("{} disabled", if enabled { " " } else { "●" }),
-            UiAction::RunCommand("thinking off".into()),
-        )
-        .detail("show final answers, approvals, and errors only"),
-    ];
-    Menu::new("thinking visibility", items)
+        .detail(mode.description())
+    })
+    .collect();
+    Menu::new("thinking mode", items)
         .route("/thinking")
-        .hint("Hidden chain-of-thought is never requested or displayed · Enter applies · Esc close")
+        .hint(preview.to_string())
 }
 
 pub fn details_menu(active: nexus_core::timeline::TranscriptDetail) -> Menu {

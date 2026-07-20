@@ -164,6 +164,9 @@ pub async fn run(app: &App, args: RunArgs, json: bool) -> Result<()> {
 
 fn print_event(ui: &Ui, ev: &LoopEvent) {
     match ev {
+        // Presentation-only, and the non-interactive surface has no live
+        // component to gate — nothing to print.
+        LoopEvent::ThinkingResolved { .. } => {}
         LoopEvent::Classified {
             class,
             model,
@@ -622,6 +625,38 @@ pub async fn theme(app: &App, name: Option<String>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ------------------------------------------------------------------ thinking
+
+pub async fn thinking(app: &App, mode: Option<String>) -> Result<()> {
+    let ui = ui(app);
+    match mode.as_deref() {
+        None | Some("status") => {
+            let status = nexus_app::services::thinking_status(app);
+            ui.field("mode", status.mode.as_str());
+            ui.field("deep planning", yes_no(status.deep_planning));
+            ui.field("summaries", yes_no(status.summarize_provider_reasoning));
+            ui.field("min duration", &format!("{}ms", status.minimum_duration_ms));
+            println!("{}", ui.dim(status.description()));
+        }
+        Some(word) => {
+            let mode: nexus_core::ThinkingMode = word
+                .parse()
+                .map_err(|_| anyhow!("unknown mode `{word}` — one of: off, on, auto"))?;
+            nexus_app::services::set_thinking(app, mode)?;
+            ui.ok(&format!("thinking set to `{mode}`"));
+        }
+    }
+    Ok(())
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 // ---------------------------------------------------------------------- goal

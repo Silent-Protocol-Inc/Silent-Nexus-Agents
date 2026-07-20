@@ -132,6 +132,14 @@ pub enum LoopEvent {
         running: bool,
         failed: bool,
     },
+    /// Resolved deliberation decision for this turn. Presentation-only: the UI
+    /// uses it to show or suppress the live activity component. This event is
+    /// deliberately never recorded to the timeline — see `record_loop_event`.
+    ThinkingResolved {
+        mode: String,
+        show: bool,
+        reason: &'static str,
+    },
     /// Provider-supplied reasoning summary accompanying a real tool plan.
     /// Hidden chain-of-thought is never requested or surfaced.
     ReasoningSummary(String),
@@ -551,6 +559,11 @@ impl TurnTimeline {
 
     fn record_loop_event(&self, event: &LoopEvent) -> Result<()> {
         match event {
+            // Deliberately not recorded. The deliberation decision drives one
+            // live widget that is recomputed from state each frame; writing it
+            // to the timeline would add a card per turn saying nothing the
+            // operator acted on. This empty arm is the anti-spam invariant.
+            LoopEvent::ThinkingResolved { .. } => {}
             LoopEvent::Classified {
                 class,
                 model,
@@ -1757,6 +1770,9 @@ impl AgentLoop {
                 estimate = estimate.constrained_for_weak_model();
             }
         }
+        // Applied after the weak-model constraint so a constrained model's
+        // forced grounding always outranks the operator's speed preference.
+        estimate = estimate.for_thinking(self.runtime.thinking, self.runtime.deep_planning);
         let mut observed_work = estimate.clone();
         let mut work = WorkBreakdown::generate(objective, estimate);
         let orchestration = OrchestrationStore::new(self.runtime.store.clone());
@@ -1803,6 +1819,25 @@ impl AgentLoop {
             class: class.as_str().into(),
             model: model_name.clone(),
             agent: self.agent_name().into(),
+        });
+
+        // Resolve the deliberation decision once, here, so the UI never has to
+        // recompute it and every surface agrees on what this turn is doing.
+        let auto_signals = crate::thinking::AutoSignals {
+            class,
+            word_count: objective.split_whitespace().count(),
+            predicted_actions: observed_work.predicted_actions,
+            writes: observed_work.writes,
+            multi_file: observed_work.multi_file,
+            external: observed_work.external,
+            needs_grounding: observed_work.needs_grounding,
+        };
+        let (thinking_show, thinking_reason) =
+            crate::thinking::resolve_visibility(self.runtime.thinking, &auto_signals);
+        self.emit(LoopEvent::ThinkingResolved {
+            mode: self.runtime.thinking.as_str().into(),
+            show: thinking_show,
+            reason: thinking_reason,
         });
 
         // Combine the role and task surfaces. Policy still decides whether a
@@ -1869,6 +1904,10 @@ impl AgentLoop {
                 }
             }
         }
+        // Applied last so it composes with the custom-agent, constrained-model,
+        // and goal-budget clamps above rather than overriding any of them.
+        effective_limits =
+            crate::thinking::modulate_limits(&effective_limits, self.runtime.thinking);
         harness_state.limits = harness_limits(&effective_limits);
         harness_state.deadline_ms = Some(harness_state.started_at_ms.saturating_add(
             i64::try_from(harness_state.limits.max_runtime_ms).unwrap_or(i64::MAX),
@@ -4360,6 +4399,26 @@ mod tests {
                 nexus_core::timeline::TranscriptFilter::All,
             )
             .expect("list timeline")
+    }
+
+    #[test]
+    fn thinking_resolution_never_reaches_the_timeline() {
+        // The deliberation decision drives one live widget. If it were
+        // recorded, every turn would gain a card the operator never acts on.
+        let timeline = turn_timeline(true);
+        for show in [true, false] {
+            timeline
+                .record_loop_event(&LoopEvent::ThinkingResolved {
+                    mode: "auto".into(),
+                    show,
+                    reason: "class=coding",
+                })
+                .expect("record resolution");
+        }
+        assert!(
+            recorded(&timeline).is_empty(),
+            "thinking resolution must not append a timeline entry"
+        );
     }
 
     #[test]
