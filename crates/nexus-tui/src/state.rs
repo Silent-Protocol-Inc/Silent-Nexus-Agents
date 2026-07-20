@@ -302,13 +302,17 @@ impl State {
         ThinkingState::Understanding
     }
 
-    /// Whether the live activity component may render right now.
+    /// Whether the reasoning *preview* may render right now.
+    ///
+    /// This gates the preview rows only. The activity indicator itself always
+    /// renders while a turn runs — `/thinking off` still shows activity, tool
+    /// execution, and progress, and hiding the indicator would leave the
+    /// operator with no sign that anything is happening.
     ///
     /// The minimum-duration floor does double duty: it stops sub-second turns
-    /// from flashing the component, and it covers the few milliseconds AUTO
-    /// needs to classify, so `thinking_show` is always resolved before the
-    /// component can appear.
-    pub fn thinking_visible(&self) -> bool {
+    /// from flashing preview rows, and it covers the few milliseconds AUTO
+    /// needs to classify, so `thinking_show` is always resolved first.
+    pub fn thinking_preview_visible(&self) -> bool {
         if self.mode != Mode::Running {
             return false;
         }

@@ -472,10 +472,12 @@ fn format_elapsed(elapsed: std::time::Duration) -> String {
 /// and a hint pointing at the full detail. Collapses to a single row on
 /// narrow terminals.
 fn processing_lines(st: &State, t: &Theme, width: usize) -> Vec<Line<'static>> {
-    // The deliberation gate: `/thinking off` renders nothing, `auto` defers to
-    // the resolved per-turn decision, and every mode waits out the anti-flicker
-    // floor so a sub-second turn never flashes the component.
-    if !st.thinking_visible() {
+    // The activity indicator — heading, animated track, elapsed — always
+    // renders while a turn is running. It is the operator's only signal that
+    // work is happening, so it must never depend on `/thinking`; even `off`
+    // shows activity, tool execution, and progress. Only the reasoning preview
+    // below it is gated.
+    if st.mode != Mode::Running {
         return Vec::new();
     }
 
@@ -534,6 +536,13 @@ fn processing_lines(st: &State, t: &Theme, width: usize) -> Vec<Line<'static>> {
     }
     let mut lines = vec![Line::from(head)];
 
+    // The deliberation gate applies to the reasoning preview only: `off` never
+    // previews, `auto` defers to the resolved per-turn decision, and the
+    // anti-flicker floor keeps a sub-second turn from flashing preview rows
+    // under an indicator that was already on screen.
+    if !st.thinking_preview_visible() {
+        return lines;
+    }
     let wrap_width = width.saturating_sub(6).max(8);
     let preview = crate::thinking::summarize(st, phase, wrap_width);
     if preview.is_empty() || width < 56 {
@@ -3034,13 +3043,41 @@ mod tests {
     }
 
     #[test]
-    fn thinking_off_renders_no_activity_component_at_all() {
+    fn thinking_off_keeps_the_activity_indicator_and_drops_only_the_preview() {
+        // Regression: gating the whole component on /thinking removed the
+        // operator's only sign that work was happening. `off` hides reasoning,
+        // not activity.
         let mut state = activity_state();
         state.thinking_mode = nexus_core::ThinkingMode::Off;
+        let lines = processing_lines(&state, &state.theme.clone(), 120);
+        assert_eq!(lines.len(), 1, "the indicator row must survive `off`");
+        let text = line_text(&lines[0]);
+        assert!(text.contains("NEXUS"), "{text}");
         assert!(
-            processing_lines(&state, &state.theme.clone(), 120).is_empty(),
-            "off must stay quiet, not merely abbreviate"
+            !text.contains("Ctrl+E"),
+            "no preview means no detail pointer: {text}"
         );
+    }
+
+    #[test]
+    fn the_animated_track_runs_in_every_thinking_mode() {
+        // The sweep is the liveness signal; it cannot depend on /thinking.
+        let mut state = activity_state();
+        for mode in [
+            nexus_core::ThinkingMode::Off,
+            nexus_core::ThinkingMode::On,
+            nexus_core::ThinkingMode::Auto,
+        ] {
+            state.thinking_mode = mode;
+            state.thinking_show = Some(false);
+            let lines = processing_lines(&state, &state.theme.clone(), 120);
+            assert!(!lines.is_empty(), "{mode:?} lost the indicator");
+            let head = line_text(&lines[0]);
+            assert!(
+                head.contains('▰') || head.contains('▱'),
+                "{mode:?} lost the animated track: {head}"
+            );
+        }
     }
 
     #[test]
@@ -3048,9 +3085,10 @@ mod tests {
         let mut state = activity_state();
         state.thinking_mode = nexus_core::ThinkingMode::On;
         state.thinking_show = Some(false);
+        let lines = processing_lines(&state, &state.theme.clone(), 120);
         assert!(
-            !processing_lines(&state, &state.theme.clone(), 120).is_empty(),
-            "on ignores the per-turn decision"
+            lines.len() > 1,
+            "on previews regardless of the per-turn decision"
         );
     }
 
@@ -3059,15 +3097,20 @@ mod tests {
         let mut state = activity_state();
         state.thinking_mode = nexus_core::ThinkingMode::Auto;
 
+        let rows = |st: &State| processing_lines(st, &st.theme.clone(), 120).len();
+
         state.thinking_show = Some(true);
-        assert!(!processing_lines(&state, &state.theme.clone(), 120).is_empty());
+        assert!(rows(&state) > 1, "a shown turn previews");
 
+        // Hidden and unresolved keep the indicator but drop the preview.
         state.thinking_show = Some(false);
-        assert!(processing_lines(&state, &state.theme.clone(), 120).is_empty());
-
-        // Unresolved stays quiet rather than guessing.
+        assert_eq!(rows(&state), 1);
         state.thinking_show = None;
-        assert!(processing_lines(&state, &state.theme.clone(), 120).is_empty());
+        assert_eq!(
+            rows(&state),
+            1,
+            "unresolved stays quiet rather than guessing"
+        );
     }
 
     #[test]
@@ -3076,15 +3119,16 @@ mod tests {
         state.thinking_mode = nexus_core::ThinkingMode::On;
         state.thinking_min_duration = std::time::Duration::from_millis(500);
         state.turn_started = Some(std::time::Instant::now());
-        assert!(
-            processing_lines(&state, &state.theme.clone(), 120).is_empty(),
-            "the anti-flicker floor must suppress a just-started turn"
+        assert_eq!(
+            processing_lines(&state, &state.theme.clone(), 120).len(),
+            1,
+            "the floor suppresses preview rows, not the indicator"
         );
 
-        // Once the floor has passed, the component appears.
+        // Once the floor has passed, the preview appears under it.
         state.turn_started =
             Some(std::time::Instant::now() - std::time::Duration::from_millis(900));
-        assert!(!processing_lines(&state, &state.theme.clone(), 120).is_empty());
+        assert!(processing_lines(&state, &state.theme.clone(), 120).len() > 1);
     }
 
     #[test]

@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.1] — 2026-07-20
+
+### Fixed
+
+- Restored the animated activity indicator in the timeline. 2.4.0 gated the
+  entire live component on the deliberation mode, so with the default `auto` it
+  disappeared for any turn that did not warrant a reasoning preview — taking the
+  "NEXUS …" heading, the data-stream sweep, and the elapsed counter with it, and
+  leaving no sign that the agent was working.
+- The gate now applies to the reasoning preview alone. The indicator renders
+  whenever a turn is running, in every mode including `off`, which was always
+  meant to hide planning and reasoning summaries rather than activity, tool
+  execution, and progress.
+
 ## [2.4.0] — 2026-07-20
 
 ### Added
