@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.4.2] — 2026-07-20
+
+### Fixed
+
+- Restored the timeline notices a new install depends on. 2.3.0 tiered notices by
+  severity, so everything except warnings and errors folded out of the default
+  view — taking the first-run guidance with it. A fresh install opened onto a
+  completely blank timeline with no sign of `/setup`, `/help`, or the palette.
+- Notices are now essential at every severity. A notice is the harness addressing
+  the operator directly (onboarding, command results, turn summaries), which is
+  categorically different from the agent's internal process events. Reasoning
+  summaries, routing, policy, and context packing remain tiered as before, so the
+  concise timeline still does its job.
+
+
 ## [2.4.1] — 2026-07-20
 
 ### Fixed

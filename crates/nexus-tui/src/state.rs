@@ -857,7 +857,16 @@ mod tests {
         let mut state = state();
         state.timeline.clear();
         state.user("ship the release");
+        // A notice is operator-facing and stays visible in every mode; the
+        // agent's internal reasoning is what folds away.
         state.activity("packed 12 files into context");
+        state.push_local_event(
+            TimelineStatus::Completed,
+            "reasoning".into(),
+            TimelineKind::ReasoningSummary {
+                text: "Considering the release checklist.".into(),
+            },
+        );
         state.push_local_event(
             TimelineStatus::Completed,
             "routing".into(),
@@ -870,11 +879,15 @@ mod tests {
         let visible = |s: &State| s.timeline.iter().filter(|e| s.event_visible(e)).count();
 
         assert_eq!(state.activity_mode, ActivityMode::Default);
-        assert_eq!(visible(&state), 1, "default shows only essential activity");
+        assert_eq!(
+            visible(&state),
+            2,
+            "default shows the message and the notice, not the reasoning",
+        );
         state.activity_mode = ActivityMode::Detailed;
-        assert_eq!(visible(&state), 2, "detailed adds collapsed detail");
+        assert_eq!(visible(&state), 3, "detailed adds the reasoning summary");
         state.activity_mode = ActivityMode::Debug;
-        assert_eq!(visible(&state), 3, "debug adds diagnostics");
+        assert_eq!(visible(&state), 4, "debug adds routing diagnostics");
     }
 
     #[test]

@@ -609,6 +609,65 @@
       },
       "type": "object"
     },
+    "ThinkingConfig": {
+      "additionalProperties": false,
+      "description": "How much *optional* deliberation the harness performs, and whether the live activity component renders.\n\nThis block owns behavior only. Presentation of the activity component — preview line count, expand shortcut, animation, reduced motion — lives in [`ActivityConfig`] (`[tui.activity]`) and is deliberately not duplicated here, so there is exactly one source of truth per knob.\n\nNote that `[thinking].mode` and `[tui.activity].mode` are **different axes** and take different values. `[thinking].mode` is `off|on|auto` and controls deliberation; `[tui.activity].mode` is `default|detailed|debug` and controls timeline verbosity (`/view`). Changing one never changes the other.",
+      "properties": {
+        "deep_planning": {
+          "default": true,
+          "description": "Allow `on`/`auto` to promote a turn to grounded, staged execution.",
+          "type": "boolean"
+        },
+        "minimum_duration_ms": {
+          "default": 500,
+          "description": "Anti-flicker floor: leave the activity component hidden until a turn has run at least this long, so sub-second turns never flash it. Zero disables the delay.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThinkingMode"
+            }
+          ],
+          "default": "auto",
+          "description": "Deliberation mode: `off`, `on`, or `auto`. This is the default for a fresh workspace; an explicit `/thinking` choice is stored in UI state and takes precedence from then on."
+        },
+        "summarize_provider_reasoning": {
+          "default": true,
+          "description": "Render provider-supplied reasoning *summaries* when a provider emits them. Raw provider reasoning is destroyed at ingestion and is never shown regardless of this setting.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ThinkingMode": {
+      "description": "How much deliberation the harness performs, and how much of it is shown.",
+      "oneOf": [
+        {
+          "description": "Optimize for latency. Optional deliberation is skipped for work that carries no risk flags, and the live activity component never renders.",
+          "enum": [
+            "off"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Always render the activity component, and prefer grounded, staged execution with verification.",
+          "enum": [
+            "on"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Decide per turn from the deterministic task classification. The recommended default.",
+          "enum": [
+            "auto"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "TuiConfig": {
       "additionalProperties": false,
       "properties": {
@@ -821,6 +880,20 @@
         "network": "off",
         "timeout_secs": 120
       }
+    },
+    "thinking": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ThinkingConfig"
+        }
+      ],
+      "default": {
+        "deep_planning": true,
+        "minimum_duration_ms": 500,
+        "mode": "auto",
+        "summarize_provider_reasoning": true
+      },
+      "description": "Deliberation behavior (`[thinking]`)."
     },
     "tui": {
       "allOf": [

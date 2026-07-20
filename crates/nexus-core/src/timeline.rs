@@ -542,18 +542,14 @@ impl TimelineKind {
             | Self::SlashCommand { .. }
             | Self::SandboxCommand { .. }
             | Self::BackgroundTask { .. }
-            | Self::AgentRun { .. } => Essential,
-            // Warnings/errors are essential; informational notices fold away.
-            Self::Notice { severity, .. } => {
-                if matches!(
-                    severity.as_str(),
-                    "warn" | "warning" | "error" | "err" | "critical"
-                ) {
-                    Essential
-                } else {
-                    CollapsedDetail
-                }
-            }
+            | Self::AgentRun { .. }
+            // A notice is the harness addressing the operator directly —
+            // onboarding, command results, turn summaries. That is categorically
+            // different from the agent's internal process events below, which
+            // are what the concise view exists to fold away. Tiering notices by
+            // severity hid first-run guidance and left new installs looking at
+            // an empty timeline.
+            | Self::Notice { .. } => Essential,
             // A retry only matters up front once it is exhausted.
             Self::Retry { attempt, max, .. } => {
                 if attempt >= max {
@@ -1702,23 +1698,20 @@ mod tests {
             .visibility(),
             DiagnosticOnly
         );
-        // Notice severity flips the tier.
-        assert_eq!(
-            TimelineKind::Notice {
-                text: "fyi".into(),
-                severity: "info".into()
-            }
-            .visibility(),
-            CollapsedDetail
-        );
-        assert_eq!(
-            TimelineKind::Notice {
-                text: "careful".into(),
-                severity: "warn".into()
-            }
-            .visibility(),
-            Essential
-        );
+        // Every notice is the harness talking to the operator, so severity
+        // never demotes one out of the concise view. Tiering these by severity
+        // is what left a fresh install staring at an empty timeline.
+        for severity in ["info", "dim", "ok", "warn", "error"] {
+            assert_eq!(
+                TimelineKind::Notice {
+                    text: "first run guidance".into(),
+                    severity: severity.into(),
+                }
+                .visibility(),
+                Essential,
+                "a `{severity}` notice must survive the default view",
+            );
+        }
         // Retry only surfaces once exhausted.
         assert_eq!(
             TimelineKind::Retry {
