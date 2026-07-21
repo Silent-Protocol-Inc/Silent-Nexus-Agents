@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const UI_STATE_VERSION: u32 = 7;
+pub const UI_STATE_VERSION: u32 = 8;
 const HISTORY_CAP: usize = 200;
 const RECENT_COMMANDS_CAP: usize = 12;
 
@@ -60,6 +60,10 @@ pub struct UiState {
     /// Default keeps the timeline to essential activity; diagnostics stay one
     /// keystroke away rather than flooding the transcript.
     pub activity_mode: String,
+    /// Plan mode, entered with `/plan`. While it is on, every turn runs under a
+    /// scope that refuses to change anything, and the agent's job is to author
+    /// a plan for approval rather than to act. Approving it clears this.
+    pub plan_mode: bool,
     /// Persona selected for new sessions.
     pub selected_persona: Option<String>,
     /// Approved profile-trait collection selected for new sessions.
@@ -99,6 +103,7 @@ impl Default for UiState {
             thinking_enabled: None,
             first_run_completed: false,
             activity_mode: "default".into(),
+            plan_mode: false,
             selected_persona: None,
             profile_name: "default".into(),
             menus: BTreeMap::new(),
@@ -149,6 +154,12 @@ impl UiState {
             // An existing state file is itself proof of a prior launch, so a
             // returning operator never sees the first-run banner.
             self.first_run_completed = true;
+        }
+        if self.version < 8 {
+            // Plan mode is a deliberate act, never a state someone is restored
+            // into: a stored `true` from a crashed session would silently
+            // refuse the operator's next edit.
+            self.plan_mode = false;
         }
         // Never re-emit the legacy key, whatever version we loaded.
         self.thinking_enabled = None;
@@ -334,6 +345,24 @@ mod tests {
             "the v6 key must not survive into a v7 file: {json}"
         );
         assert!(json.contains("thinking_mode"));
+    }
+
+    #[test]
+    fn upgrading_never_restores_someone_into_plan_mode() {
+        // A crash while planning leaves `plan_mode: true` on disk. Honoring it
+        // on the next launch would make the operator's first edit be refused
+        // by a mode they did not knowingly re-enter.
+        let raw = r#"{ "version": 7, "plan_mode": true }"#;
+        let mut state: UiState = serde_json::from_str(raw).expect("v7 state");
+        state.migrate();
+        assert!(!state.plan_mode);
+        assert_eq!(state.version, UI_STATE_VERSION);
+
+        // Within the current version the flag is a real preference and stands.
+        let raw = format!(r#"{{ "version": {UI_STATE_VERSION}, "plan_mode": true }}"#);
+        let mut state: UiState = serde_json::from_str(&raw).expect("current state");
+        state.migrate();
+        assert!(state.plan_mode);
     }
 
     #[test]

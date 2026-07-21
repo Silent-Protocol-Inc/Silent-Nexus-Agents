@@ -59,4 +59,7 @@ pub struct AgentRuntime {
     pub thinking: nexus_core::thinking::ThinkingMode,
     /// Whether `on`/`auto` may promote a turn to grounded, staged execution.
     pub deep_planning: bool,
+    /// Plan mode. The turn runs under a scope that refuses to change anything
+    /// and the agent's job is to author a plan for approval, not to act.
+    pub plan_mode: bool,
 }

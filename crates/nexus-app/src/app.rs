@@ -267,6 +267,17 @@ impl App {
         let models = Arc::new(ModelManager::from_config(&runtime_config)?);
         let tools = Arc::new(ToolRegistry::with_builtins());
         let policy = Arc::new(PolicyEngine::new(runtime_config.policy.clone()));
+        let plan_mode = self.read_ui_state(|state| state.plan_mode);
+        if plan_mode {
+            // Installed here rather than in the loop so every entry point —
+            // TUI turn, `snx run`, a delegated subagent — is covered by the
+            // same refusal. The engine is rebuilt per runtime, so the scope
+            // cannot outlive the turn that asked for it.
+            policy.push_scope(
+                nexus_policy::PLAN_MODE_SCOPE,
+                nexus_policy::PolicyScope::plan_mode(),
+            );
+        }
         let audit = self.audit();
         let sessions = SessionStore::new(self.store.clone());
         if let Some(session_id) = session.as_ref() {
@@ -318,6 +329,7 @@ impl App {
             // outranks the config default from then on.
             thinking: self.read_ui_state(|state| state.thinking()),
             deep_planning: self.config.thinking.deep_planning,
+            plan_mode,
         })
     }
 

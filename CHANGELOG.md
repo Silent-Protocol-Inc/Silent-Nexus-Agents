@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.6.0] — 2026-07-22
+
+### Added
+
+- Plan mode. `/plan` with no arguments now enters a mode instead of printing
+  "no durable plan": the turn runs under a policy scope that refuses every
+  write, command, network call, and delegation, the agent reads the repository,
+  and it calls `plan.submit` with an ordered list of steps naming the real files
+  each one touches and how it is verified. The operator approves or declines
+  that plan. On approval the mode ends and the same turn continues into
+  execution with the full tool surface restored; on decline the draft stays
+  stored and the mode stays on so the next message refines it. `/plan exit`
+  leaves without approving. The status bar and the input frame both say the mode
+  is on, at every terminal width.
+- `plan.submit` tool (category `Goal`, risk `Read`) and
+  `WorkBreakdown::from_stages`, so a plan can be authored rather than generated.
+
+### Changed
+
+- A plan produced in plan mode is written by the model from what it read in the
+  workspace. `WorkBreakdown::generate` — the fixed
+  Grounding / Implementation / Validation template — still backs `/plan create`
+  and ordinary turns, but plan mode no longer uses it. The template described
+  the shape of work; it never described *this* work.
+- `ui-state` v8 adds `plan_mode`. The migration forces it to `false`: a crash
+  while planning must not restore an operator into a mode that then refuses
+  their next edit.
+
 ## [2.5.0] — 2026-07-22
 
 ### Added

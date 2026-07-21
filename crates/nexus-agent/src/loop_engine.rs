@@ -16,7 +16,7 @@ use nexus_core::harness::{
 use nexus_core::ids::{SessionId, SpanId, TraceId, TurnId};
 use nexus_core::orchestration::{
     classify_interruption, ContextCategory, ContextManifest, ContextOmission, ContextSource,
-    InterruptionKind, OrchestrationStore, PlanScopeDiff, SessionInterruption, StageStatus,
+    InterruptionKind, OrchestrationStore, PlanScopeDiff, SessionInterruption, Stage, StageStatus,
     WorkBreakdown, WorkBreakdownKind, WorkEstimate,
 };
 use nexus_core::store::Store;
@@ -38,6 +38,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
+
+/// The one tool a plan-mode turn uses to hand its authored plan back to the
+/// harness. Named here rather than at the call site so the loop and the tool
+/// registration cannot drift apart silently.
+const PLAN_SUBMIT_TOOL: &str = "plan.submit";
 
 /// Per-turn safety limits.
 #[derive(Debug, Clone)]
@@ -169,6 +174,12 @@ pub enum LoopEvent {
     /// classified as a final answer or reasoning summary.
     AssistantStreamFailed(String),
     FinalAnswer(String),
+    /// Plan mode finished: the operator either approved the authored plan (and
+    /// the turn continues into execution) or rejected it. Consumers clear or
+    /// keep their own mode indicator from this.
+    PlanModeEnded {
+        approved: bool,
+    },
     PlanPromoted {
         work: WorkBreakdown,
         from: String,
@@ -730,6 +741,31 @@ impl TurnTimeline {
                         None,
                     )?;
                 }
+            }
+            // Leaving plan mode is a state change the operator caused and will
+            // want to find later: it marks where read-only research stopped and
+            // execution was allowed to begin.
+            LoopEvent::PlanModeEnded { approved } => {
+                self.append(
+                    LifecyclePhase::Approval,
+                    if *approved {
+                        TimelineStatus::Completed
+                    } else {
+                        TimelineStatus::Blocked
+                    },
+                    if *approved {
+                        "plan approved — leaving plan mode".to_string()
+                    } else {
+                        "plan declined — staying in plan mode".to_string()
+                    },
+                    TimelineKind::Approval {
+                        tool: PLAN_SUBMIT_TOOL.to_string(),
+                        decision: Some(if *approved { "approved" } else { "denied" }.to_string()),
+                        summary: "plan mode".to_string(),
+                        edited: false,
+                    },
+                    None,
+                )?;
             }
             LoopEvent::PlanPromoted {
                 work,
@@ -1796,7 +1832,19 @@ impl AgentLoop {
         // forced grounding always outranks the operator's speed preference.
         estimate = estimate.for_thinking(self.runtime.thinking, self.runtime.deep_planning);
         let mut observed_work = estimate.clone();
-        let mut work = WorkBreakdown::generate(objective, estimate);
+        // In plan mode the template is exactly what we are replacing, so the
+        // turn opens with an empty breakdown rather than showing the operator
+        // Grounding / Implementation / Validation stages that describe no real
+        // work. `plan.submit` fills it in with stages the model authored.
+        let mut work = if self.runtime.plan_mode {
+            WorkBreakdown::from_stages(
+                objective,
+                vec!["planning — reading the workspace before proposing steps".into()],
+                Vec::new(),
+            )
+        } else {
+            WorkBreakdown::generate(objective, estimate)
+        };
         let orchestration = OrchestrationStore::new(self.runtime.store.clone());
         orchestration.save_plan(
             session_id.as_str(),
@@ -1866,8 +1914,11 @@ impl AgentLoop {
         // visible tool may execute; hiding a restricted tool prevents the
         // operator from seeing and approving the action.
         let constrained_model = capabilities.constrained();
-        let tools = self.select_tools(class);
-        let tool_specs = build_tool_specs(&tools, native);
+        // Both are rebuilt if the operator approves a plan mid-turn: the
+        // execution that follows needs the tools planning deliberately withheld.
+        let mut plan_mode_active = self.runtime.plan_mode;
+        let mut tools = self.select_tools(class, plan_mode_active);
+        let mut tool_specs = build_tool_specs(&tools, native);
 
         // Build the initial conversation (history now includes the objective).
         let mut messages = self.build_initial_messages(InitialContextRequest {
@@ -2639,9 +2690,136 @@ impl AgentLoop {
                         .sessions
                         .add_message(session_id.as_str(), turn, &tool_msg)?;
                     messages.push(tool_msg);
+
+                    // A submitted plan is the end of planning and the start of
+                    // the decision. Everything the operator needs to judge it
+                    // has been gathered; asking the model for another step here
+                    // would only let it drift away from what it just proposed.
+                    if plan_mode_active
+                        && call.name == PLAN_SUBMIT_TOOL
+                        && !result_text.starts_with("ERROR:")
+                    {
+                        let authored = match self.authored_plan(objective, &call.arguments) {
+                            Ok(authored) => authored,
+                            Err(error) => {
+                                // The tool validated the shape, so this is our
+                                // bug, not the model's; say so and stop rather
+                                // than looping on an unfixable instruction.
+                                let message = format!("stopped: {error}");
+                                self.emit(LoopEvent::Error(message.clone()));
+                                return Ok(LoopOutcome {
+                                    final_message: message,
+                                    steps,
+                                    tool_calls: tool_calls_count,
+                                    stopped_reason: "plan_submission_invalid".into(),
+                                    input_tokens,
+                                    output_tokens,
+                                });
+                            }
+                        };
+                        work = authored;
+                        orchestration.save_plan(
+                            session_id.as_str(),
+                            &work,
+                            "awaiting_approval",
+                            "agent",
+                        )?;
+                        timeline.record_work(&work)?;
+                        match self
+                            .request_plan_approval(
+                                &trace,
+                                session_id,
+                                &harness_state.run_id,
+                                &mut work,
+                                approver.clone(),
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                // Approved: planning is over. Drop the scope so
+                                // the same turn can carry the plan out, and
+                                // re-offer the tools it needs to do that.
+                                self.runtime.policy.pop_scope(nexus_policy::PLAN_MODE_SCOPE);
+                                plan_mode_active = false;
+                                tools = self.select_tools(class, false);
+                                tool_specs = build_tool_specs(&tools, native);
+                                self.emit(LoopEvent::PlanModeEnded { approved: true });
+                                messages.push(ChatMessage::user(
+                                    "The operator approved this plan. Carry out its steps in \
+                                     order, using the tools now available to you.",
+                                ));
+                                continue;
+                            }
+                            Err(error) if error.is_policy_stop() => {
+                                // Rejected: stay in plan mode with the draft
+                                // stored, so the next message refines it rather
+                                // than starting over.
+                                self.emit(LoopEvent::PlanModeEnded { approved: false });
+                                let message =
+                                    "plan not approved — still planning; describe what to change"
+                                        .to_string();
+                                self.emit(LoopEvent::FinalAnswer(message.clone()));
+                                return Ok(LoopOutcome {
+                                    final_message: message,
+                                    steps,
+                                    tool_calls: tool_calls_count,
+                                    stopped_reason: "plan_rejected".into(),
+                                    input_tokens,
+                                    output_tokens,
+                                });
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// Turn a validated `plan.submit` payload into a durable plan.
+    fn authored_plan(&self, objective: &str, arguments: &str) -> Result<WorkBreakdown> {
+        let submission: nexus_tools::plan::PlanSubmission = serde_json::from_str(arguments)
+            .map_err(|error| {
+                NexusError::Other(format!("could not read the submitted plan: {error}"))
+            })?;
+        let stages = submission
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let mut stage = Stage::new(
+                    index as u32 + 1,
+                    self.safe_model_text(step.title.trim()),
+                    self.safe_model_text(step.detail.trim()),
+                );
+                stage.changed_files = step
+                    .files
+                    .iter()
+                    .map(|file| self.safe_model_text(file.trim()))
+                    .filter(|file| !file.is_empty())
+                    .collect();
+                stage.next_action = step
+                    .verification
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|verification| !verification.is_empty())
+                    .map(|verification| self.safe_model_text(verification));
+                stage
+            })
+            .collect();
+        let rationale = submission
+            .findings
+            .iter()
+            .map(|finding| self.safe_model_text(finding.trim()))
+            .filter(|finding| !finding.is_empty())
+            .collect();
+        let stated = submission.objective.trim();
+        let objective = if stated.is_empty() {
+            objective.to_string()
+        } else {
+            self.safe_model_text(stated)
+        };
+        Ok(WorkBreakdown::from_stages(objective, rationale, stages))
     }
 
     async fn request_plan_approval(
@@ -3471,7 +3649,29 @@ impl AgentLoop {
         })
     }
 
-    fn select_tools(&self, class: TaskClass) -> Vec<Arc<dyn Tool>> {
+    fn select_tools(&self, class: TaskClass, plan_mode: bool) -> Vec<Arc<dyn Tool>> {
+        if plan_mode {
+            // Offering a write tool the policy scope will refuse wastes a step
+            // and teaches the model nothing, so plan mode advertises only what
+            // it can actually use: read the workspace, then submit.
+            return self
+                .runtime
+                .tools
+                .for_categories(&[
+                    nexus_tools::ToolCategory::Filesystem,
+                    nexus_tools::ToolCategory::Repo,
+                    nexus_tools::ToolCategory::Diagnostics,
+                    nexus_tools::ToolCategory::Goal,
+                ])
+                .into_iter()
+                .filter(|tool| {
+                    nexus_policy::PolicyScope::plan_mode()
+                        .allowed_tool_prefixes
+                        .iter()
+                        .any(|prefix| tool.meta().name.starts_with(prefix.as_str()))
+                })
+                .collect();
+        }
         let mut cats = if self.full_access() {
             vec![
                 nexus_tools::ToolCategory::Filesystem,
@@ -3578,6 +3778,30 @@ impl AgentLoop {
                 operating_context,
             ),
         ];
+        // Plan mode. The policy scope already refuses every mutating call, so
+        // this section exists to make the turn *productive* rather than safe:
+        // without it the model spends its steps rediscovering that its edits
+        // are denied instead of reading the repository and proposing work.
+        if self.runtime.plan_mode {
+            sections.push(ContextSection::pinned(
+                AuthorityLayer::WorkspacePolicy,
+                "plan mode",
+                "The operator is planning, not asking you to act. This turn cannot change \
+                 anything: writes, commands, network, and delegation are refused by policy, \
+                 not by your restraint.\n\
+                 - Read the repository first. Ground the plan in files that exist — open them, \
+                   search for the call sites, and check how the surrounding code already solves \
+                   the same problem.\n\
+                 - Then call `plan.submit` once with an ordered list of steps. Each step names \
+                   the real files it touches and how it is verified. Do not propose a step you \
+                   have not confirmed is needed.\n\
+                 - If the request is a question rather than a change, answer it normally and \
+                   submit nothing. A plan is not owed for every message.\n\
+                 - The operator reviews the submitted plan and approves or declines it. On \
+                   approval this turn continues into execution with full tools."
+                    .to_string(),
+            ));
+        }
         // Project instructions: the workspace's SILENT.md / AGENTS.md /
         // CLAUDE.md / GEMINI.md… (first match wins) teach the agent
         // repo-specific rules, exactly like other harnesses honor them.

@@ -44,6 +44,10 @@ pub struct StatusBar {
     pub tokens_in: usize,
     pub tokens_out: usize,
     pub permission_mode: String,
+    /// Plan mode is on. Shown next to the permission mode because that is what
+    /// it overrides: while it is set, the turn refuses to change anything
+    /// regardless of what the permission preset would otherwise allow.
+    pub plan_mode: bool,
 }
 
 pub struct TimelineEventUpdate {
@@ -760,6 +764,7 @@ mod tests {
                 tokens_in: 0,
                 tokens_out: 0,
                 permission_mode: "default".into(),
+                plan_mode: false,
             },
             Vec::new(),
             nexus_core::ThinkingMode::Off,

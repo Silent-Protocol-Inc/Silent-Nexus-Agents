@@ -23,6 +23,17 @@ approval, assume it can see everything available to your user account despite
 path validation, environment scrubbing, resource limits, and process-group
 cleanup.
 
+## Planning before acting
+
+`/plan` enters plan mode: the agent may read the workspace and nothing else,
+and its job for that turn is to hand you a plan to approve. The status bar shows
+`PLAN` and the input frame says so. Approving the plan ends the mode and runs it
+in the same turn; `/plan exit` leaves without approving. See
+[goals.md](goals.md#plan-mode) for what the mode allows and refuses.
+
+Plan mode is not a substitute for approvals. It narrows what a turn *can*
+propose; the approvals above still gate everything the turn does afterwards.
+
 ## Containers
 
 The strong backend runs as the invoking UID/GID, mounts the workspace read-only

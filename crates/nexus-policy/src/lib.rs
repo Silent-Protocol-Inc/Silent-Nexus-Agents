@@ -86,6 +86,39 @@ pub struct PolicyScope {
     pub prohibited_paths: Vec<String>,
 }
 
+/// Name of the scope plan mode installs. Appears verbatim in denial reasons.
+pub const PLAN_MODE_SCOPE: &str = "plan-mode";
+
+impl PolicyScope {
+    /// The scope plan mode runs under: inspect the workspace, submit a plan,
+    /// change nothing.
+    ///
+    /// Deliberately an allowlist rather than a list of denied tools. A denylist
+    /// silently admits whatever is added to the tool catalog next; with an
+    /// allowlist a new tool is refused until someone decides it belongs in a
+    /// mode whose whole promise is that nothing happens without approval.
+    ///
+    /// `repo.check` is absent on purpose — it runs the project's build and test
+    /// commands, which is execution, however read-only its intent.
+    pub fn plan_mode() -> Self {
+        Self {
+            allowed_tool_prefixes: [
+                "fs.read_file",
+                "fs.list_dir",
+                "fs.find_files",
+                "fs.search_text",
+                "repo.git_",
+                "diag.",
+                "plan.submit",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+            ..Default::default()
+        }
+    }
+}
+
 pub struct PolicyEngine {
     config: PolicyConfig,
     /// `allow_session` grants accumulated during this session, keyed by a
@@ -475,6 +508,71 @@ mod tests {
         a.paths = vec!["src/main.rs".into()];
         e.grant_session(&PolicyEngine::grant_token(&a));
         assert_eq!(e.evaluate(&a).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn plan_mode_refuses_every_way_of_changing_something() {
+        let e = engine();
+        e.push_scope(PLAN_MODE_SCOPE, PolicyScope::plan_mode());
+
+        for (tool, risk) in [
+            ("fs.create_file", RiskLevel::Write),
+            ("fs.patch_file", RiskLevel::Write),
+            ("fs.delete", RiskLevel::Destructive),
+            ("fs.copy", RiskLevel::Write),
+            ("terminal.run", RiskLevel::Write),
+            ("terminal.run_program", RiskLevel::Write),
+            ("web.fetch", RiskLevel::Read),
+            ("web.download", RiskLevel::Write),
+            ("repo.check", RiskLevel::Write),
+            ("mcp.anything", RiskLevel::Read),
+        ] {
+            let outcome = e.evaluate(&action(tool, risk));
+            assert_eq!(
+                outcome.decision,
+                Decision::Deny,
+                "`{tool}` must be refused while planning",
+            );
+            assert!(
+                outcome.reason.contains(PLAN_MODE_SCOPE),
+                "the denial must name the scope so the operator knows why: {}",
+                outcome.reason,
+            );
+        }
+
+        // Reading the workspace and submitting the plan are the whole point.
+        for tool in [
+            "fs.read_file",
+            "fs.list_dir",
+            "fs.find_files",
+            "fs.search_text",
+            "repo.git_status",
+            "repo.git_diff",
+            "diag.system",
+            "plan.submit",
+        ] {
+            assert_ne!(
+                e.evaluate(&action(tool, RiskLevel::Read)).decision,
+                Decision::Deny,
+                "`{tool}` must survive plan mode",
+            );
+        }
+
+        // A tool nobody has classified yet is refused rather than admitted.
+        assert_eq!(
+            e.evaluate(&action("some.future_tool", RiskLevel::Read))
+                .decision,
+            Decision::Deny,
+            "the allowlist must fail closed for tools added later",
+        );
+
+        e.pop_scope(PLAN_MODE_SCOPE);
+        assert_ne!(
+            e.evaluate(&action("fs.create_file", RiskLevel::Write))
+                .decision,
+            Decision::Deny,
+            "leaving plan mode restores the operator's normal permissions",
+        );
     }
 
     #[test]

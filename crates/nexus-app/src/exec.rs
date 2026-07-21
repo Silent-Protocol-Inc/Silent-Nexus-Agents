@@ -88,6 +88,8 @@ fn bare_interactive_view(def: &registry::CommandDef) -> Option<View> {
         CommandId::Profile => View::Profile,
         CommandId::Goal => View::GoalMenu,
         CommandId::Goals => View::Goals,
+        // Kept for the registry invariant below, but `execute` never takes
+        // this route: bare `/plan` toggles plan mode instead.
         CommandId::Plan => View::Plan,
         CommandId::Task => View::Tasks,
         CommandId::Subagents => View::Subagents,
@@ -314,6 +316,10 @@ pub enum Effect {
     SetTheme(String),
     /// Set the deliberation mode. Independent of [`Effect::SetActivityMode`].
     SetThinking(nexus_core::ThinkingMode),
+    /// Enter or leave plan mode. The flag is already persisted to UI state by
+    /// the time this is emitted; the TUI reflects it and the next turn reads
+    /// it back when the runtime is built.
+    SetPlanMode(bool),
     SetActivityMode(nexus_core::timeline::ActivityMode),
     SetTranscriptDetail(nexus_core::timeline::TranscriptDetail),
     SetTranscriptFilter(nexus_core::timeline::TranscriptFilter),
@@ -338,7 +344,12 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             def.name
         ))));
     }
-    if ctx.interactive && cmd.args.is_empty() {
+    // `/plan` on its own is the mode switch, not a menu. It is the one
+    // interactive command whose bare form does something rather than opening
+    // a picker, because entering plan mode is the entire reason to type it;
+    // the stored-plan view stays reachable through `/plan history` and the
+    // other subcommands.
+    if ctx.interactive && cmd.args.is_empty() && def.id != CommandId::Plan {
         return Ok(Effect::View(
             bare_interactive_view(def).expect("interactive command has a menu route"),
         ));
@@ -719,6 +730,19 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             }
         },
         CommandId::Goals => view_or(View::Goals, services::goals_report(app)?),
+        // Entering plan mode deliberately precedes the session check below:
+        // planning is what you do *before* the first instruction, so requiring
+        // a message first would make the mode unreachable when it is most
+        // wanted. Every other subcommand acts on a stored plan and still needs
+        // a session.
+        CommandId::Plan if matches!(args.as_slice(), [] if ctx.interactive) => {
+            app.update_ui_state(|s| s.plan_mode = true)?;
+            Effect::SetPlanMode(true)
+        }
+        CommandId::Plan if matches!(args.as_slice(), ["exit"] | ["cancel"]) => {
+            app.update_ui_state(|s| s.plan_mode = false)?;
+            Effect::SetPlanMode(false)
+        }
         CommandId::Plan => {
             let session_id = ctx.session_id.as_deref().ok_or_else(|| {
                 NexusError::NotFound("no active session — send a message first".into())

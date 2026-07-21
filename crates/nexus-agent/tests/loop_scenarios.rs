@@ -158,6 +158,7 @@ fn runtime_with_manager(
         // deliberation control existed.
         thinking: nexus_core::thinking::ThinkingMode::Auto,
         deep_planning: true,
+        plan_mode: false,
     };
     (runtime, session_id)
 }

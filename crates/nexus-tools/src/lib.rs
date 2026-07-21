@@ -16,6 +16,7 @@ pub mod diag;
 pub mod fs;
 pub mod html;
 pub mod net_guard;
+pub mod plan;
 pub mod pty;
 pub mod repo;
 pub mod terminal;
@@ -174,6 +175,7 @@ impl ToolRegistry {
         terminal::register(&mut r);
         web::register(&mut r);
         diag::register(&mut r);
+        plan::register(&mut r);
         r
     }
 
@@ -343,6 +345,55 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The loop offers a plan-mode turn the categories it needs and then keeps
+    /// only what the policy scope would allow anyway, so the model is never
+    /// shown a tool that will be refused. This pins that intersection against
+    /// the real builtin registry: a new write tool landing in `Filesystem`
+    /// must not quietly appear in a planning turn.
+    #[test]
+    fn plan_mode_is_offered_reading_tools_and_the_submission_tool_only() {
+        let r = ToolRegistry::with_builtins();
+        let scope = nexus_policy::PolicyScope::plan_mode();
+        let offered: Vec<String> = r
+            .for_categories(&[
+                ToolCategory::Filesystem,
+                ToolCategory::Repo,
+                ToolCategory::Diagnostics,
+                ToolCategory::Goal,
+            ])
+            .into_iter()
+            .filter(|t| {
+                scope
+                    .allowed_tool_prefixes
+                    .iter()
+                    .any(|prefix| t.meta().name.starts_with(prefix.as_str()))
+            })
+            .map(|t| t.meta().name.to_string())
+            .collect();
+
+        assert!(
+            offered.iter().any(|name| name == "plan.submit"),
+            "planning has no way to submit its plan: {offered:?}"
+        );
+        assert!(
+            offered.iter().any(|name| name == "fs.read_file"),
+            "planning cannot read the repository: {offered:?}"
+        );
+        for tool in &offered {
+            assert!(
+                !tool.contains("write")
+                    && !tool.contains("edit")
+                    && !tool.contains("delete")
+                    && !tool.contains("apply"),
+                "`{tool}` can change the workspace and must not be offered while planning"
+            );
+        }
+        assert!(
+            offered.iter().all(|name| name != "repo.check"),
+            "repo.check runs builds and tests; planning is read-only: {offered:?}"
+        );
+    }
 
     #[test]
     fn registry_groups_by_category() {

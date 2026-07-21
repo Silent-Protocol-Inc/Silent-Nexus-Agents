@@ -167,6 +167,13 @@ fn print_event(ui: &Ui, ev: &LoopEvent) {
         // Presentation-only, and the non-interactive surface has no live
         // component to gate — nothing to print.
         LoopEvent::ThinkingResolved { .. } => {}
+        LoopEvent::PlanModeEnded { approved } => {
+            if *approved {
+                println!("{}", ui.green("plan approved — continuing into execution"));
+            } else {
+                println!("{}", ui.yellow("plan declined — staying in plan mode"));
+            }
+        }
         LoopEvent::Classified {
             class,
             model,

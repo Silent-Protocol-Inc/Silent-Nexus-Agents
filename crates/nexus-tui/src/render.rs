@@ -1450,6 +1450,20 @@ fn draw_input(
         )
     } else if st.focus != Focus::Input {
         (" F6 focus · input inactive ".to_string(), t.muted())
+    } else if st.bar.plan_mode {
+        // The title is where the operator looks before typing, so plan mode
+        // says what typing will do here rather than only in the status bar.
+        (
+            match rl.width_class {
+                WidthClass::Wide => {
+                    " plan mode · nothing is written until you approve · /plan exit "
+                }
+                WidthClass::Desktop | WidthClass::Compact => " plan mode · /plan exit ",
+                WidthClass::Narrow | WidthClass::Mobile => " PLAN ",
+            }
+            .to_string(),
+            t.warning(),
+        )
     } else {
         (
             match rl.width_class {
@@ -1617,6 +1631,20 @@ fn draw_footer(
         2,
         true,
     ));
+    // Priority 0 and never hidden: plan mode changes what a message will do,
+    // so an operator must not be able to lose the indicator to a narrow
+    // terminal and then wonder why their instruction was refused.
+    if st.bar.plan_mode {
+        segs.push(mk(
+            "PLAN",
+            "PLAN",
+            "PLN",
+            "on".to_string(),
+            SegColor::Warning,
+            0,
+            false,
+        ));
+    }
     if let Some(branch) = &st.bar.git_branch {
         segs.push(mk(
             "BRANCH",
@@ -3049,6 +3077,7 @@ mod tests {
                     tokens_in: 12,
                     tokens_out: 8,
                     permission_mode: "default".into(),
+                    plan_mode: false,
                 },
                 vec![],
                 nexus_core::ThinkingMode::Auto,
@@ -3556,6 +3585,7 @@ mod tests {
                 tokens_in: 2048,
                 tokens_out: 512,
                 permission_mode: "default".into(),
+                plan_mode: false,
             },
             vec![],
             nexus_core::ThinkingMode::Auto,
@@ -3670,6 +3700,32 @@ mod tests {
             state.context_drawer = true;
         }
         render_state_text(&mut state, width, height)
+    }
+
+    /// Plan mode changes what pressing Enter will do, so it has to be visible
+    /// at every width — including the narrow ones where lower-priority status
+    /// segments are dropped.
+    #[test]
+    fn plan_mode_is_announced_at_every_terminal_width() {
+        for (width, height) in [(36, 20), (60, 20), (80, 24), (120, 32)] {
+            let mut off = representative_state();
+            off.focus = Focus::Input;
+            let plain = render_state_text(&mut off, width, height);
+
+            let mut on = representative_state();
+            on.focus = Focus::Input;
+            on.bar.plan_mode = true;
+            let planning = render_state_text(&mut on, width, height);
+
+            assert!(
+                planning.contains("PLAN") || planning.contains("PLN"),
+                "plan mode is invisible at {width}x{height}:\n{planning}"
+            );
+            assert_ne!(
+                plain, planning,
+                "plan mode changed nothing on screen at {width}x{height}"
+            );
+        }
     }
 
     fn fnv1a64(text: &str) -> u64 {

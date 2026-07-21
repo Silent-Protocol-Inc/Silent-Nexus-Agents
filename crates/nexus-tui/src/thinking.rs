@@ -177,7 +177,16 @@ pub fn summarize(st: &State, phase: ThinkingState, width: usize) -> Vec<String> 
     if lines.len() < max_lines {
         match phase {
             ThinkingState::Waiting => {
-                if let Some(pending) = work.waiting_approvals.first() {
+                // The live request outranks the snapshot, which is only
+                // refreshed between turns. A turn that asks twice — plan mode
+                // approves a plan and then its first write — would otherwise
+                // keep naming the first tool while the second is on screen.
+                if let Some(request) = st.pending.as_ref() {
+                    lines.push(format!(
+                        "Waiting for your approval · {}",
+                        request.action.tool
+                    ));
+                } else if let Some(pending) = work.waiting_approvals.first() {
                     lines.push(format!("Waiting for your approval · {pending}"));
                 } else {
                     lines.push("Waiting on the provider.".into());

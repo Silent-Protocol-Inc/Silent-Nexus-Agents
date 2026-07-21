@@ -477,6 +477,53 @@ impl WorkBreakdown {
         }
     }
 
+    /// Build a plan from stages someone actually wrote, rather than from the
+    /// shape [`generate`] infers from the objective string.
+    ///
+    /// `generate` answers "what workflow does a request like this need" and
+    /// produces the same Grounding/Implementation/Validation skeleton for every
+    /// objective of a given size. That is the right answer for an ordinary turn
+    /// and the wrong one for a plan: a plan has to say which files change and
+    /// why, which means reading the repository first. Plan mode researches, then
+    /// hands the authored stages here.
+    ///
+    /// The result is always [`WorkBreakdownKind::Planned`] and unapproved — an
+    /// authored plan exists to be reviewed before anything acts on it.
+    pub fn from_stages(
+        objective: impl Into<String>,
+        rationale: Vec<String>,
+        stages: Vec<Stage>,
+    ) -> Self {
+        // Renumber so the sequence is authoritative regardless of what the
+        // author supplied, and keep ids consistent with `Stage::new`.
+        let stages: Vec<Stage> = stages
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut stage)| {
+                let sequence = index as u32 + 1;
+                stage.sequence = sequence;
+                stage.id = format!("stage_{sequence}");
+                stage
+            })
+            .collect();
+        let next_stage = next_stage_after(&stages, None);
+        let now = crate::now_rfc3339();
+        Self {
+            id: PlanId::generate(),
+            version: 1,
+            objective: objective.into(),
+            kind: WorkBreakdownKind::Planned,
+            approved: false,
+            paused: false,
+            rationale,
+            stages,
+            current_stage: None,
+            next_stage,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
     pub fn progress(&self) -> (usize, usize) {
         (
             self.stages
@@ -2444,6 +2491,57 @@ mod tests {
             })
             .expect("session");
         (store.clone(), OrchestrationStore::new(store), session)
+    }
+
+    #[test]
+    fn authored_stages_replace_the_template_and_are_renumbered() {
+        // The whole point of an authored plan is that it says something the
+        // template cannot. Stage numbering is the harness's business, so an
+        // author's sequence values are overwritten rather than trusted.
+        let mut first = Stage::new(9, "Add the flag", "Add `plan_mode` to UiState");
+        first.changed_files = vec!["crates/nexus-app/src/uistate.rs".into()];
+        let second = Stage::new(9, "Enforce it", "Push the plan-mode policy scope");
+
+        let work = WorkBreakdown::from_stages(
+            "add plan mode",
+            vec!["read uistate.rs and loop_engine.rs".into()],
+            vec![first, second],
+        );
+
+        assert_eq!(work.kind, WorkBreakdownKind::Planned);
+        assert!(!work.approved, "an authored plan still needs approval");
+        assert_eq!(
+            work.stages.iter().map(|s| s.sequence).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            work.stages
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stage_1", "stage_2"]
+        );
+        assert_eq!(work.stages[0].title, "Add the flag");
+        assert_eq!(
+            work.stages[0].changed_files,
+            vec!["crates/nexus-app/src/uistate.rs".to_string()]
+        );
+        assert_eq!(work.next_stage.as_deref(), Some("stage_1"));
+        assert!(work.current_stage.is_none());
+
+        // And it is genuinely not the template.
+        let template = WorkBreakdown::generate("add plan mode", WorkEstimate::default());
+        assert_ne!(
+            template
+                .stages
+                .iter()
+                .map(|s| s.title.clone())
+                .collect::<Vec<_>>(),
+            work.stages
+                .iter()
+                .map(|s| s.title.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

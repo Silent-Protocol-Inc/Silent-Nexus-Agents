@@ -256,6 +256,7 @@ fn build_bar(app: &App) -> StatusBar {
         tokens_in: 0,
         tokens_out: 0,
         permission_mode: nexus_app::services::permission_mode(&app.config.policy).to_string(),
+        plan_mode: app.read_ui_state(|s| s.plan_mode),
     }
 }
 
@@ -395,7 +396,15 @@ async fn event_loop(
                 if accept_turn_sequence(&mut st, turn_id, sequence) {
                     match message {
                         TurnMessage::Event { turn_id, event, .. } => {
+                            // Approval ends the mode for good, so persist it:
+                            // a restart during the execution that follows must
+                            // not come back still refusing to write.
+                            let approved_plan =
+                                matches!(*event, LoopEvent::PlanModeEnded { approved: true });
                             apply_loop_event(&mut st, &turn_id, *event);
+                            if approved_plan {
+                                let _ = app.update_ui_state(|s| s.plan_mode = false);
+                            }
                         }
                         TurnMessage::Done { turn_id, result, .. } => {
                             if apply_turn_done(&mut st, &turn_id, result) {
@@ -1903,6 +1912,14 @@ fn handle_effect(
         Effect::SetActivityMode(mode) => {
             st.set_activity_mode(mode);
             st.toast(format!("activity view → {}", mode.as_str()), Sev::Ok);
+        }
+        Effect::SetPlanMode(on) => {
+            st.bar.plan_mode = on;
+            if on {
+                st.toast("plan mode on — describe the change; nothing is written until you approve the plan", Sev::Ok);
+            } else {
+                st.toast("plan mode off", Sev::Ok);
+            }
         }
         Effect::SetTranscriptDetail(detail) => {
             st.detail_level = detail;
@@ -3517,6 +3534,17 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
                 st.terminal_events.insert(turn_key, id);
             }
         }
+        // The loop pops its own policy scope; the UI flag is cleared here so
+        // the indicator and the enforcement agree. A declined plan keeps the
+        // mode on so the next message refines the draft instead of running it.
+        LoopEvent::PlanModeEnded { approved } => {
+            if approved {
+                st.bar.plan_mode = false;
+                st.toast("plan approved — running it now", Sev::Ok);
+            } else {
+                st.toast("plan declined — still in plan mode", Sev::Warn);
+            }
+        }
         LoopEvent::PlanPromoted {
             work,
             from,
@@ -3906,6 +3934,7 @@ mod tests {
                 tokens_in: 0,
                 tokens_out: 0,
                 permission_mode: "default".into(),
+                plan_mode: false,
             },
             Vec::new(),
             nexus_core::ThinkingMode::Auto,
