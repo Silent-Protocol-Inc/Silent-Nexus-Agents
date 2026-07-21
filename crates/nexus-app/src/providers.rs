@@ -603,7 +603,11 @@ pub async fn refresh_catalog(app: &App) -> Vec<ProviderEntry> {
         .collect()
         .await;
     refreshed.sort_by(|left, right| left.id.cmp(&right.id));
-    let _ = reconcile_managed_inventory(app, &refreshed);
+    if let Err(error) = reconcile_managed_inventory(app, &refreshed) {
+        // Swallowing this left the operator staring at models the server no
+        // longer has, with nothing anywhere saying why.
+        tracing::warn!(%error, "managed model inventory could not be reconciled");
+    }
     refreshed
 }
 
@@ -707,12 +711,23 @@ fn bundled_limits(model_id: &str) -> Option<(usize, usize)> {
 }
 
 fn apply_effective_limits(config: &mut ModelConfig, discovered: &DiscoveredModel) {
+    // A self-hosted server allocates a KV cache the size of the requested
+    // context before it answers, so the reported maximum is a ceiling to
+    // record, not a window to request. Hosted providers charge per token
+    // instead and are happy to be told the full number.
+    let record_context = |config: &mut ModelConfig, context: usize, source| {
+        if config.is_self_hosted() {
+            config.context_ceiling = Some(context);
+            config.context_window = context.min(nexus_core::config::SELF_HOSTED_DEFAULT_CONTEXT);
+        } else {
+            config.context_window = context;
+        }
+        config.context_limit_source = source;
+    };
     if let Some(context) = discovered.context_window {
-        config.context_window = context;
-        config.context_limit_source = LimitSource::ProviderMetadata;
+        record_context(config, context, LimitSource::ProviderMetadata);
     } else if let Some((context, _)) = bundled_limits(&discovered.id) {
-        config.context_window = context;
-        config.context_limit_source = LimitSource::BundledCatalog;
+        record_context(config, context, LimitSource::BundledCatalog);
     }
     if let Some(output) = discovered.max_output_tokens {
         config.max_output_tokens = output;
@@ -720,6 +735,12 @@ fn apply_effective_limits(config: &mut ModelConfig, discovered: &DiscoveredModel
     } else if let Some((_, output)) = bundled_limits(&discovered.id) {
         config.max_output_tokens = output;
         config.output_limit_source = LimitSource::BundledCatalog;
+    } else if config.is_self_hosted()
+        && config.output_limit_source == LimitSource::ConfiguredConservative
+    {
+        // Nothing to go on, and the general 1024-token default truncates a
+        // local model mid-answer for no benefit — these tokens are not metered.
+        config.max_output_tokens = nexus_core::config::SELF_HOSTED_DEFAULT_OUTPUT;
     }
 }
 
@@ -1544,5 +1565,59 @@ mod tests {
         assert!(!first.contains("alice"));
         assert!(!first.contains("secret"));
         assert_eq!(first.len(), 64);
+    }
+
+    fn discovered_with(context: Option<usize>) -> DiscoveredModel {
+        DiscoveredModel {
+            id: "qwen3.5:9b".into(),
+            size_bytes: None,
+            family: None,
+            parameter_size: None,
+            quantization: None,
+            display_name: None,
+            description: None,
+            context_window: context,
+            max_output_tokens: None,
+            context_limit_source: context.map(|_| LimitSource::ProviderMetadata),
+            output_limit_source: None,
+            reasoning: None,
+        }
+    }
+
+    #[test]
+    fn a_self_hosted_context_maximum_is_recorded_rather_than_requested() {
+        let mut model = ModelConfig {
+            provider: "ollama".into(),
+            limit_mode: LimitMode::Auto,
+            ..Default::default()
+        };
+        apply_effective_limits(&mut model, &discovered_with(Some(262_144)));
+        assert_eq!(model.context_ceiling, Some(262_144));
+        assert_eq!(
+            model.context_window,
+            nexus_core::config::SELF_HOSTED_DEFAULT_CONTEXT,
+            "the server allocates this much before it answers",
+        );
+        assert_eq!(
+            model.max_output_tokens,
+            nexus_core::config::SELF_HOSTED_DEFAULT_OUTPUT,
+            "1024 completion tokens truncates a local model for no saving",
+        );
+    }
+
+    #[test]
+    fn a_hosted_provider_still_gets_the_full_reported_window() {
+        let mut model = ModelConfig {
+            provider: "anthropic".into(),
+            limit_mode: LimitMode::Auto,
+            ..Default::default()
+        };
+        apply_effective_limits(&mut model, &discovered_with(Some(200_000)));
+        assert_eq!(model.context_window, 200_000);
+        assert_eq!(model.context_ceiling, None);
+        assert_eq!(
+            model.max_output_tokens, 1024,
+            "output tokens are metered here; the conservative default stands",
+        );
     }
 }

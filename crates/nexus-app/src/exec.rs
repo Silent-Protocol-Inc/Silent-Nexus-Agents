@@ -62,6 +62,7 @@ pub enum View {
     Sandbox,
     Init,
     Config,
+    Budgets,
     Branch,
     Commit,
     CommandMenu(String),
@@ -1238,6 +1239,8 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
         CommandId::Audit => Effect::Report(services::audit_report(app, args.first().copied(), 30)?),
         CommandId::Config => match args.first().copied() {
             None if ctx.interactive => Effect::View(View::Config),
+            Some("budgets") if ctx.interactive => Effect::View(View::Budgets),
+            Some("budgets") => Effect::Report(services::limits_report(app)),
             None | Some("show") | Some("advanced") => Effect::Report(services::config_report(app)),
             Some("path") => Effect::Report(
                 Report::new("configuration paths")

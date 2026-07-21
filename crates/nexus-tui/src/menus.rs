@@ -1716,7 +1716,7 @@ pub fn config_menu() -> Menu {
                 .detail("approved durable project/global memory"),
             MenuItem::new("Web…", UiAction::InsertInput("/config set workspace web.enabled true".into()))
                 .detail("typed web enablement and safe limits; weakening changes require confirmation"),
-            MenuItem::new("Budgets…", UiAction::InsertInput("/config set workspace limits.max_steps_per_turn 24".into()))
+            MenuItem::new("Budgets", UiAction::Load(LoadRequest::Budgets))
                 .detail("turn, token, cost, runtime, memory, and delegation budgets"),
             MenuItem::new("MCP…", UiAction::Load(LoadRequest::Mcp))
                 .detail("servers, transport, trust, timeouts, and allowlisted environment names"),

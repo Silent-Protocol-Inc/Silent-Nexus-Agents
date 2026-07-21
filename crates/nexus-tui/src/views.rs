@@ -96,6 +96,12 @@ pub enum UiAction {
         paths: Vec<String>,
         message: String,
     },
+    /// Write typed configuration values in one scope. Carries only the fields
+    /// a form actually changed.
+    ApplyConfigValues {
+        workspace: bool,
+        entries: Vec<(String, String)>,
+    },
 }
 
 /// Data loads the event loop performs in the background for views.
@@ -131,6 +137,7 @@ pub enum LoadRequest {
     Sandbox,
     Init,
     Config,
+    Budgets,
     Branch,
     Commit,
     Connector,
@@ -769,23 +776,45 @@ impl SecretInput {
 pub struct FormField {
     pub label: &'static str,
     pub value: String,
+    /// The value this field was opened with. A form that writes configuration
+    /// compares against it so submitting only persists what was actually
+    /// edited, instead of pinning every default as an override.
+    pub original: String,
     pub hint: &'static str,
     pub secret: bool,
+    /// Heading rendered above this field, starting a new group.
+    pub section: Option<&'static str>,
+    /// Configuration key this field writes, relative to its block. Empty for
+    /// fields that are not a config value (the scope selector).
+    pub config_key: &'static str,
 }
 
 impl FormField {
     fn new(label: &'static str, value: impl Into<String>, hint: &'static str) -> Self {
+        let value = value.into();
         Self {
             label,
-            value: value.into(),
+            original: value.clone(),
+            value,
             hint,
             secret: false,
+            section: None,
+            config_key: "",
         }
     }
 
     fn secret(mut self) -> Self {
         self.secret = true;
         self
+    }
+
+    fn section(mut self, section: &'static str) -> Self {
+        self.section = Some(section);
+        self
+    }
+
+    fn edited(&self) -> bool {
+        self.value.trim() != self.original.trim()
     }
 
     pub fn shown_value(&self) -> String {
@@ -804,6 +833,7 @@ pub enum FormKind {
     CustomEndpoint,
     SessionTitle,
     GitCommit,
+    Budgets,
 }
 
 /// A guided multi-field form (goal creation, custom endpoints).
@@ -852,6 +882,142 @@ impl Form {
                 ),
             ],
             focus: 0,
+            error: None,
+        }
+    }
+
+    /// Edit the `[limits]` block. Every field is shown with its effective
+    /// value so the operator adjusts a number rather than composing a
+    /// `/config set` line and guessing the path.
+    pub fn budgets(limits: &nexus_core::config::LimitsConfig) -> Self {
+        // (label, config key under `limits.`, value, hint)
+        let fields = [
+            (
+                "scope",
+                "",
+                "workspace".to_string(),
+                "workspace = this project · global = all projects",
+            ),
+            (
+                "steps per turn",
+                "max_steps_per_turn",
+                limits.max_steps_per_turn.to_string(),
+                "agent-loop iterations before the turn stops",
+            ),
+            (
+                "model calls per turn",
+                "max_model_calls_per_turn",
+                limits.max_model_calls_per_turn.to_string(),
+                "provider requests in one foreground turn",
+            ),
+            (
+                "tool calls per turn",
+                "max_tool_calls_per_turn",
+                limits.max_tool_calls_per_turn.to_string(),
+                "tool executions in one foreground turn",
+            ),
+            (
+                "retries",
+                "max_retries",
+                limits.max_retries.to_string(),
+                "consecutive invalid model actions before stopping",
+            ),
+            (
+                "repeated calls",
+                "max_repeated_calls",
+                limits.max_repeated_calls.to_string(),
+                "identical tool calls before loop detection stops",
+            ),
+            (
+                "failures per turn",
+                "max_failures_per_turn",
+                limits.max_failures_per_turn.to_string(),
+                "recoverable failures before the turn stops",
+            ),
+            (
+                "tokens per turn",
+                "max_tokens_per_turn",
+                limits.max_tokens_per_turn.to_string(),
+                "input + output ceiling for a metered provider",
+            ),
+            (
+                "self-hosted tokens",
+                "self_hosted_max_tokens_per_turn",
+                limits.self_hosted_max_tokens_per_turn.to_string(),
+                "ceiling for ollama / llamacpp — unmetered tokens",
+            ),
+            (
+                "cost per turn (µ)",
+                "max_cost_micros_per_turn",
+                limits.max_cost_micros_per_turn.to_string(),
+                "provider-reported micro-units; 0 disables the check",
+            ),
+            (
+                "completion reserve",
+                "completion_reserve_tokens",
+                limits.completion_reserve_tokens.to_string(),
+                "tokens held back for the answer when packing context",
+            ),
+            (
+                "turn runtime (min)",
+                "max_turn_runtime_min",
+                limits.max_turn_runtime_min.to_string(),
+                "wall-clock ceiling for one foreground turn",
+            ),
+            (
+                "memory writes",
+                "max_memory_writes_per_turn",
+                limits.max_memory_writes_per_turn.to_string(),
+                "durable memory writes one turn may initiate",
+            ),
+            (
+                "subagents per run",
+                "max_subagents_per_run",
+                limits.max_subagents_per_run.to_string(),
+                "subagents created by one root run",
+            ),
+            (
+                "recursion depth",
+                "max_recursion_depth",
+                limits.max_recursion_depth.to_string(),
+                "delegation ancestry depth",
+            ),
+            (
+                "goal steps",
+                "goal_step_budget",
+                limits.goal_step_budget.to_string(),
+                "default step budget for a new goal",
+            ),
+            (
+                "goal runtime (min)",
+                "goal_runtime_budget_min",
+                limits.goal_runtime_budget_min.to_string(),
+                "default wall-clock budget for a new goal",
+            ),
+        ];
+        let sections = [
+            ("scope", "where"),
+            ("steps per turn", "turn"),
+            ("tokens per turn", "tokens & cost"),
+            ("turn runtime (min)", "time & delegation"),
+            ("goal steps", "goals"),
+        ];
+        let fields = fields
+            .into_iter()
+            .map(|(label, key, value, hint)| {
+                let mut field = FormField::new(label, value, hint);
+                field.config_key = key;
+                match sections.iter().find(|(first, _)| *first == label) {
+                    Some((_, section)) => field.section(section),
+                    None => field,
+                }
+            })
+            .collect();
+        Self {
+            title: "budgets".into(),
+            kind: FormKind::Budgets,
+            fields,
+            focus: 1,
             error: None,
         }
     }
@@ -993,6 +1159,38 @@ impl Form {
                     return Err("selected files and a commit message are required".into());
                 }
                 Ok(UiAction::PrepareCommit { paths, message })
+            }
+            FormKind::Budgets => {
+                let workspace = match self.field("scope").to_ascii_lowercase().as_str() {
+                    "workspace" => true,
+                    "global" => false,
+                    other => {
+                        return Err(format!("scope must be workspace or global, got `{other}`"))
+                    }
+                };
+                let mut entries = Vec::new();
+                for field in self
+                    .fields
+                    .iter()
+                    .filter(|field| !field.config_key.is_empty())
+                {
+                    // Every budget is validated, edited or not, so a bad value
+                    // elsewhere in the form is reported before anything is
+                    // written — but only edits are persisted, so opening the
+                    // form and pressing Enter does not pin the defaults.
+                    let value = match field.label {
+                        // Zero is meaningful: it turns cost enforcement off.
+                        "cost per turn (µ)" => parse_non_negative(&field.value, field.label)?,
+                        _ => parse_num(&field.value, field.label)?,
+                    };
+                    if field.edited() {
+                        entries.push((format!("limits.{}", field.config_key), value.to_string()));
+                    }
+                }
+                if entries.is_empty() {
+                    return Err("no budget was changed".into());
+                }
+                Ok(UiAction::ApplyConfigValues { workspace, entries })
             }
         }
     }
@@ -1800,6 +1998,94 @@ mod tests {
         ));
         p.done = true;
         assert!(matches!(p.handle_key(key(KeyCode::Esc)), Outcome::Close));
+    }
+
+    fn set_budget(form: &mut Form, label: &str, value: &str) {
+        let field = form
+            .fields
+            .iter_mut()
+            .find(|field| field.label == label)
+            .unwrap_or_else(|| panic!("no `{label}` field"));
+        field.value = value.into();
+    }
+
+    #[test]
+    fn the_budget_form_writes_only_what_was_edited() {
+        let limits = nexus_core::config::LimitsConfig::default();
+        let mut form = Form::budgets(&limits);
+
+        // Opening the form and submitting must not pin sixteen defaults as
+        // overrides — there is nothing to save.
+        assert_eq!(
+            form.parse().expect_err("nothing edited"),
+            "no budget was changed"
+        );
+
+        set_budget(&mut form, "self-hosted tokens", "8000000");
+        match form.parse().expect("one edit") {
+            UiAction::ApplyConfigValues { workspace, entries } => {
+                assert!(workspace, "the form opens on the workspace scope");
+                assert_eq!(
+                    entries,
+                    vec![(
+                        "limits.self_hosted_max_tokens_per_turn".to_string(),
+                        "8000000".to_string()
+                    )],
+                );
+            }
+            other => panic!("expected a config write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_budget_form_rejects_values_the_config_would_refuse() {
+        let limits = nexus_core::config::LimitsConfig::default();
+        let mut form = Form::budgets(&limits);
+
+        set_budget(&mut form, "steps per turn", "none");
+        assert!(form
+            .parse()
+            .expect_err("not a number")
+            .contains("steps per turn"));
+
+        set_budget(&mut form, "steps per turn", "0");
+        assert!(form.parse().expect_err("zero steps").contains("positive"));
+
+        // Zero cost is the documented way to disable cost enforcement, so it
+        // must survive the same validation pass.
+        set_budget(&mut form, "steps per turn", "24");
+        set_budget(&mut form, "cost per turn (µ)", "0");
+        set_budget(&mut form, "goal steps", "400");
+        match form.parse().expect("valid") {
+            UiAction::ApplyConfigValues { entries, .. } => {
+                assert_eq!(
+                    entries,
+                    vec![("limits.goal_step_budget".into(), "400".into())]
+                );
+            }
+            other => panic!("expected a config write, got {other:?}"),
+        }
+
+        set_budget(&mut form, "scope", "elsewhere");
+        assert!(form
+            .parse()
+            .expect_err("bad scope")
+            .contains("workspace or global"));
+    }
+
+    #[test]
+    fn the_budget_form_writes_to_the_global_scope_on_request() {
+        let limits = nexus_core::config::LimitsConfig::default();
+        let mut form = Form::budgets(&limits);
+        set_budget(&mut form, "scope", "global");
+        set_budget(&mut form, "tokens per turn", "400000");
+        match form.parse().expect("valid") {
+            UiAction::ApplyConfigValues { workspace, entries } => {
+                assert!(!workspace);
+                assert_eq!(entries.len(), 1);
+            }
+            other => panic!("expected a config write, got {other:?}"),
+        }
     }
 
     fn discriminant_name(outcome: &Outcome) -> &'static str {

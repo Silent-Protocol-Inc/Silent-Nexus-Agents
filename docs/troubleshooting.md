@@ -57,6 +57,26 @@ budget is crossed. Reduce command verbosity or use a typed tool that stores
 full output as an artifact; do not raise limits without reviewing denial-of-
 service risk.
 
+## A self-hosted model never produces a first token
+
+`no first token after 600s` means the request reached the server and the server
+never answered — not that the connection failed. On `ollama`/`llamacpp` the
+usual cause is a model too large for the host's memory, made worse by a large
+`context_window`: the KV cache is allocated before generation starts.
+
+Diagnose in this order:
+
+1. `snx model test <name>` — reports connection, first token, and total
+   separately. A healthy self-hosted model answers a minimal prompt in seconds;
+   minutes means the host is swapping.
+2. `snx model health` — reports whether Ollama has the model loaded and how much
+   of it is in VRAM.
+3. Lower `context_window` for that model, or pick a smaller model.
+
+An Ollama `unexpected EOF` is the model process dying, which is almost always
+the server running out of memory. Neither raising `first_token_timeout_secs` nor
+retrying fixes that — give the host more memory or run a smaller model.
+
 ## Older config rejects the container image
 
 1.0 requires `name@sha256:<64 hex>` for `sandbox.container_image`. Replace

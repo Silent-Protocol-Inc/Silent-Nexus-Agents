@@ -109,6 +109,10 @@ impl OllamaProvider {
             "model": self.model,
             "messages": messages,
             "stream": stream,
+            // Keep the model resident between turns. Without this Ollama
+            // unloads on its own schedule and the next turn pays a full cold
+            // load before it can emit a token.
+            "keep_alive": self.config.keep_alive(),
             "options": {
                 "num_ctx": self.config.context_window,
                 "num_predict": request.max_tokens.unwrap_or(self.config.max_output_tokens),
@@ -317,15 +321,19 @@ impl ModelProvider for OllamaProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<Completion> {
         let body = self.build_body(&request, false);
+        // A non-streaming Ollama response arrives only once generation is
+        // finished, so the whole answer has to fit inside the first-token
+        // allowance — the stall timeout has nothing to measure here.
+        let first_token = self.config.first_token_timeout_secs();
         let response = tokio::time::timeout(
-            Duration::from_secs(self.config.timeout_secs.max(1)),
+            Duration::from_secs(first_token),
             self.client
                 .post(format!("{}/api/chat", self.base_url))
                 .json(&body)
                 .send(),
         )
         .await
-        .map_err(|_| NexusError::ModelTimeout(self.config.timeout_secs.max(1)))?
+        .map_err(|_| NexusError::ModelFirstTokenTimeout(first_token))?
         .map_err(|e| {
             if e.is_timeout() {
                 NexusError::ModelTimeout(self.config.timeout_secs)
@@ -378,15 +386,19 @@ impl ModelProvider for OllamaProvider {
         request: CompletionRequest,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
         let body = self.build_body(&request, true);
+        // Ollama does not write response headers until it has something to
+        // say, so this deadline covers model load and prefill — work that is
+        // categorically different from a stream going silent mid-answer.
+        let first_token = self.config.first_token_timeout_secs();
         let response = tokio::time::timeout(
-            Duration::from_secs(self.config.timeout_secs.max(1)),
+            Duration::from_secs(first_token),
             self.client
                 .post(format!("{}/api/chat", self.base_url))
                 .json(&body)
                 .send(),
         )
         .await
-        .map_err(|_| NexusError::ModelTimeout(self.config.timeout_secs.max(1)))?
+        .map_err(|_| NexusError::ModelFirstTokenTimeout(first_token))?
         .map_err(|e| NexusError::Provider {
             provider: "ollama".into(),
             message: format!("request failed: {e}"),
@@ -566,6 +578,28 @@ mod tests {
             ..Default::default()
         };
         OllamaProvider::new(&config).expect("provider")
+    }
+
+    #[test]
+    fn requests_keep_the_model_resident_and_ask_only_for_the_configured_window() {
+        let config = ModelConfig {
+            provider: "ollama".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "qwen3.5:9b".into(),
+            context_window: 32_768,
+            context_ceiling: Some(262_144),
+            max_output_tokens: 4_096,
+            ..Default::default()
+        };
+        let body = OllamaProvider::new(&config)
+            .expect("provider")
+            .build_body(&ModelRequest::default(), true);
+        assert_eq!(body["keep_alive"], "30m");
+        assert_eq!(
+            body["options"]["num_ctx"], 32_768,
+            "the architecture ceiling is a capability, not a KV cache to allocate",
+        );
+        assert_eq!(body["options"]["num_predict"], 4_096);
     }
 
     #[test]

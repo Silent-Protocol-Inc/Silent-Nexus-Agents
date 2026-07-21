@@ -1833,6 +1833,7 @@ fn handle_effect(
                 nexus_app::View::Sandbox => LoadRequest::Sandbox,
                 nexus_app::View::Init => LoadRequest::Init,
                 nexus_app::View::Config => LoadRequest::Config,
+                nexus_app::View::Budgets => LoadRequest::Budgets,
                 nexus_app::View::Branch => LoadRequest::Branch,
                 nexus_app::View::Commit => LoadRequest::Commit,
                 nexus_app::View::Connector => LoadRequest::Connector,
@@ -2429,6 +2430,30 @@ fn handle_action(
             report = report.header("content").line(memory.content.clone());
             st.push_overlay(Overlay::Pager(Pager::new("memory detail", report)));
         }
+        UiAction::ApplyConfigValues { workspace, entries } => {
+            let scope = if workspace { "workspace" } else { "global" };
+            let mut report = nexus_app::Report::new("budgets updated").field("scope", scope);
+            let mut failed = None;
+            for (path, value) in &entries {
+                match nexus_app::services::config_set(app, workspace, path, value) {
+                    Ok(_) => report = report.field(path.clone(), value.clone()),
+                    Err(error) => {
+                        // Stop at the first rejection rather than leaving a
+                        // half-applied set the operator cannot see.
+                        failed = Some(format!("{path}: {error}"));
+                        break;
+                    }
+                }
+            }
+            match failed {
+                Some(error) => st.system_sev(format!("budgets: {error}"), Sev::Err),
+                None => {
+                    st.push_report(&report.line("reload applies the validated effective values"));
+                    st.close_overlays();
+                    spawn_reload(st, app, ui_tx);
+                }
+            }
+        }
         UiAction::SelectHarnessProfile(profile_id) => {
             match app
                 .harness()
@@ -2504,6 +2529,7 @@ fn action_changes_active_context(action: &UiAction) -> bool {
             | UiAction::RenameSession { .. }
             | UiAction::RolloverSummary { .. }
             | UiAction::PrepareCommit { .. }
+            | UiAction::ApplyConfigValues { .. }
             | UiAction::SelectHarnessProfile(_)
     )
 }
@@ -2733,6 +2759,9 @@ fn start_load(
         }
         LoadRequest::Config => {
             push_menu(st, app, menus::config_menu());
+        }
+        LoadRequest::Budgets => {
+            st.push_overlay(Overlay::Form(views::Form::budgets(&app.config.limits)));
         }
         LoadRequest::Branch => match nexus_app::gitx::branches(&app.workspace) {
             Ok(branches) => {

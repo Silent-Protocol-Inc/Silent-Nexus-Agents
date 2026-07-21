@@ -2994,6 +2994,60 @@ pub fn subagent_limits_report(app: &App, session_id: &str) -> Result<Report> {
         ))
 }
 
+/// The full `[limits]` block, for `/config budgets` outside the TUI.
+pub fn limits_report(app: &App) -> Report {
+    let limits = &app.config.limits;
+    Report::new("budgets")
+        .header("turn")
+        .field("steps per turn", limits.max_steps_per_turn.to_string())
+        .field(
+            "model calls per turn",
+            limits.max_model_calls_per_turn.to_string(),
+        )
+        .field(
+            "tool calls per turn",
+            limits.max_tool_calls_per_turn.to_string(),
+        )
+        .field("retries", limits.max_retries.to_string())
+        .field("repeated calls", limits.max_repeated_calls.to_string())
+        .field("failures per turn", limits.max_failures_per_turn.to_string())
+        .header("tokens & cost")
+        .field("tokens per turn", limits.max_tokens_per_turn.to_string())
+        .field(
+            "self-hosted tokens per turn",
+            limits.self_hosted_max_tokens_per_turn.to_string(),
+        )
+        .field(
+            "cost per turn (micro-units)",
+            limits.max_cost_micros_per_turn.to_string(),
+        )
+        .field(
+            "completion reserve",
+            limits.completion_reserve_tokens.to_string(),
+        )
+        .header("time & delegation")
+        .field(
+            "turn runtime (min)",
+            limits.max_turn_runtime_min.to_string(),
+        )
+        .field(
+            "memory writes per turn",
+            limits.max_memory_writes_per_turn.to_string(),
+        )
+        .field("subagents per run", limits.max_subagents_per_run.to_string())
+        .field("recursion depth", limits.max_recursion_depth.to_string())
+        .header("goals")
+        .field("goal steps", limits.goal_step_budget.to_string())
+        .field(
+            "goal runtime (min)",
+            limits.goal_runtime_budget_min.to_string(),
+        )
+        .line_sev(
+            "edit interactively with /config budgets, or /config set <scope> limits.<field> <value>",
+            Sev::Dim,
+        )
+}
+
 pub fn subagent_spawn(
     app: &App,
     session_id: &str,

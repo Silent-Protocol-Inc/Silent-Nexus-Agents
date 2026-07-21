@@ -22,6 +22,25 @@ Gemini, Groq, Mistral, xAI, DeepSeek, and OpenRouter. Their official compatible
 base URLs are prefilled, while model discovery and manual model entry remain
 available.
 
+### Self-hosted defaults (`ollama`, `llamacpp`)
+
+A server you run yourself is billed in memory and time rather than tokens, so
+discovery configures these providers differently:
+
+| Field | Default | Why |
+| --- | --- | --- |
+| `context_window` | `8192` | The server allocates a KV cache this large *before* the first token. Providers report the architecture maximum (often 128k–256k); requesting it can take a modest host minutes, or push it into swap. |
+| `context_ceiling` | reported maximum | Recorded, not requested. Raise `context_window` towards it deliberately, per model, once you know the host has the memory. |
+| `max_output_tokens` | `4096` | These tokens are not metered, and the general 1024 default truncates mid-answer. |
+| `first_token_timeout_secs` | `600` | Loading a model and running prefill is not a stalled stream. `timeout_secs` stays the between-chunks stall timeout. |
+| `keep_alive` (Ollama) | `30m` | Keeps the model resident so the next turn does not pay another cold load. |
+
+If a turn ends with *no first token after 600s*, the server is usually loading a
+model too large for its memory. Check `snx model test <name>` — it reports
+connection, first-token, and total latency separately — and prefer a model the
+host can hold. An Ollama `unexpected EOF` means the model process died, which is
+almost always the server running out of memory.
+
 ### Using GPT
 
 OpenAI's API is OpenAI-compatible, so GPT works with the dedicated `openai`

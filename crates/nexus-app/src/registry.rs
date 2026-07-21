@@ -753,7 +753,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "config",
         aliases: &[],
         summary: "Effective configuration (secrets redacted)",
-        usage: "[path]",
+        usage: "[show|budgets|path|set <scope> <path> <value>|reset <scope> <path>]",
         category: CommandCategory::Inspection,
         interactive: true,
         non_interactive: true,

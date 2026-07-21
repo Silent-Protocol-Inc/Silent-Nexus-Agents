@@ -104,7 +104,13 @@ apply when web access is enabled.
 Secret-like content is refused.
 
 `[limits]` bounds turn steps, retries, repeated calls, goal steps/runtime, and
-reserved completion tokens.
+reserved completion tokens. `/config budgets` edits the whole block
+interactively; `snx config budgets` prints the effective values.
+
+`max_tokens_per_turn` exists to bound spend, so it does not apply to a server
+you run yourself: a turn routed to `ollama` or `llamacpp` uses
+`self_hosted_max_tokens_per_turn` (default `5000000`) instead. A turn that falls
+back onto a metered provider is re-bounded by the metered ceiling immediately.
 
 `[mcp.<name>]` configures `stdio` or `http`, command/arguments or URL, enabled
 state, trust, environment allowlist, and timeout. Imports are disabled and

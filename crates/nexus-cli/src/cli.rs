@@ -580,6 +580,9 @@ pub struct AuthLoginArgs {
 pub enum ConfigCmd {
     /// Print the effective configuration.
     Show,
+    /// Print the effective turn, token, cost, and delegation budgets.
+    /// Edit them interactively with `/config budgets` in the TUI.
+    Budgets,
     /// Print the config file locations.
     Path,
     /// Print the configuration JSON schema.

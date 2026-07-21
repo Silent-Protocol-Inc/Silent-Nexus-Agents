@@ -201,8 +201,13 @@ pub struct ModelConfig {
     /// device/browser login is performed by the trusted `codex` CLI and Silent
     /// Nexus consumes the resulting token. `None`/empty = use `api_key_env`.
     pub auth: Option<String>,
-    /// Context window in tokens (prompt + completion).
+    /// Context window in tokens (prompt + completion). Self-hosted servers
+    /// allocate a KV cache this large before answering, so this is a runtime
+    /// cost, not a capability claim — see `context_ceiling`.
     pub context_window: usize,
+    /// Largest context the provider says the model architecture supports.
+    /// Informational, and the ceiling `context_window` may be raised to.
+    pub context_ceiling: Option<usize>,
     /// Maximum completion tokens per request.
     pub max_output_tokens: usize,
     /// Whether limits are operator-owned or refreshed from provider metadata.
@@ -221,11 +226,77 @@ pub struct ModelConfig {
     /// Reasoning effort for models that honor it (`low`, `medium`, `high`, …).
     /// Used by the `codex` provider; ignored elsewhere.
     pub reasoning_effort: Option<String>,
-    /// Request timeout in seconds.
+    /// Stall timeout in seconds: how long a stream may go silent between
+    /// chunks, and the total deadline for a non-streaming request to a
+    /// metered provider.
     pub timeout_secs: u64,
+    /// Seconds allowed for the *first* token. A self-hosted server has to load
+    /// the model and run prefill before it can emit anything, which is not the
+    /// same thing as a stalled stream. `None` uses the provider default:
+    /// [`SELF_HOSTED_FIRST_TOKEN_SECS`] for `ollama`/`llamacpp`, otherwise
+    /// `timeout_secs`.
+    pub first_token_timeout_secs: Option<u64>,
+    /// How long Ollama keeps the model resident after a request (its
+    /// `keep_alive`). `None` sends [`OLLAMA_DEFAULT_KEEP_ALIVE`] so the next
+    /// turn does not pay another cold load. Ignored by other providers.
+    pub keep_alive: Option<String>,
     /// Verify TLS certificates for remote endpoints. Disabling this is an
     /// explicit advanced setting and never the default.
     pub tls_verify: bool,
+}
+
+/// Context window a self-hosted model is configured with when the provider
+/// only reports the architecture maximum. The reported maximum is a capability
+/// ceiling; requesting it forces the server to allocate a KV cache that large
+/// before the first token, which on a host without spare memory takes long
+/// enough to look like a hang. The operator raises it deliberately, per model.
+///
+/// Kept equal to [`ModelConfig::default()`]'s window: a 9B model asked for 32k
+/// on a CPU-only server produced no first token in ten minutes, while the same
+/// server answers at this size. Erring low costs some context on a capable
+/// host; erring high makes a modest host look broken.
+pub const SELF_HOSTED_DEFAULT_CONTEXT: usize = 8_192;
+
+/// Completion ceiling for a discovered self-hosted model whose provider
+/// reports no output limit. The 1024 general default truncates mid-answer.
+pub const SELF_HOSTED_DEFAULT_OUTPUT: usize = 4_096;
+
+/// First-token allowance for self-hosted providers: enough for a cold load and
+/// prefill of a large model on a CPU-only host.
+pub const SELF_HOSTED_FIRST_TOKEN_SECS: u64 = 600;
+
+/// Default Ollama `keep_alive`.
+pub const OLLAMA_DEFAULT_KEEP_ALIVE: &str = "30m";
+
+impl ModelConfig {
+    /// Whether this entry talks to a server the operator runs. Deliberately
+    /// keyed on the provider kind rather than on the URL: a self-hosted server
+    /// is frequently reached over the network, and its cost, latency, and
+    /// warm-up behaviour are properties of the software, not of the host.
+    pub fn is_self_hosted(&self) -> bool {
+        matches!(self.provider.as_str(), "ollama" | "llamacpp")
+    }
+
+    /// Effective first-token allowance in seconds.
+    pub fn first_token_timeout_secs(&self) -> u64 {
+        self.first_token_timeout_secs
+            .filter(|secs| *secs > 0)
+            .unwrap_or(if self.is_self_hosted() {
+                SELF_HOSTED_FIRST_TOKEN_SECS
+            } else {
+                self.timeout_secs
+            })
+            .max(1)
+    }
+
+    /// Effective Ollama `keep_alive`.
+    pub fn keep_alive(&self) -> &str {
+        self.keep_alive
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(OLLAMA_DEFAULT_KEEP_ALIVE)
+    }
 }
 
 impl Default for ModelConfig {
@@ -241,6 +312,7 @@ impl Default for ModelConfig {
             allow_existing_claude: false,
             auth: None,
             context_window: 8192,
+            context_ceiling: None,
             max_output_tokens: 1024,
             limit_mode: LimitMode::Manual,
             context_limit_source: LimitSource::ConfiguredConservative,
@@ -250,6 +322,8 @@ impl Default for ModelConfig {
             temperature: None,
             reasoning_effort: None,
             timeout_secs: 120,
+            first_token_timeout_secs: None,
+            keep_alive: None,
             tls_verify: true,
         }
     }
@@ -469,6 +543,10 @@ pub struct LimitsConfig {
     pub max_failures_per_turn: u32,
     /// Aggregate input and output token ceiling per turn.
     pub max_tokens_per_turn: usize,
+    /// Aggregate token ceiling for a turn routed to a self-hosted provider
+    /// (`ollama`, `llamacpp`). Those tokens are not metered, so the ceiling
+    /// above — which exists to bound spend — is the wrong guard for them.
+    pub self_hosted_max_tokens_per_turn: usize,
     /// Provider-reported monetary ceiling in micro-units per turn. Zero
     /// disables cost enforcement; non-zero fails closed for adapters that do
     /// not expose monetary usage.
@@ -499,6 +577,7 @@ impl Default for LimitsConfig {
             max_tool_calls_per_turn: 48,
             max_failures_per_turn: 6,
             max_tokens_per_turn: 250_000,
+            self_hosted_max_tokens_per_turn: 5_000_000,
             max_cost_micros_per_turn: 0,
             max_turn_runtime_min: 30,
             max_memory_writes_per_turn: 8,
@@ -1050,6 +1129,7 @@ fn migrate_value(mut value: toml::Value, file: &Path) -> Result<toml::Value> {
     }
     // Version 1 is current; future migrations chain here:
     // if version < 2 { …rewrite value…; }
+    repair_discovered_self_hosted_limits(&mut value);
     if let Some(table) = value.as_table_mut() {
         table.insert(
             "version".into(),
@@ -1057,6 +1137,72 @@ fn migrate_value(mut value: toml::Value, file: &Path) -> Result<toml::Value> {
         );
     }
     Ok(value)
+}
+
+/// Repair self-hosted model entries that discovery wrote with the provider's
+/// architecture maximum as their runtime context window.
+///
+/// `/api/show` reports the largest context the model *can* address. Persisting
+/// that as `context_window` made every request ask the server to allocate a KV
+/// cache of that size up front — on a CPU-only host a 256k cache takes long
+/// enough that the request looks like a hang and trips the timeout. The
+/// reported maximum is kept as `context_ceiling` so nothing is lost and the
+/// operator can raise the window deliberately.
+///
+/// Only entries discovery owns are touched: `limit_mode = "auto"` with
+/// `context_limit_source = "provider_metadata"`. A hand-written window is the
+/// operator's decision and is left exactly as written. In-memory only — the
+/// corrected values reach disk the next time the entry is saved — and
+/// idempotent, because a repaired entry already carries `context_ceiling`.
+fn repair_discovered_self_hosted_limits(value: &mut toml::Value) {
+    let Some(models) = value.get_mut("models").and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    for (_, model) in models.iter_mut() {
+        let Some(model) = model.as_table_mut() else {
+            continue;
+        };
+        let self_hosted = matches!(
+            model.get("provider").and_then(toml::Value::as_str),
+            Some("ollama" | "llamacpp")
+        );
+        let discovery_owned = model.get("limit_mode").and_then(toml::Value::as_str) == Some("auto")
+            && model
+                .get("context_limit_source")
+                .and_then(toml::Value::as_str)
+                == Some("provider_metadata");
+        if !self_hosted || !discovery_owned || model.contains_key("context_ceiling") {
+            continue;
+        }
+        let window = model
+            .get("context_window")
+            .and_then(toml::Value::as_integer)
+            .unwrap_or(0);
+        if window > SELF_HOSTED_DEFAULT_CONTEXT as i64 {
+            model.insert("context_ceiling".into(), toml::Value::Integer(window));
+            model.insert(
+                "context_window".into(),
+                toml::Value::Integer(SELF_HOSTED_DEFAULT_CONTEXT as i64),
+            );
+        }
+        // The same entries were saved with the general 1024-token completion
+        // default, which truncates mid-answer on a model this size.
+        let conservative_output = model
+            .get("output_limit_source")
+            .and_then(toml::Value::as_str)
+            == Some("configured_conservative");
+        if conservative_output
+            && model
+                .get("max_output_tokens")
+                .and_then(toml::Value::as_integer)
+                == Some(1024)
+        {
+            model.insert(
+                "max_output_tokens".into(),
+                toml::Value::Integer(SELF_HOSTED_DEFAULT_OUTPUT as i64),
+            );
+        }
+    }
 }
 
 /// Deep-merge `overlay` into `base` (tables merge; scalars/arrays replace).
@@ -1284,5 +1430,127 @@ mod tests {
             "second write must not clobber the first"
         );
         assert_eq!(parsed["sandbox"]["backend"].as_str(), Some("none"));
+    }
+
+    fn migrated(text: &str) -> toml::Value {
+        migrate_value(
+            toml::from_str(text).expect("parse"),
+            std::path::Path::new("models.toml"),
+        )
+        .expect("migrate")
+    }
+
+    #[test]
+    fn a_discovered_self_hosted_context_maximum_becomes_a_ceiling_not_a_request() {
+        let value = migrated(
+            r#"
+            [models.qwen]
+            provider = "ollama"
+            model = "qwen3.5:9b"
+            context_window = 262144
+            max_output_tokens = 1024
+            limit_mode = "auto"
+            context_limit_source = "provider_metadata"
+            output_limit_source = "configured_conservative"
+            "#,
+        );
+        let model = &value["models"]["qwen"];
+        assert_eq!(
+            model["context_window"].as_integer(),
+            Some(SELF_HOSTED_DEFAULT_CONTEXT as i64),
+            "the runtime window must not ask for a 256k KV cache",
+        );
+        assert_eq!(
+            model["context_ceiling"].as_integer(),
+            Some(262144),
+            "the reported maximum must survive so it can be raised back",
+        );
+        assert_eq!(
+            model["max_output_tokens"].as_integer(),
+            Some(SELF_HOSTED_DEFAULT_OUTPUT as i64),
+        );
+
+        // Idempotent: a repaired entry carries a ceiling and is left alone.
+        let again = migrated(&toml::to_string(&value).expect("serialize"));
+        assert_eq!(
+            again["models"]["qwen"]["context_window"].as_integer(),
+            Some(SELF_HOSTED_DEFAULT_CONTEXT as i64),
+        );
+        assert_eq!(
+            again["models"]["qwen"]["context_ceiling"].as_integer(),
+            Some(262144),
+        );
+    }
+
+    #[test]
+    fn a_hand_written_context_window_is_the_operators_decision() {
+        let value = migrated(
+            r#"
+            [models.big]
+            provider = "ollama"
+            model = "gemma4:26b"
+            context_window = 131072
+            max_output_tokens = 1024
+            limit_mode = "manual"
+            context_limit_source = "configured_conservative"
+            output_limit_source = "configured_conservative"
+
+            [models.remote]
+            provider = "anthropic"
+            model = "claude"
+            context_window = 200000
+            limit_mode = "auto"
+            context_limit_source = "provider_metadata"
+            "#,
+        );
+        assert_eq!(
+            value["models"]["big"]["context_window"].as_integer(),
+            Some(131072)
+        );
+        assert!(value["models"]["big"].get("context_ceiling").is_none());
+        assert_eq!(
+            value["models"]["big"]["max_output_tokens"].as_integer(),
+            Some(1024)
+        );
+        assert_eq!(
+            value["models"]["remote"]["context_window"].as_integer(),
+            Some(200000),
+            "only self-hosted servers pay for the window up front",
+        );
+    }
+
+    #[test]
+    fn self_hosted_models_get_a_first_token_allowance_for_cold_loads() {
+        let ollama = ModelConfig {
+            provider: "ollama".into(),
+            ..Default::default()
+        };
+        assert!(ollama.is_self_hosted());
+        assert_eq!(
+            ollama.first_token_timeout_secs(),
+            SELF_HOSTED_FIRST_TOKEN_SECS,
+        );
+        assert_eq!(ollama.keep_alive(), OLLAMA_DEFAULT_KEEP_ALIVE);
+
+        let metered = ModelConfig {
+            provider: "anthropic".into(),
+            timeout_secs: 90,
+            ..Default::default()
+        };
+        assert!(!metered.is_self_hosted());
+        assert_eq!(
+            metered.first_token_timeout_secs(),
+            90,
+            "a metered provider answers or fails inside its normal timeout",
+        );
+
+        let explicit = ModelConfig {
+            provider: "ollama".into(),
+            first_token_timeout_secs: Some(1800),
+            keep_alive: Some(" 2h ".into()),
+            ..Default::default()
+        };
+        assert_eq!(explicit.first_token_timeout_secs(), 1800);
+        assert_eq!(explicit.keep_alive(), "2h");
     }
 }

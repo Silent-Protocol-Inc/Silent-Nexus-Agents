@@ -1557,6 +1557,9 @@ pub async fn config(app: &App, cmd: ConfigCmd) -> Result<()> {
         ConfigCmd::Show => {
             println!("{}", serde_json::to_string_pretty(&*app.config)?);
         }
+        ConfigCmd::Budgets => {
+            ui.render_report(&nexus_app::services::limits_report(app));
+        }
         ConfigCmd::Path => {
             ui.field("global", &app.paths.global_file.display().to_string());
             ui.field(

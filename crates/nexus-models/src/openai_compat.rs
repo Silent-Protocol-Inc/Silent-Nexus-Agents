@@ -54,7 +54,12 @@ pub(crate) fn local_accelerator(local: bool) -> Option<String> {
 impl OpenAiCompatProvider {
     pub fn new(kind: &'static str, config: &ModelConfig) -> Result<Self> {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs))
+            // No client-wide response deadline: reqwest applies it to the
+            // whole exchange, which killed healthy long streams — a llama.cpp
+            // answer still arriving token by token was cut off the moment it
+            // outlived `timeout_secs`. Deadlines are applied per phase below:
+            // an allowance for the first token, then a stall timeout between
+            // chunks.
             .connect_timeout(Duration::from_secs(10))
             .danger_accept_invalid_certs(!config.tls_verify)
             .build()
@@ -372,11 +377,14 @@ impl ModelProvider for OpenAiCompatProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<Completion> {
         let body = self.build_body(&request, false);
-        let response = self
-            .request(&body)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(self.kind, &e, self.config.timeout_secs))?;
+        // A non-streaming response only lands once generation is finished, so
+        // the whole answer has to fit inside the first-token allowance.
+        let first_token = self.config.first_token_timeout_secs();
+        let response =
+            tokio::time::timeout(Duration::from_secs(first_token), self.request(&body).send())
+                .await
+                .map_err(|_| NexusError::ModelFirstTokenTimeout(first_token))?
+                .map_err(|e| map_reqwest_error(self.kind, &e, self.config.timeout_secs))?;
         let status = response.status();
         let text = response
             .text()
@@ -419,11 +427,14 @@ impl ModelProvider for OpenAiCompatProvider {
         let body = self.build_body(&request, true);
         let kind = self.kind;
         let timeout = self.config.timeout_secs;
-        let response = self
-            .request(&body)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(kind, &e, timeout))?;
+        // Headers arrive when the server has something to say, so this covers
+        // model load and prefill on a self-hosted endpoint.
+        let first_token = self.config.first_token_timeout_secs();
+        let response =
+            tokio::time::timeout(Duration::from_secs(first_token), self.request(&body).send())
+                .await
+                .map_err(|_| NexusError::ModelFirstTokenTimeout(first_token))?
+                .map_err(|e| map_reqwest_error(kind, &e, timeout))?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -433,6 +444,9 @@ impl ModelProvider for OpenAiCompatProvider {
             });
         }
         let byte_stream = response.bytes_stream();
+        // Once tokens are flowing, `timeout_secs` measures what it is named
+        // for: silence. A stream that keeps producing is never cut off.
+        let idle_timeout = Duration::from_secs(timeout.max(1));
         let stream = futures::stream::unfold(
             (
                 byte_stream,
@@ -448,7 +462,16 @@ impl ModelProvider for OpenAiCompatProvider {
                     if finished {
                         return None;
                     }
-                    match bytes.next().await {
+                    let next = match tokio::time::timeout(idle_timeout, bytes.next()).await {
+                        Ok(next) => next,
+                        Err(_) => {
+                            return Some((
+                                Err(NexusError::ModelTimeout(idle_timeout.as_secs())),
+                                (bytes, parser, pending, true),
+                            ));
+                        }
+                    };
+                    match next {
                         Some(Ok(chunk)) => {
                             let mut new_events = Vec::new();
                             for item in parser.feed(&chunk) {
@@ -630,5 +653,76 @@ mod tests {
         let body = provider.build_body(&CompletionRequest::default(), false);
         assert_eq!(body["reasoning_effort"], "low");
         assert!(body.get("reasoning").is_none());
+    }
+
+    /// A self-hosted server that takes a while to produce the first token is
+    /// working, not stalled. Before the first-token allowance existed, the
+    /// client-wide deadline cut this exchange off at `timeout_secs`.
+    #[tokio::test]
+    async fn a_slow_first_response_is_not_mistaken_for_a_stalled_one() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(1200))
+                    .set_body_json(serde_json::json!({
+                        "choices": [{
+                            "message": {"content": "warm at last"},
+                            "finish_reason": "stop",
+                        }]
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let config = ModelConfig {
+            provider: "llamacpp".into(),
+            base_url: server.uri(),
+            model: "local".into(),
+            timeout_secs: 1,
+            first_token_timeout_secs: Some(20),
+            ..Default::default()
+        };
+        let provider = OpenAiCompatProvider::new("llamacpp", &config).expect("provider");
+        let completion = provider
+            .complete(CompletionRequest::default())
+            .await
+            .expect("a slow first response must still be delivered");
+        assert_eq!(completion.content, "warm at last");
+    }
+
+    #[tokio::test]
+    async fn the_first_token_allowance_is_reported_as_such_when_it_runs_out() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+            .mount(&server)
+            .await;
+
+        let config = ModelConfig {
+            provider: "llamacpp".into(),
+            base_url: server.uri(),
+            model: "local".into(),
+            timeout_secs: 120,
+            first_token_timeout_secs: Some(1),
+            ..Default::default()
+        };
+        let provider = OpenAiCompatProvider::new("llamacpp", &config).expect("provider");
+        let error = provider
+            .complete(CompletionRequest::default())
+            .await
+            .expect_err("the allowance must expire");
+        assert!(
+            matches!(error, NexusError::ModelFirstTokenTimeout(1)),
+            "expected a first-token timeout, got {error}",
+        );
     }
 }

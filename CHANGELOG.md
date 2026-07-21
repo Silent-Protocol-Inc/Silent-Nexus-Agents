@@ -1,5 +1,53 @@
 # Changelog
 
+## [2.5.0] — 2026-07-22
+
+### Added
+
+- `/config budgets` opens a real editor for the `[limits]` block. Choosing
+  "Budgets…" used to type a `/config set workspace limits.max_steps_per_turn 24`
+  line into the prompt and leave the operator to edit a string and guess the
+  path; every other structured config surface opens a view. The form shows each
+  budget's effective value in a labelled group, validates on submit, and writes
+  only the fields that were actually changed, so opening it never pins defaults
+  as overrides. `snx config budgets` prints the same block non-interactively.
+- `limits.self_hosted_max_tokens_per_turn` (default 5000000). The aggregate
+  token ceiling exists to bound spend, which is not what limits a server the
+  operator runs, so turns routed to `ollama` or `llamacpp` are bounded by this
+  instead. Keyed on the provider kind rather than on whether the endpoint is
+  loopback — a self-hosted server is routinely reached over the network.
+- `models.<name>.context_ceiling`, `first_token_timeout_secs`, and `keep_alive`.
+
+### Fixed
+
+- Discovered Ollama models were configured with the architecture maximum from
+  `/api/show` — 262144 tokens for several common models — and that number was
+  sent as `num_ctx` on every request, so the server had to allocate a KV cache
+  that large before it could emit a single token. Discovery now records the
+  reported maximum as `context_ceiling` and configures a runtime window the
+  operator raises deliberately. Existing discovery-owned entries are migrated;
+  a hand-written `context_window` is left exactly as written.
+- A provider timeout was a single deadline on time-to-first-byte, which for a
+  self-hosted server includes model load and prefill. Loading a model is not a
+  stalled stream: there is now a separate first-token allowance (600s for
+  `ollama`/`llamacpp`), while `timeout_secs` measures what it is named for —
+  silence between chunks. The new `no first token after Ns` error names the knob
+  to turn instead of reporting a generic timeout, and is deliberately not
+  retried, since waiting out the allowance again does not fix it.
+- `llamacpp` set a client-wide response deadline, which reqwest applies to the
+  whole exchange. A healthy answer still arriving token by token was cut off the
+  moment it outlived `timeout_secs`.
+- Ollama requests now send `keep_alive`, so a model stays resident between turns
+  instead of being unloaded and cold-loaded again on the next one.
+- Discovered self-hosted models were saved with the general 1024-token
+  completion default, which truncates mid-answer for no saving.
+- Models deleted from a reachable server stayed in the configured list forever.
+  Reconciliation was running and its failures were being discarded by `let _ =`,
+  so neither the pruning nor an explanation ever reached the operator.
+- Forms did not scroll. The overlay was sized to its field count and clipped to
+  the terminal, so a form longer than the window hid its tail and the key hints
+  scrolled away with it. The viewport now follows focus and the hints stay put.
+
 ## [2.4.2] — 2026-07-20
 
 ### Fixed

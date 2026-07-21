@@ -2353,18 +2353,71 @@ fn draw_secret(f: &mut Frame, area: Rect, s: &SecretInput, t: &Theme) {
 }
 
 fn draw_form(f: &mut Frame, area: Rect, form: &Form, t: &Theme) {
-    let rect = overlay_rect(
-        area,
-        76,
-        (form.fields.len() as u16 * 2 + 6).min(area.height),
-    );
+    // Chrome: two border rows, a blank line, an optional error line, and the
+    // key hint. Whatever is left belongs to the fields.
+    let chrome = 4 + u16::from(form.error.is_some());
+    let wanted = form.fields.len() as u16 * 2 + chrome;
+    let rect = overlay_rect(area, 76, wanted.min(area.height));
+    let body_height = rect.height.saturating_sub(chrome) as usize;
+
+    // Each field renders as one row, plus a hint row when focused and a
+    // heading row when it opens a section. Fit as many as the viewport holds,
+    // scrolled so the focused field is always inside it — without this a form
+    // longer than the terminal simply hides its tail.
+    let row_height = |index: usize| {
+        1 + usize::from(form.fields[index].section.is_some()) + usize::from(index == form.focus)
+    };
+    let mut first = form.focus;
+    let mut used = row_height(form.focus);
+    let mut last = form.focus;
+    loop {
+        let grew_up = first > 0 && used + row_height(first - 1) <= body_height;
+        if grew_up {
+            first -= 1;
+            used += row_height(first);
+        }
+        let grew_down = last + 1 < form.fields.len() && used + row_height(last + 1) <= body_height;
+        if grew_down {
+            last += 1;
+            used += row_height(last);
+        }
+        if !grew_up && !grew_down {
+            break;
+        }
+    }
+
     f.render_widget(Clear, rect);
+    let title = if form.fields.len() > last - first + 1 {
+        format!(
+            " {} · {}/{} ",
+            form.title,
+            form.focus + 1,
+            form.fields.len()
+        )
+    } else {
+        format!(" {} ", form.title)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(t.primary())
-        .title(Span::styled(format!(" {} ", form.title), t.brand()));
+        .title(Span::styled(title, t.brand()));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
     let mut lines: Vec<Line> = Vec::new();
-    for (i, field) in form.fields.iter().enumerate() {
+    for (i, field) in form
+        .fields
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(last + 1 - first)
+    {
+        if let Some(section) = field.section {
+            lines.push(Line::from(Span::styled(
+                format!("{:>20}  ", section.to_uppercase()),
+                t.muted(),
+            )));
+        }
         let focused = i == form.focus;
         let label_style = if focused { t.primary() } else { t.muted() };
         let value_style = if focused { t.selection() } else { t.text() };
@@ -2375,30 +2428,51 @@ fn draw_form(f: &mut Frame, area: Rect, form: &Form, t: &Theme) {
             Span::styled(cursor, t.primary()),
         ]));
         if focused {
+            // The hint is guidance, not content: truncate it rather than let
+            // it wrap back to column zero and break the label alignment.
             lines.push(Line::from(Span::styled(
-                format!("{:>22}{}", "", field.hint),
+                format!(
+                    "{:>22}{}",
+                    "",
+                    truncate_width(field.hint, inner.width.saturating_sub(22) as usize)
+                ),
                 t.muted(),
             )));
         }
     }
-    lines.push(Line::from(""));
+    // Chrome lives at the bottom of the frame rather than after the fields:
+    // in a form long enough to scroll, trailing content is exactly what falls
+    // off, and the key hints are the last thing that should disappear.
+    let mut chrome_lines: Vec<Line> = vec![Line::from("")];
     if let Some(err) = &form.error {
-        lines.push(Line::from(Span::styled(format!(" ✗ {err}"), t.failure())));
+        chrome_lines.push(Line::from(Span::styled(format!(" ✗ {err}"), t.failure())));
     }
     let extra = if matches!(form.kind, crate::views::FormKind::CustomEndpoint) {
         " · Ctrl+T test connection"
     } else {
         ""
     };
-    lines.push(Line::from(Span::styled(
+    chrome_lines.push(Line::from(Span::styled(
         format!(" Tab/↑↓ move · Enter next/submit · Esc cancel{extra}"),
         t.muted(),
     )));
+    let chrome_height = (chrome_lines.len() as u16).min(inner.height);
+    let body = Rect {
+        height: inner.height.saturating_sub(chrome_height),
+        ..inner
+    };
+    let footer = Rect {
+        y: inner.y + body.height,
+        height: chrome_height,
+        ..inner
+    };
     f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        rect,
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        body,
+    );
+    f.render_widget(
+        Paragraph::new(Text::from(chrome_lines)).wrap(Wrap { trim: false }),
+        footer,
     );
 }
 
@@ -3632,6 +3706,47 @@ mod tests {
             (160, 50, 913_345_411_169_358_918),
         ];
         assert_eq!(actual, expected);
+    }
+
+    /// The budget form has more fields than an 80x24 terminal has rows. Before
+    /// the viewport existed the overlay was simply clipped, so the last fields
+    /// could be focused but never seen.
+    #[test]
+    fn a_long_form_keeps_the_focused_field_on_screen() {
+        let limits = nexus_core::config::LimitsConfig::default();
+        for (width, height) in [(80, 24), (80, 16), (60, 20)] {
+            for focus in 0..limits_form_len() {
+                let mut state = representative_state();
+                let mut form = crate::views::Form::budgets(&limits);
+                let label = form.fields[focus].label;
+                form.focus = focus;
+                state.push_overlay(Overlay::Form(form));
+                let out = render_state_text(&mut state, width, height);
+                assert!(
+                    out.contains(label),
+                    "field `{label}` (index {focus}) is unreachable at {width}x{height}:\n{out}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "visual aid: cargo test -p nexus-tui budget_form_looks_right -- --ignored --nocapture"]
+    fn budget_form_looks_right() {
+        for focus in [0, 8, 16] {
+            let mut state = representative_state();
+            let mut form =
+                crate::views::Form::budgets(&nexus_core::config::LimitsConfig::default());
+            form.focus = focus;
+            state.push_overlay(Overlay::Form(form));
+            println!("{}", render_state_text(&mut state, 80, 24));
+        }
+    }
+
+    fn limits_form_len() -> usize {
+        crate::views::Form::budgets(&nexus_core::config::LimitsConfig::default())
+            .fields
+            .len()
     }
 
     #[test]

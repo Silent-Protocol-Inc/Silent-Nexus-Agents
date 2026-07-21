@@ -214,6 +214,13 @@
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "self_hosted_max_tokens_per_turn": {
+          "default": 5000000,
+          "description": "Aggregate token ceiling for a turn routed to a self-hosted provider (`ollama`, `llamacpp`). Those tokens are not metered, so the ceiling above — which exists to bound spend — is the wrong guard for them.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -333,6 +340,16 @@
           "description": "Base URL of the endpoint, e.g. `http://127.0.0.1:8080/v1`.",
           "type": "string"
         },
+        "context_ceiling": {
+          "default": null,
+          "description": "Largest context the provider says the model architecture supports. Informational, and the ceiling `context_window` may be raised to.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "context_limit_source": {
           "allOf": [
             {
@@ -344,10 +361,28 @@
         },
         "context_window": {
           "default": 8192,
-          "description": "Context window in tokens (prompt + completion).",
+          "description": "Context window in tokens (prompt + completion). Self-hosted servers allocate a KV cache this large before answering, so this is a runtime cost, not a capability claim — see `context_ceiling`.",
           "format": "uint",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "first_token_timeout_secs": {
+          "default": null,
+          "description": "Seconds allowed for the *first* token. A self-hosted server has to load the model and run prefill before it can emit anything, which is not the same thing as a stalled stream. `None` uses the provider default: [`SELF_HOSTED_FIRST_TOKEN_SECS`] for `ollama`/`llamacpp`, otherwise `timeout_secs`.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "keep_alive": {
+          "default": null,
+          "description": "How long Ollama keeps the model resident after a request (its `keep_alive`). `None` sends [`OLLAMA_DEFAULT_KEEP_ALIVE`] so the next turn does not pay another cold load. Ignored by other providers.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "limit_mode": {
           "allOf": [
@@ -416,7 +451,7 @@
         },
         "timeout_secs": {
           "default": 120,
-          "description": "Request timeout in seconds.",
+          "description": "Stall timeout in seconds: how long a stream may go silent between chunks, and the total deadline for a non-streaming request to a metered provider.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
@@ -788,7 +823,8 @@
         "max_subagents_per_run": 8,
         "max_tokens_per_turn": 250000,
         "max_tool_calls_per_turn": 48,
-        "max_turn_runtime_min": 30
+        "max_turn_runtime_min": 30,
+        "self_hosted_max_tokens_per_turn": 5000000
       }
     },
     "mcp": {

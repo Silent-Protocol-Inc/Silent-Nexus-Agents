@@ -305,6 +305,7 @@ impl App {
                 max_tool_calls: self.config.limits.max_tool_calls_per_turn,
                 max_failures: self.config.limits.max_failures_per_turn,
                 max_total_tokens: self.config.limits.max_tokens_per_turn,
+                self_hosted_max_total_tokens: self.config.limits.self_hosted_max_tokens_per_turn,
                 max_cost_micros: self.config.limits.max_cost_micros_per_turn,
                 max_duration_ms: u64::from(self.config.limits.max_turn_runtime_min)
                     .saturating_mul(60_000),

@@ -34,6 +34,11 @@ pub enum NexusError {
     InvalidAction(String),
     #[error("model request timed out after {0}s")]
     ModelTimeout(u64),
+    #[error(
+        "no first token after {0}s — the model may still be loading; raise \
+         `first_token_timeout_secs` or lower `context_window` for this model"
+    )]
+    ModelFirstTokenTimeout(u64),
 
     // --- Tools ---
     #[error("unknown tool: {0}")]
@@ -99,6 +104,11 @@ impl NexusError {
     pub fn is_provider_retryable(&self) -> bool {
         match self {
             NexusError::ModelTimeout(_) => true,
+            // Deliberately not retryable. Waiting out the first-token
+            // allowance and getting nothing means the model is too large for
+            // the requested context or the server is wedged — neither is fixed
+            // by paying that wait again, and the error says which knob to turn.
+            NexusError::ModelFirstTokenTimeout(_) => false,
             NexusError::Provider { message, .. } => match provider_http_status(message) {
                 Some(408 | 409 | 425 | 429) => true,
                 Some(status) if status >= 500 => true,
@@ -164,5 +174,15 @@ mod tests {
         assert!(provider("HTTP 429 Too Many Requests").is_provider_retryable());
         assert!(provider("HTTP 503 Service Unavailable").is_provider_retryable());
         assert!(NexusError::ModelTimeout(30).is_provider_retryable());
+    }
+
+    #[test]
+    fn a_first_token_timeout_is_reported_rather_than_retried() {
+        // Retrying means waiting the whole allowance again for a condition the
+        // operator has to fix, so the message has to reach them the first time.
+        assert!(!NexusError::ModelFirstTokenTimeout(600).is_provider_retryable());
+        let text = NexusError::ModelFirstTokenTimeout(600).to_string();
+        assert!(text.contains("first_token_timeout_secs"), "{text}");
+        assert!(text.contains("context_window"), "{text}");
     }
 }

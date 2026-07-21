@@ -132,6 +132,7 @@ max_model_calls_per_turn = 24
 max_tool_calls_per_turn = 48
 max_failures_per_turn = 6
 max_tokens_per_turn = 250000
+self_hosted_max_tokens_per_turn = 5000000  # ollama / llamacpp: unmetered tokens
 max_cost_micros_per_turn = 0      # requires provider-reported monetary usage
 max_turn_runtime_min = 30
 max_memory_writes_per_turn = 8

@@ -49,6 +49,10 @@ pub struct TurnLimits {
     pub max_tool_calls: u32,
     pub max_failures: u32,
     pub max_total_tokens: usize,
+    /// Token ceiling for a turn routed to a self-hosted provider. The ceiling
+    /// above exists to bound spend, which is not what limits a server the
+    /// operator runs, so those turns get their own much larger allowance.
+    pub self_hosted_max_total_tokens: usize,
     /// Monetary budget in provider-reported micro-units. Zero disables it.
     /// Runs fail closed when non-zero and the adapter cannot report cost.
     pub max_cost_micros: u64,
@@ -56,6 +60,20 @@ pub struct TurnLimits {
     pub max_memory_writes: u32,
     pub max_subagents: u32,
     pub max_recursion_depth: u8,
+}
+
+impl TurnLimits {
+    /// Aggregate token ceiling for a turn served by `provider_kind`.
+    ///
+    /// Keyed on the provider kind rather than on whether the endpoint URL is
+    /// loopback: a self-hosted server is routinely reached over the network,
+    /// and what makes its tokens unmetered is the software, not the host.
+    pub fn token_ceiling(&self, provider_kind: &str) -> usize {
+        match provider_kind {
+            "ollama" | "llamacpp" => self.self_hosted_max_total_tokens,
+            _ => self.max_total_tokens,
+        }
+    }
 }
 
 impl Default for TurnLimits {
@@ -68,6 +86,7 @@ impl Default for TurnLimits {
             max_tool_calls: 48,
             max_failures: 6,
             max_total_tokens: 250_000,
+            self_hosted_max_total_tokens: 5_000_000,
             max_cost_micros: 0,
             max_duration_ms: 30 * 60 * 1_000,
             max_memory_writes: 8,
@@ -1153,10 +1172,13 @@ impl AgentLoop {
             .models
             .get(&session.model)
             .map(|model| model.provider.clone());
+        let provider_kind = context.provider_id.clone().unwrap_or_default();
         let context = repository.set_active_context(context)?;
 
-        let mut state =
-            HarnessLoopState::new(session.id.as_str(), harness_limits(&self.runtime.limits));
+        let mut state = HarnessLoopState::new(
+            session.id.as_str(),
+            harness_limits(&self.runtime.limits, &provider_kind),
+        );
         state.profile_id = context.profile_id.clone();
         state.goal_id = context.goal_id.clone();
         state.plan_id = context.plan_id.clone();
@@ -1908,7 +1930,7 @@ impl AgentLoop {
         // and goal-budget clamps above rather than overriding any of them.
         effective_limits =
             crate::thinking::modulate_limits(&effective_limits, self.runtime.thinking);
-        harness_state.limits = harness_limits(&effective_limits);
+        harness_state.limits = harness_limits(&effective_limits, provider.kind());
         harness_state.deadline_ms = Some(harness_state.started_at_ms.saturating_add(
             i64::try_from(harness_state.limits.max_runtime_ms).unwrap_or(i64::MAX),
         ));
@@ -2298,11 +2320,11 @@ impl AgentLoop {
             input_tokens += completion.usage.prompt_tokens;
             output_tokens += completion.usage.completion_tokens;
             harness_state.token_count = input_tokens.saturating_add(output_tokens) as u64;
-            if input_tokens.saturating_add(output_tokens) > limits.max_total_tokens {
-                let message = format!(
-                    "stopped: aggregate token budget {} exhausted",
-                    limits.max_total_tokens
-                );
+            // Read from the provider that actually served this step, so a
+            // fallback onto a metered model re-tightens the ceiling mid-turn.
+            let token_ceiling = limits.token_ceiling(provider.kind());
+            if input_tokens.saturating_add(output_tokens) > token_ceiling {
+                let message = format!("stopped: aggregate token budget {token_ceiling} exhausted");
                 self.emit(LoopEvent::Error(message.clone()));
                 return Ok(LoopOutcome {
                     final_message: message,
@@ -3991,13 +4013,13 @@ impl AgentLoop {
     }
 }
 
-fn harness_limits(limits: &TurnLimits) -> HarnessLoopLimits {
+fn harness_limits(limits: &TurnLimits, provider_kind: &str) -> HarnessLoopLimits {
     HarnessLoopLimits {
         max_iterations: limits.max_steps,
         max_model_calls: limits.max_model_calls,
         max_tool_calls: limits.max_tool_calls,
         max_retries: limits.max_retries,
-        max_tokens: limits.max_total_tokens as u64,
+        max_tokens: limits.token_ceiling(provider_kind) as u64,
         max_cost_micros: limits.max_cost_micros,
         max_runtime_ms: limits.max_duration_ms,
         max_failures: limits.max_failures,
@@ -4085,7 +4107,9 @@ fn error_stop_reason(error: &NexusError) -> Option<LoopStopReason> {
             LoopStopReason::RecursionLimit
         }
         NexusError::BudgetExhausted(_) => LoopStopReason::CostBudget,
-        NexusError::ModelTimeout(_) => LoopStopReason::TimeBudget,
+        NexusError::ModelTimeout(_) | NexusError::ModelFirstTokenTimeout(_) => {
+            LoopStopReason::TimeBudget
+        }
         NexusError::Provider { .. }
         | NexusError::Config(_)
         | NexusError::ConfigFile { .. }
@@ -4598,5 +4622,27 @@ mod tests {
         assert!(scopes.iter().any(|scope| scope.plan_id.is_some()));
         assert!(scopes.iter().any(|scope| scope.task_id.is_some()));
         assert!(required_fallback_scopes(&session, None).is_none());
+    }
+
+    #[test]
+    fn self_hosted_turns_are_not_bounded_by_the_spend_ceiling() {
+        let limits = TurnLimits {
+            max_total_tokens: 250_000,
+            self_hosted_max_total_tokens: 5_000_000,
+            ..Default::default()
+        };
+        assert_eq!(limits.token_ceiling("ollama"), 5_000_000);
+        assert_eq!(limits.token_ceiling("llamacpp"), 5_000_000);
+        assert_eq!(
+            limits.token_ceiling("anthropic"),
+            250_000,
+            "a metered provider keeps its spend guard",
+        );
+        assert_eq!(
+            harness_limits(&limits, "ollama").max_tokens,
+            5_000_000,
+            "the harness budget has to agree with the loop's own check",
+        );
+        assert_eq!(harness_limits(&limits, "codex").max_tokens, 250_000);
     }
 }
