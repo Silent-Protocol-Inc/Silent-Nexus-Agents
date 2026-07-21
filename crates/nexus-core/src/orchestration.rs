@@ -478,7 +478,7 @@ impl WorkBreakdown {
     }
 
     /// Build a plan from stages someone actually wrote, rather than from the
-    /// shape [`generate`] infers from the objective string.
+    /// shape [`Self::generate`] infers from the objective string.
     ///
     /// `generate` answers "what workflow does a request like this need" and
     /// produces the same Grounding/Implementation/Validation skeleton for every
