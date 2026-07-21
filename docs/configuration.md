@@ -112,6 +112,12 @@ you run yourself: a turn routed to `ollama` or `llamacpp` uses
 `self_hosted_max_tokens_per_turn` (default `5000000`) instead. A turn that falls
 back onto a metered provider is re-bounded by the metered ceiling immediately.
 
+`self_hosted_context_window` (default `32768`) is the context an `ollama` or
+`llamacpp` model is auto-configured with when its provider reports only an
+architecture maximum. It is one number for every such model; see
+[providers.md](providers.md#changing-the-window) for how to raise it or pin a
+single model instead.
+
 `[mcp.<name>]` configures `stdio` or `http`, command/arguments or URL, enabled
 state, trust, environment allowlist, and timeout. Imports are disabled and
 untrusted until explicitly reviewed.

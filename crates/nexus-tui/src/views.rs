@@ -947,6 +947,12 @@ impl Form {
                 "ceiling for ollama / llamacpp — unmetered tokens",
             ),
             (
+                "self-hosted context",
+                "self_hosted_context_window",
+                limits.self_hosted_context_window.to_string(),
+                "window auto-configured per ollama / llamacpp model",
+            ),
+            (
                 "cost per turn (µ)",
                 "max_cost_micros_per_turn",
                 limits.max_cost_micros_per_turn.to_string(),

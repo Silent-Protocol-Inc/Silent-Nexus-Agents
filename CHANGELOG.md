@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.7.0] — 2026-07-22
+
+### Changed
+
+- Self-hosted models are configured with a **32768**-token context window, up
+  from 8192. The 8192 default shipped in 2.5.0 to stop a model from timing out
+  and did not: that model was running out of memory and failed at every window
+  size, while every capable model on the same server lost three quarters of its
+  context for nothing. Existing `limit_mode = "auto"` entries still sitting at
+  exactly 8192 are lifted on load; anything else is left alone.
+- An `auto` entry's window is now a pure function of its ceiling and the
+  configured default — `min(context_ceiling, limits.self_hosted_context_window)`
+  on every refresh, up or down. Previously the number a refresh produced could
+  not be predicted from configuration alone.
+
+### Added
+
+- `limits.self_hosted_context_window` (default `32768`) — one setting that moves
+  the window for every `ollama` / `llamacpp` model, editable in
+  `/config budgets` and printed by `snx config budgets`. To pin a single model
+  instead, set its `context_window` **and** `limit_mode = "manual"`, which takes
+  it out of discovery's hands; `docs/providers.md` documents both.
+
+### Fixed
+
+- `snx setup` wrote `context_window = 8192` for self-hosted starter entries,
+  which are unmetered. They now start at the self-hosted default.
+
 ## [2.6.0] — 2026-07-22
 
 ### Added

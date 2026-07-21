@@ -3018,6 +3018,10 @@ pub fn limits_report(app: &App) -> Report {
             limits.self_hosted_max_tokens_per_turn.to_string(),
         )
         .field(
+            "self-hosted context window",
+            limits.self_hosted_context_window.to_string(),
+        )
+        .field(
             "cost per turn (micro-units)",
             limits.max_cost_micros_per_turn.to_string(),
         )
@@ -4526,7 +4530,13 @@ pub fn build_config_toml(
     s.push_str("version = 1\n\n[general]\ndefault_agent = \"nexus\"\n\n");
 
     for (name, provider, base_url, model) in models {
-        let (ctx, out) = (8192, 2048);
+        // A server the operator runs charges nothing per token, so starting it
+        // at the general 8192 costs context for no saving. Hosted entries keep
+        // the conservative starter until /model reports a real limit.
+        let (ctx, out) = match provider.as_str() {
+            "ollama" | "llamacpp" => (nexus_core::config::SELF_HOSTED_DEFAULT_CONTEXT, 4096),
+            _ => (8192, 2048),
+        };
         s.push_str(&format!("[models.{name}]\n"));
         s.push_str(&format!("provider = \"{provider}\"\n"));
         s.push_str(&format!("base_url = \"{base_url}\"\n"));

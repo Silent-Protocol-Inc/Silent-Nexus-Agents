@@ -249,13 +249,18 @@ pub struct ModelConfig {
 /// only reports the architecture maximum. The reported maximum is a capability
 /// ceiling; requesting it forces the server to allocate a KV cache that large
 /// before the first token, which on a host without spare memory takes long
-/// enough to look like a hang. The operator raises it deliberately, per model.
+/// enough to look like a hang.
 ///
-/// Kept equal to [`ModelConfig::default()`]'s window: a 9B model asked for 32k
-/// on a CPU-only server produced no first token in ten minutes, while the same
-/// server answers at this size. Erring low costs some context on a capable
-/// host; erring high makes a modest host look broken.
-pub const SELF_HOSTED_DEFAULT_CONTEXT: usize = 8_192;
+/// 8192 was tried first and was too conservative. The measurement it rested on
+/// did not support it: the model that had been timing out failed at 8192 as
+/// well as at 32768, because that host could not hold a 9B model at all — an
+/// out-of-memory condition no context setting fixes. Meanwhile every capable
+/// model on the same server lost three quarters of its context for nothing.
+///
+/// This is a starting point, not a limit. `limits.self_hosted_context_window`
+/// moves it for every self-hosted model at once, and a per-model
+/// `context_window` always wins over both.
+pub const SELF_HOSTED_DEFAULT_CONTEXT: usize = 32_768;
 
 /// Completion ceiling for a discovered self-hosted model whose provider
 /// reports no output limit. The 1024 general default truncates mid-answer.
@@ -547,6 +552,15 @@ pub struct LimitsConfig {
     /// (`ollama`, `llamacpp`). Those tokens are not metered, so the ceiling
     /// above — which exists to bound spend — is the wrong guard for them.
     pub self_hosted_max_tokens_per_turn: usize,
+    /// Context window given to a self-hosted model whose provider reports only
+    /// an architecture maximum. Discovery caps the auto-derived window at this
+    /// value — the reported maximum is a capability, not a size worth
+    /// allocating on every request — so an entry with `limit_mode = "auto"`
+    /// settles at `min(context_ceiling, this)` on every refresh, up or down.
+    /// Raise it once here instead of per model. To pin one model to something
+    /// else, set its `context_window` and `limit_mode = "manual"`, which takes
+    /// the entry out of discovery's hands entirely.
+    pub self_hosted_context_window: usize,
     /// Provider-reported monetary ceiling in micro-units per turn. Zero
     /// disables cost enforcement; non-zero fails closed for adapters that do
     /// not expose monetary usage.
@@ -578,6 +592,7 @@ impl Default for LimitsConfig {
             max_failures_per_turn: 6,
             max_tokens_per_turn: 250_000,
             self_hosted_max_tokens_per_turn: 5_000_000,
+            self_hosted_context_window: SELF_HOSTED_DEFAULT_CONTEXT,
             max_cost_micros_per_turn: 0,
             max_turn_runtime_min: 30,
             max_memory_writes_per_turn: 8,
@@ -1130,6 +1145,9 @@ fn migrate_value(mut value: toml::Value, file: &Path) -> Result<toml::Value> {
     // Version 1 is current; future migrations chain here:
     // if version < 2 { …rewrite value…; }
     repair_discovered_self_hosted_limits(&mut value);
+    // Ordered after the repair: an entry repaired in this same pass lands on
+    // the current default directly and is not a candidate for the lift.
+    lift_pinned_self_hosted_windows(&mut value);
     if let Some(table) = value.as_table_mut() {
         table.insert(
             "version".into(),
@@ -1201,6 +1219,67 @@ fn repair_discovered_self_hosted_limits(value: &mut toml::Value) {
                 "max_output_tokens".into(),
                 toml::Value::Integer(SELF_HOSTED_DEFAULT_OUTPUT as i64),
             );
+        }
+    }
+}
+
+/// Raise discovery-owned self-hosted windows that an earlier release pinned at
+/// 8192.
+///
+/// That number was chosen to stop a model from timing out, and it did not: the
+/// model in question was running out of memory and failed at every window size.
+/// Every other self-hosted model on the same server paid for the mistake by
+/// losing three quarters of its context. This lifts those entries to the
+/// current default without waiting for a catalog refresh.
+///
+/// Narrow on purpose. Only a `limit_mode = "auto"` entry that discovery
+/// populated (`context_limit_source = "provider_metadata"`), that already
+/// carries the recorded `context_ceiling`, and whose window is *exactly* the
+/// old pinned value is touched. Any other number is the operator's, including
+/// a deliberate 8192 written to an overrides file — those tables carry no
+/// `provider` or `limit_mode` key and so never match.
+fn lift_pinned_self_hosted_windows(value: &mut toml::Value) {
+    /// The window the 2.5.0 repair wrote. Frozen here rather than tracking
+    /// [`SELF_HOSTED_DEFAULT_CONTEXT`]: this migration is about one specific
+    /// historical value, and must not start rewriting whatever the current
+    /// default happens to be.
+    const PINNED: i64 = 8_192;
+
+    let Some(models) = value.get_mut("models").and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    for (_, model) in models.iter_mut() {
+        let Some(model) = model.as_table_mut() else {
+            continue;
+        };
+        let self_hosted = matches!(
+            model.get("provider").and_then(toml::Value::as_str),
+            Some("ollama" | "llamacpp")
+        );
+        let discovery_owned = model.get("limit_mode").and_then(toml::Value::as_str) == Some("auto")
+            && model
+                .get("context_limit_source")
+                .and_then(toml::Value::as_str)
+                == Some("provider_metadata");
+        if !self_hosted || !discovery_owned {
+            continue;
+        }
+        let Some(ceiling) = model
+            .get("context_ceiling")
+            .and_then(toml::Value::as_integer)
+        else {
+            continue;
+        };
+        if model
+            .get("context_window")
+            .and_then(toml::Value::as_integer)
+            != Some(PINNED)
+        {
+            continue;
+        }
+        let raised = ceiling.min(SELF_HOSTED_DEFAULT_CONTEXT as i64);
+        if raised > PINNED {
+            model.insert("context_window".into(), toml::Value::Integer(raised));
         }
     }
 }
@@ -1516,6 +1595,90 @@ mod tests {
             value["models"]["remote"]["context_window"].as_integer(),
             Some(200000),
             "only self-hosted servers pay for the window up front",
+        );
+    }
+
+    #[test]
+    fn windows_pinned_at_the_old_8192_default_are_lifted_once() {
+        let value = migrated(
+            r#"
+            [models.mistral]
+            provider = "ollama"
+            model = "mistral:latest"
+            context_window = 8192
+            context_ceiling = 32768
+            max_output_tokens = 4096
+            limit_mode = "auto"
+            context_limit_source = "provider_metadata"
+            output_limit_source = "provider_metadata"
+
+            [models.tiny]
+            provider = "ollama"
+            model = "lfm2.5:1.2b"
+            context_window = 8192
+            context_ceiling = 128000
+            limit_mode = "auto"
+            context_limit_source = "provider_metadata"
+            "#,
+        );
+        assert_eq!(
+            value["models"]["mistral"]["context_window"].as_integer(),
+            Some(32_768),
+            "this model's own ceiling is the limit, and it is above the default",
+        );
+        assert_eq!(
+            value["models"]["tiny"]["context_window"].as_integer(),
+            Some(SELF_HOSTED_DEFAULT_CONTEXT as i64),
+            "a 128k ceiling is a capability, not a size to allocate every turn",
+        );
+
+        // Idempotent: a lifted entry is no longer at the pinned value.
+        let again = migrated(&toml::to_string(&value).expect("serialize"));
+        assert_eq!(
+            again["models"]["mistral"]["context_window"].as_integer(),
+            Some(32_768),
+        );
+    }
+
+    #[test]
+    fn the_lift_leaves_anything_the_operator_chose_alone() {
+        let value = migrated(
+            r#"
+            # Manual: the operator's number, whatever it is.
+            [models.manual]
+            provider = "ollama"
+            model = "a"
+            context_window = 8192
+            context_ceiling = 262144
+            limit_mode = "manual"
+            context_limit_source = "provider_metadata"
+
+            # Auto, but not the pinned value — someone moved it deliberately.
+            [models.moved]
+            provider = "ollama"
+            model = "b"
+            context_window = 16384
+            context_ceiling = 262144
+            limit_mode = "auto"
+            context_limit_source = "provider_metadata"
+
+            # An overrides file carries only the key that was set, so it has
+            # no provider and no limit_mode and must never match.
+            [models.override_only]
+            context_window = 8192
+            "#,
+        );
+        assert_eq!(
+            value["models"]["manual"]["context_window"].as_integer(),
+            Some(8192)
+        );
+        assert_eq!(
+            value["models"]["moved"]["context_window"].as_integer(),
+            Some(16384)
+        );
+        assert_eq!(
+            value["models"]["override_only"]["context_window"].as_integer(),
+            Some(8192)
         );
     }
 

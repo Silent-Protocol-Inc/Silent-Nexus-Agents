@@ -215,6 +215,13 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "self_hosted_context_window": {
+          "default": 32768,
+          "description": "Context window given to a self-hosted model whose provider reports only an architecture maximum. Discovery caps the auto-derived window at this value — the reported maximum is a capability, not a size worth allocating on every request — so an entry with `limit_mode = \"auto\"` settles at `min(context_ceiling, this)` on every refresh, up or down. Raise it once here instead of per model. To pin one model to something else, set its `context_window` and `limit_mode = \"manual\"`, which takes the entry out of discovery's hands entirely.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "self_hosted_max_tokens_per_turn": {
           "default": 5000000,
           "description": "Aggregate token ceiling for a turn routed to a self-hosted provider (`ollama`, `llamacpp`). Those tokens are not metered, so the ceiling above — which exists to bound spend — is the wrong guard for them.",
@@ -824,6 +831,7 @@
         "max_tokens_per_turn": 250000,
         "max_tool_calls_per_turn": 48,
         "max_turn_runtime_min": 30,
+        "self_hosted_context_window": 32768,
         "self_hosted_max_tokens_per_turn": 5000000
       }
     },

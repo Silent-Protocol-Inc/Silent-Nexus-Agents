@@ -690,7 +690,11 @@ fn reconcile_managed_inventory(app: &App, entries: &[ProviderEntry]) -> Result<(
             };
             if configured.limit_mode == LimitMode::Auto {
                 if let Some(model) = managed.get_mut(name) {
-                    apply_effective_limits(model, discovered);
+                    apply_effective_limits(
+                        model,
+                        discovered,
+                        app.config.limits.self_hosted_context_window,
+                    );
                 }
             }
         }
@@ -710,7 +714,11 @@ fn bundled_limits(model_id: &str) -> Option<(usize, usize)> {
     }
 }
 
-fn apply_effective_limits(config: &mut ModelConfig, discovered: &DiscoveredModel) {
+fn apply_effective_limits(
+    config: &mut ModelConfig,
+    discovered: &DiscoveredModel,
+    self_hosted_window: usize,
+) {
     // A self-hosted server allocates a KV cache the size of the requested
     // context before it answers, so the reported maximum is a ceiling to
     // record, not a window to request. Hosted providers charge per token
@@ -718,7 +726,14 @@ fn apply_effective_limits(config: &mut ModelConfig, discovered: &DiscoveredModel
     let record_context = |config: &mut ModelConfig, context: usize, source| {
         if config.is_self_hosted() {
             config.context_ceiling = Some(context);
-            config.context_window = context.min(nexus_core::config::SELF_HOSTED_DEFAULT_CONTEXT);
+            // Deliberately a function of the ceiling and the operator's
+            // configured default only — not of the previous value. `auto`
+            // means the harness owns this number, so it has to land in the
+            // same place every refresh; a model whose window drifted with
+            // its own history would be impossible to reason about. An
+            // operator who wants a different number sets `context_window`,
+            // which moves the entry to `manual` and out of this path.
+            config.context_window = context.min(self_hosted_window);
         } else {
             config.context_window = context;
         }
@@ -1170,7 +1185,11 @@ pub fn save_discovered_model_with_effort(
         ..Default::default()
     };
     model.reasoning_effort = effort.map(str::to_string);
-    apply_effective_limits(&mut model, discovered);
+    apply_effective_limits(
+        &mut model,
+        discovered,
+        app.config.limits.self_hosted_context_window,
+    );
     if let Some(env_var) = preset_env(provider_id) {
         model.api_key_env = Some(env_var.into());
         if app.credentials.exists(provider_id, "default") {
@@ -1288,7 +1307,11 @@ pub fn save_codex_model(app: &App, model_id: &str, effort: Option<&str>) -> Resu
                 provenance: nexus_models::ReasoningProvenance::ProviderMetadata,
             }),
         };
-        apply_effective_limits(&mut configured, &discovered);
+        apply_effective_limits(
+            &mut configured,
+            &discovered,
+            app.config.limits.self_hosted_context_window,
+        );
     }
     managed.insert(name.clone(), configured);
     nexus_core::config::Config::save_managed_models(&app.paths, &managed)?;
@@ -1591,7 +1614,11 @@ mod tests {
             limit_mode: LimitMode::Auto,
             ..Default::default()
         };
-        apply_effective_limits(&mut model, &discovered_with(Some(262_144)));
+        apply_effective_limits(
+            &mut model,
+            &discovered_with(Some(262_144)),
+            nexus_core::config::SELF_HOSTED_DEFAULT_CONTEXT,
+        );
         assert_eq!(model.context_ceiling, Some(262_144));
         assert_eq!(
             model.context_window,
@@ -1605,6 +1632,48 @@ mod tests {
         );
     }
 
+    /// The whole point of the knob: an operator who knows their server can
+    /// hold more raises one number and every discovered model follows, still
+    /// bounded by what the model can actually address.
+    #[test]
+    fn the_configured_self_hosted_window_moves_every_discovered_model() {
+        let mut roomy = ModelConfig {
+            provider: "ollama".into(),
+            limit_mode: LimitMode::Auto,
+            ..Default::default()
+        };
+        apply_effective_limits(&mut roomy, &discovered_with(Some(262_144)), 131_072);
+        assert_eq!(roomy.context_window, 131_072);
+
+        // The ceiling still wins: asking for more than the architecture
+        // supports is not a preference the operator can express here.
+        let mut capped = ModelConfig {
+            provider: "ollama".into(),
+            limit_mode: LimitMode::Auto,
+            ..Default::default()
+        };
+        apply_effective_limits(&mut capped, &discovered_with(Some(32_768)), 131_072);
+        assert_eq!(capped.context_window, 32_768);
+    }
+
+    /// `auto` means the harness owns the number, so a refresh has to be a pure
+    /// function of the ceiling and the configured default. A window that
+    /// drifted with its own history could not be reasoned about, and lowering
+    /// the knob would silently fail to take effect.
+    #[test]
+    fn refreshing_an_auto_entry_is_idempotent_and_not_history_dependent() {
+        let mut model = ModelConfig {
+            provider: "ollama".into(),
+            limit_mode: LimitMode::Auto,
+            context_window: 131_072,
+            ..Default::default()
+        };
+        apply_effective_limits(&mut model, &discovered_with(Some(262_144)), 32_768);
+        assert_eq!(model.context_window, 32_768);
+        apply_effective_limits(&mut model, &discovered_with(Some(262_144)), 32_768);
+        assert_eq!(model.context_window, 32_768);
+    }
+
     #[test]
     fn a_hosted_provider_still_gets_the_full_reported_window() {
         let mut model = ModelConfig {
@@ -1612,7 +1681,11 @@ mod tests {
             limit_mode: LimitMode::Auto,
             ..Default::default()
         };
-        apply_effective_limits(&mut model, &discovered_with(Some(200_000)));
+        apply_effective_limits(
+            &mut model,
+            &discovered_with(Some(200_000)),
+            nexus_core::config::SELF_HOSTED_DEFAULT_CONTEXT,
+        );
         assert_eq!(model.context_window, 200_000);
         assert_eq!(model.context_ceiling, None);
         assert_eq!(

@@ -29,11 +29,51 @@ discovery configures these providers differently:
 
 | Field | Default | Why |
 | --- | --- | --- |
-| `context_window` | `8192` | The server allocates a KV cache this large *before* the first token. Providers report the architecture maximum (often 128k–256k); requesting it can take a modest host minutes, or push it into swap. |
-| `context_ceiling` | reported maximum | Recorded, not requested. Raise `context_window` towards it deliberately, per model, once you know the host has the memory. |
+| `context_window` | `min(context_ceiling, limits.self_hosted_context_window)` — `32768` by default | The server allocates a KV cache this large *before* the first token. Providers report the architecture maximum (often 128k–256k); requesting it can take a modest host minutes, or push it into swap. |
+| `context_ceiling` | reported maximum | Recorded, not requested — it is what the model *can* address, not a size worth allocating every turn. |
 | `max_output_tokens` | `4096` | These tokens are not metered, and the general 1024 default truncates mid-answer. |
 | `first_token_timeout_secs` | `600` | Loading a model and running prefill is not a stalled stream. `timeout_secs` stays the between-chunks stall timeout. |
 | `keep_alive` (Ollama) | `30m` | Keeps the model resident so the next turn does not pay another cold load. |
+
+#### Changing the window
+
+An entry with `limit_mode = "auto"` is discovery's to manage: every refresh
+settles it at `min(context_ceiling, limits.self_hosted_context_window)`, up or
+down. So there are two ways to change it, and they mean different things.
+
+**All self-hosted models at once** — you know how much memory the host has:
+
+```sh
+snx config set global limits.self_hosted_context_window 131072
+```
+
+**One model, pinned** — take it out of discovery's hands:
+
+```toml
+[models.mistral_latest]
+context_window = 65536
+limit_mode = "manual"      # required, or the next refresh resets it
+```
+
+`snx config budgets` shows the effective value alongside the other limits.
+
+Nothing here is a hard cap: the only ceiling snx enforces is the model's own
+`context_ceiling`, because asking for more than the architecture addresses is
+not a preference.
+
+What the size actually costs, measured with `snx model test` against a 7B model
+on a remote CPU-only host:
+
+| Window | First token, cold | First token, resident |
+| --- | --- | --- |
+| 8192 | ~32 s | ~27 s |
+| 32768 | ~216 s | ~34 s |
+
+The whole cost is in the cold load, and `keep_alive = "30m"` means you pay it
+once rather than per turn — which is why `first_token_timeout_secs` defaults to
+600 rather than something that would trip on it. If your host is slower than
+that, or has less memory to spare, lower the window; if it has a GPU or plenty
+of RAM, raise it.
 
 If a turn ends with *no first token after 600s*, the server is usually loading a
 model too large for its memory. Check `snx model test <name>` — it reports
