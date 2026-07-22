@@ -27,6 +27,11 @@ pub struct SessionMeta {
     pub status: String,
     pub persona_id: Option<String>,
     pub profile_name: String,
+    /// Operator-supplied side context for this session (`/btw`). Compiled into
+    /// the prompt as its own section, deliberately never a `messages` row — so
+    /// it does not join the history the model re-reads every turn, and
+    /// compaction, which only folds messages, cannot reach it.
+    pub side_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,7 +76,8 @@ impl SessionStore {
         self.store.with(|conn| {
             conn.query_row(
                 "SELECT id, title, workspace, created_at, updated_at, model, agent, summary,
-                        pending_tasks, changed_files, current_goal, status, persona_id, profile_name
+                        pending_tasks, changed_files, current_goal, status, persona_id,
+                        profile_name, side_notes
                  FROM sessions WHERE id = ?1",
                 [id],
                 row_to_meta,
@@ -85,14 +91,16 @@ impl SessionStore {
             let (sql, params): (String, Vec<String>) = match workspace {
                 Some(ws) => (
                     "SELECT id, title, workspace, created_at, updated_at, model, agent, summary,
-                            pending_tasks, changed_files, current_goal, status, persona_id, profile_name
+                            pending_tasks, changed_files, current_goal, status, persona_id,
+                            profile_name, side_notes
                      FROM sessions WHERE workspace = ?1 ORDER BY updated_at DESC LIMIT ?2"
                         .into(),
                     vec![ws.to_string(), limit.to_string()],
                 ),
                 None => (
                     "SELECT id, title, workspace, created_at, updated_at, model, agent, summary,
-                            pending_tasks, changed_files, current_goal, status, persona_id, profile_name
+                            pending_tasks, changed_files, current_goal, status, persona_id,
+                            profile_name, side_notes
                      FROM sessions ORDER BY updated_at DESC LIMIT ?1"
                         .into(),
                     vec![limit.to_string()],
@@ -257,6 +265,45 @@ impl SessionStore {
             conn.execute(
                 "UPDATE sessions SET summary = ?1, updated_at = ?2 WHERE id = ?3",
                 rusqlite::params![summary, nexus_core::now_rfc3339(), id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Record one piece of operator-supplied side context for this session.
+    ///
+    /// Deliberately not `add_message`: a note must inform later turns without
+    /// joining the message history, which is what would make every subsequent
+    /// turn re-send and re-pay for it.
+    pub fn append_side_note(&self, id: &str, note: &str) -> Result<()> {
+        let note = note.trim();
+        if note.is_empty() {
+            return Ok(());
+        }
+        let mut notes = self.get(id)?.side_notes;
+        // Repeating yourself should not cost the prompt twice.
+        if notes.iter().any(|existing| existing == note) {
+            return Ok(());
+        }
+        notes.push(note.to_string());
+        self.store.with(|conn| {
+            conn.execute(
+                "UPDATE sessions SET side_notes = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![
+                    serde_json::to_string(&notes)?,
+                    nexus_core::now_rfc3339(),
+                    id
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn clear_side_notes(&self, id: &str) -> Result<()> {
+        self.store.with(|conn| {
+            conn.execute(
+                "UPDATE sessions SET side_notes = '[]', updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![nexus_core::now_rfc3339(), id],
             )?;
             Ok(())
         })
@@ -743,6 +790,7 @@ fn row_to_meta(row: &rusqlite::Row) -> rusqlite::Result<SessionMeta> {
         status: row.get(11)?,
         persona_id: row.get(12)?,
         profile_name: row.get(13)?,
+        side_notes: parse_vec(row.get(14)?),
     })
 }
 
@@ -752,6 +800,53 @@ mod tests {
 
     fn sessions() -> SessionStore {
         SessionStore::new(Store::open_in_memory().expect("store"))
+    }
+
+    #[test]
+    fn side_notes_inform_the_session_without_joining_its_messages() {
+        let s = sessions();
+        let id = s
+            .create("/workspace", "orchestrator", "mock")
+            .expect("create");
+        let id = id.as_str();
+
+        s.append_side_note(id, "the staging base url is in .env.local")
+            .expect("note");
+        s.append_side_note(id, "  ").expect("blank is ignored");
+        s.append_side_note(id, "the staging base url is in .env.local")
+            .expect("duplicate is ignored");
+        s.append_side_note(id, "prefer the makefile over cargo directly")
+            .expect("note");
+
+        assert_eq!(
+            s.get(id).expect("meta").side_notes,
+            vec![
+                "the staging base url is in .env.local".to_string(),
+                "prefer the makefile over cargo directly".to_string(),
+            ],
+            "blank and repeated notes must not cost the prompt anything"
+        );
+        // The point of the whole feature: a note is not a message, so it is
+        // never replayed as history and compaction cannot fold it away.
+        assert!(
+            s.messages(id).expect("messages").is_empty(),
+            "side notes must never enter the conversation history"
+        );
+
+        s.clear_side_notes(id).expect("clear");
+        assert!(s.get(id).expect("meta").side_notes.is_empty());
+    }
+
+    #[test]
+    fn side_notes_do_not_leak_between_sessions() {
+        let s = sessions();
+        let a = s.create("/workspace", "orchestrator", "mock").expect("a");
+        let b = s.create("/workspace", "orchestrator", "mock").expect("b");
+        s.append_side_note(a.as_str(), "only for a").expect("note");
+        assert!(
+            s.get(b.as_str()).expect("b").side_notes.is_empty(),
+            "side context is session-scoped; a new session starts clean"
+        );
     }
 
     #[test]

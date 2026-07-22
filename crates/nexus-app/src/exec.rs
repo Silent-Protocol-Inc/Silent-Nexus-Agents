@@ -308,8 +308,13 @@ pub enum Effect {
     Compact,
     /// Leave the TUI.
     Quit,
-    /// Attach to an existing session (resume).
-    AttachSession(String),
+    /// Attach to a session (resume, or one just created on demand). The
+    /// optional report is rendered afterwards, so a command that had to open a
+    /// session in order to do its job can still show its own result.
+    AttachSession {
+        id: String,
+        report: Option<Report>,
+    },
     /// Resume an interrupted goal (attaches its session where present).
     ResumeGoal(String),
     /// Apply a theme by name (already persisted).
@@ -1355,27 +1360,42 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
         CommandId::Btw => {
             if cmd.args.iter().any(|arg| arg == "--remember") {
                 return Ok(Effect::Report(Report::untitled().warn(
-                    "`--remember` is no longer implicit; use `--add` to attach the sidecar response, \
-                     or /memory add for durable memory",
+                    "`--remember` is no longer implicit; /btw already keeps what you say as \
+                     side context for this session, or use /memory add for durable memory",
                 )));
             }
-            let add = cmd.args.iter().any(|a| a == "--add");
-            let note: Vec<&str> = cmd
-                .args
-                .iter()
-                .filter(|a| *a != "--add")
-                .map(String::as_str)
-                .collect();
-            Effect::Report(
-                services::btw(
-                    app,
-                    ctx.session_id.as_deref(),
-                    &note.join(" "),
-                    add,
-                    &ctx.sidecar_context,
-                )
-                .await?,
-            )
+            // `--add` spliced the answer into the transcript, which is exactly
+            // the per-turn cost /btw exists to avoid. Retaining side context is
+            // now the default, so the flag has nothing left to mean.
+            if cmd.args.iter().any(|arg| arg == "--add") {
+                return Ok(Effect::Report(Report::untitled().warn(
+                    "`--add` is gone; /btw now keeps what you say as side context for this \
+                     session, which informs later turns without joining the transcript",
+                )));
+            }
+            match cmd.args.first().map(String::as_str) {
+                Some("--list") => {
+                    Effect::Report(services::btw_list(app, ctx.session_id.as_deref())?)
+                }
+                Some("--clear") => {
+                    Effect::Report(services::btw_clear(app, ctx.session_id.as_deref())?)
+                }
+                _ => {
+                    // Supplying context before asking for anything is the
+                    // ordinary use, so open a session rather than refusing.
+                    let (id, created) = services::btw_session(app, ctx.session_id.as_deref())?;
+                    let report =
+                        services::btw(app, &id, &cmd.args.join(" "), &ctx.sidecar_context).await?;
+                    if created {
+                        Effect::AttachSession {
+                            id,
+                            report: Some(report),
+                        }
+                    } else {
+                        Effect::Report(report)
+                    }
+                }
+            }
         }
     })
 }
@@ -1532,7 +1552,10 @@ fn sync_session_persona_profile(app: &App, session_id: Option<&str>) -> Result<(
 
 fn resolve_resume_target(app: &App, id: &str) -> Result<Effect> {
     if app.sessions().get(id).is_ok() {
-        return Ok(Effect::AttachSession(id.to_string()));
+        return Ok(Effect::AttachSession {
+            id: id.to_string(),
+            report: None,
+        });
     }
     if app.goals().get(id).is_ok() {
         return Ok(Effect::ResumeGoal(id.to_string()));

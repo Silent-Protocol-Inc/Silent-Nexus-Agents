@@ -121,11 +121,14 @@ messages into the session summary *before* the prompt is compiled:
   but the transcript and audit trail are unchanged.
 - The result is persisted, so a span is summarized once instead of being
   re-derived every turn, and repeated compactions append rather than overwrite.
-- The summary is capped at a share of the prompt budget, and a fold whose
-  summary would not be smaller than the messages it replaces is skipped. The
-  summary is pinned context the compiler may not trim, so an unbounded one does
-  not degrade a turn — it fails it. When the cap truncates, the summary says so
-  and keeps its most recent part.
+- The summary is capped at a share of the prompt budget — scaled to the window
+  and bounded by the model's own output limit — and a fold whose summary would
+  not be smaller than the messages it replaces is skipped rather than spending a
+  model call to lose history. The summary section is droppable, not pinned, so
+  an oversized one is *evicted whole* when it does not fit; because the messages
+  it stands for are already marked compacted, that would remove them from the
+  prompt with nothing said. When the cap truncates, the summary says so and
+  keeps its most recent part, and any section left out for budget is logged.
 
 `ContextCompiler` still trims sections to fit as a last resort; it should now
 rarely have to, because the durable fold runs first and at a lower threshold.

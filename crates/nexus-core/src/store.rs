@@ -54,6 +54,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0009_provider_catalog_cache",
         include_str!("../../../migrations/0009_provider_catalog_cache.sql"),
     ),
+    (
+        "0010_session_side_notes",
+        include_str!("../../../migrations/0010_session_side_notes.sql"),
+    ),
 ];
 pub const MIGRATION_COUNT: usize = MIGRATIONS.len();
 

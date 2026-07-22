@@ -1,5 +1,59 @@
 # Changelog
 
+## [2.8.0] — 2026-07-22
+
+### Changed
+
+- `/btw` now keeps what you tell it. It was a sidecar with two endings and no
+  middle: by default the answer was rendered and **discarded**, so telling snx
+  "the staging base url is in `.env.local`" left the next turn none the wiser;
+  with `--add` it was spliced into the transcript as a full message and re-sent
+  on every subsequent turn — the exact per-turn cost the command exists to
+  avoid. Both are gone. Whatever you say is recorded as **session-scoped side
+  context**, compiled into each turn's prompt as its own section rather than as
+  a message, so it informs later turns without ever joining the history the
+  model re-reads. Questions are still answered by the read-only sidecar, and the
+  answer is retained the same way.
+
+  Notes live and die with the session — `/memory add` remains the deliberate
+  path for anything durable, so an aside cannot quietly become permanent project
+  memory. `/btw --list` shows what the session is carrying and `/btw --clear`
+  drops it; invisible injected context would be worse than none.
+
+- The compaction summary budget scales with the context window instead of being
+  a flat 1024 tokens. The old ceiling always bound above a ~4k budget, so a 4k
+  model and a 200k model got the same recap — on a large window, an entire
+  session compressed into half a percent of the prompt. It is now `budget / 8`,
+  floored at 256 and capped by the model's own `max_output_tokens`, which is the
+  only ceiling that is physically real: the summary arrives as a completion, so
+  asking for more than the model can emit buys nothing. Nothing enforced that
+  before. A 32k window goes from 1024 to ~3.5k.
+
+### Fixed
+
+- A context section dropped for budget is now logged. `ContextCompiler` has
+  always recorded these in `omissions`, and the loop only ever logged
+  `conflicts`, so an eviction was silent. This matters most for the session
+  summary: the messages it stands for are already marked `compacted` and are no
+  longer returned by `messages()`, so dropping it removes that history from the
+  prompt with nothing said anywhere.
+
+- **Correction to 2.7.0's stated rationale.** 2.7.0's changelog, the "Long
+  sessions" section of `docs/architecture.md`, its commit message, and its
+  release notes all described the session summary as *pinned context the
+  compiler is not allowed to trim*, and claimed an oversized one fails the turn
+  outright. That is not what the code does: the summary is pushed as
+  `ContextSection::optional`, which is droppable and already capped by
+  `layer_cap`. The `budget exhausted: pinned context requires 2193 tokens`
+  error quoted as evidence came from the baseline pinned sections not fitting
+  the deliberately tiny 3000-token window used for that test, and had nothing to
+  do with the summary. The 2.7.0 *fix* was still correct — the fold really did
+  grow context — but the reason given for it was not, and the real failure mode
+  is worse: silent eviction rather than a loud error. Both documents now say so.
+
+- The doc comment for `fallback_compaction_summary` had been orphaned onto
+  `truncate_to_tokens` when the latter was inserted in 2.7.0.
+
 ## [2.7.0] — 2026-07-22
 
 ### Changed
@@ -36,9 +90,12 @@
 
   The summary is bounded by a share of the prompt budget rather than a fixed
   size, and a fold whose summary would not be smaller than the messages it
-  replaces is skipped instead of spending a model call to lose history. This
-  matters because the summary is pinned context the compiler is not allowed to
-  trim: left unbounded it does not degrade a turn, it fails it outright.
+  replaces is skipped instead of spending a model call to lose history.
+
+  *(Corrected in 2.8.0: this entry originally said the summary is pinned context
+  the compiler may not trim, and that an unbounded one fails the turn outright.
+  That was wrong — the section is droppable, and the failure it actually causes
+  is silent eviction. See the 2.8.0 entry.)*
 
 ### Added
 

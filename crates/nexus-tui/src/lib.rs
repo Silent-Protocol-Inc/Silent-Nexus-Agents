@@ -1896,7 +1896,12 @@ fn handle_effect(
             None => st.system_sev("no active session to compact", Sev::Warn),
         },
         Effect::Quit => st.should_quit = true,
-        Effect::AttachSession(id) => attach_session(st, &id, app, session),
+        Effect::AttachSession { id, report } => {
+            attach_session(st, &id, app, session);
+            if let Some(report) = report {
+                handle_effect(st, Effect::Report(report), app, session, ui_tx);
+            }
+        }
         Effect::ResumeGoal(id) => resume_goal(st, &id, app, session),
         Effect::SetTheme(name) => {
             st.set_theme(&name);
