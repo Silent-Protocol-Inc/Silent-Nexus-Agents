@@ -3545,6 +3545,50 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
                 st.toast("plan declined — still in plan mode", Sev::Warn);
             }
         }
+        // Compaction is not a detail: the operator's earlier turns stopped
+        // being visible to the model, and they are entitled to know when and
+        // whether a real summary replaced them.
+        LoopEvent::ContextCompacted {
+            before_tokens,
+            after_tokens,
+            summarized_messages,
+            model_written,
+        } => {
+            st.push_local_event_for_turn(
+                turn_id.clone(),
+                if model_written {
+                    TimelineStatus::Completed
+                } else {
+                    TimelineStatus::Blocked
+                },
+                format!(
+                    "context compacted · {summarized_messages} messages · \
+                     {before_tokens} → {after_tokens} tokens"
+                ),
+                TimelineKind::Compaction {
+                    before_tokens,
+                    after_tokens,
+                    summarized_messages,
+                    preserved: vec!["session objective".into(), "recent messages".into()],
+                },
+            );
+            if model_written {
+                st.toast(
+                    format!(
+                        "context compacted — {summarized_messages} earlier messages summarized"
+                    ),
+                    Sev::Ok,
+                );
+            } else {
+                st.toast(
+                    format!(
+                        "context compacted — no model summary available, {summarized_messages} \
+                         messages reduced to an outline"
+                    ),
+                    Sev::Warn,
+                );
+            }
+        }
         LoopEvent::PlanPromoted {
             work,
             from,

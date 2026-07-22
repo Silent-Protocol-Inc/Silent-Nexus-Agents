@@ -103,6 +103,30 @@ invoked by the harness regardless of what the model emits.
   nexus-mcp** — durable goals, guarded memory, safe compaction, code
   intelligence, payload-free skills, and MCP client/server.
 
+## Long sessions
+
+A session is not capped by the model's context window. When stored history
+would take more than 75% of the prompt budget, the loop folds the older
+messages into the session summary *before* the prompt is compiled:
+
+- The summary is written by the routed model — a real recap of what was asked,
+  what was decided, which files and commands were touched, and what is
+  unresolved. If that call fails the turn still proceeds with a mechanical
+  outline, and the timeline card and toast say so rather than implying an
+  equivalent summary.
+- Three things are never folded: system messages, the session's first user
+  message (the objective), and the six most recent messages.
+- Folded rows are marked `compacted` and stay on disk. `messages()` stops
+  returning them, so the model never sees a message and its summary at once,
+  but the transcript and audit trail are unchanged.
+- The result is persisted, so a span is summarized once instead of being
+  re-derived every turn, and repeated compactions append rather than overwrite.
+
+`ContextCompiler` still trims sections to fit as a last resort; it should now
+rarely have to, because the durable fold runs first and at a lower threshold.
+`/compact` remains the manual path and is unchanged: it starts a fresh session
+and leaves the original intact.
+
 ## Timeline and active work
 
 Migration `0004_orchestration_timeline` adds append-only timeline,

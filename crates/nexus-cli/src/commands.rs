@@ -167,6 +167,22 @@ fn print_event(ui: &Ui, ev: &LoopEvent) {
         // Presentation-only, and the non-interactive surface has no live
         // component to gate — nothing to print.
         LoopEvent::ThinkingResolved { .. } => {}
+        LoopEvent::ContextCompacted {
+            before_tokens,
+            after_tokens,
+            summarized_messages,
+            model_written,
+        } => {
+            let line = format!(
+                "context compacted · {summarized_messages} messages · \
+                 {before_tokens} → {after_tokens} tokens"
+            );
+            if *model_written {
+                println!("{}", ui.dim(&line));
+            } else {
+                println!("{} · no model summary available", ui.yellow(&line));
+            }
+        }
         LoopEvent::PlanModeEnded { approved } => {
             if *approved {
                 println!("{}", ui.green("plan approved — continuing into execution"));

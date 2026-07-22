@@ -139,12 +139,17 @@ impl SessionStore {
         })
     }
 
-    /// Load the full message history for a session, reconstructing tool calls.
+    /// Load the live message history for a session, reconstructing tool calls.
+    ///
+    /// Compacted messages are excluded. They are still on disk — the timeline
+    /// and `/transcript` show the session as it happened — but they have been
+    /// folded into the session summary and must not be replayed to the model
+    /// alongside it.
     pub fn messages(&self, id: &str) -> Result<Vec<ChatMessage>> {
         self.store.with(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT role, content, tool_call_id, tool_name FROM messages
-                 WHERE session_id = ?1 ORDER BY id",
+                 WHERE session_id = ?1 AND compacted = 0 ORDER BY id",
             )?;
             let rows = stmt.query_map([id], |row| {
                 let role: String = row.get(0)?;
@@ -163,6 +168,75 @@ impl SessionStore {
                 out.push(r?);
             }
             Ok(out)
+        })
+    }
+
+    /// The live messages eligible to be folded into the session summary,
+    /// oldest first, paired with their row ids.
+    ///
+    /// Three things are deliberately never eligible, because losing them costs
+    /// more than the tokens they occupy: system messages (they carry the
+    /// harness contract), the newest `keep_recent` messages (the conversation
+    /// the operator is having right now), and the session's first user message
+    /// — the objective, which `/summary` and the status line read back and
+    /// which orients the model no matter how long the session runs.
+    pub fn compactable(&self, id: &str, keep_recent: usize) -> Result<Vec<(i64, ChatMessage)>> {
+        let live = self.store.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, role, content, tool_call_id, tool_name FROM messages
+                 WHERE session_id = ?1 AND compacted = 0 ORDER BY id",
+            )?;
+            let rows = stmt.query_map([id], |row| {
+                let row_id: i64 = row.get(0)?;
+                let role: String = row.get(1)?;
+                let content: String = row.get(2)?;
+                let tool_call_id: Option<String> = row.get(3)?;
+                let tool_name: Option<String> = row.get(4)?;
+                Ok((
+                    row_id,
+                    role.clone(),
+                    reconstruct_message(&role, &content, tool_call_id, tool_name),
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })?;
+
+        let cutoff = live.len().saturating_sub(keep_recent);
+        let first_user = live
+            .iter()
+            .position(|(_, role, _)| role == "user")
+            .unwrap_or(usize::MAX);
+        Ok(live
+            .into_iter()
+            .enumerate()
+            .filter(|(index, (_, role, _))| {
+                *index < cutoff && role != "system" && *index != first_user
+            })
+            .map(|(_, (row_id, _, message))| (row_id, message))
+            .collect())
+    }
+
+    /// Mark messages as folded into the session summary. The rows stay for the
+    /// audit trail; [`Self::messages`] stops returning them.
+    pub fn mark_compacted(&self, id: &str, row_ids: &[i64]) -> Result<()> {
+        if row_ids.is_empty() {
+            return Ok(());
+        }
+        self.store.with(|conn| {
+            let mut stmt = conn
+                .prepare("UPDATE messages SET compacted = 1 WHERE session_id = ?1 AND id = ?2")?;
+            for row_id in row_ids {
+                stmt.execute(rusqlite::params![id, row_id])?;
+            }
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![nexus_core::now_rfc3339(), id],
+            )?;
+            Ok(())
         })
     }
 
@@ -678,6 +752,73 @@ mod tests {
 
     fn sessions() -> SessionStore {
         SessionStore::new(Store::open_in_memory().expect("store"))
+    }
+
+    #[test]
+    fn compaction_keeps_the_objective_the_tail_and_the_audit_trail() {
+        let s = sessions();
+        let id = s.create("/ws", "orchestrator", "m").expect("create");
+        s.add_message(id.as_str(), 1, &ChatMessage::system("contract"))
+            .expect("add");
+        s.add_message(id.as_str(), 1, &ChatMessage::user("the objective"))
+            .expect("add");
+        for n in 0..10 {
+            s.add_message(id.as_str(), 1, &ChatMessage::assistant(format!("step {n}")))
+                .expect("add");
+        }
+
+        let stale = s.compactable(id.as_str(), 3).expect("compactable");
+        let texts: Vec<&str> = stale
+            .iter()
+            .map(|(_, message)| message.content.as_str())
+            .collect();
+        assert!(
+            !texts.contains(&"contract"),
+            "the harness contract is not the model's history to lose",
+        );
+        assert!(
+            !texts.contains(&"the objective"),
+            "the objective orients every later turn and /summary reads it back",
+        );
+        assert_eq!(
+            texts,
+            vec!["step 0", "step 1", "step 2", "step 3", "step 4", "step 5", "step 6"],
+            "everything but the three most recent messages folds away",
+        );
+
+        let row_ids: Vec<i64> = stale.iter().map(|(row_id, _)| *row_id).collect();
+        s.mark_compacted(id.as_str(), &row_ids).expect("mark");
+
+        let live: Vec<String> = s
+            .messages(id.as_str())
+            .expect("messages")
+            .into_iter()
+            .map(|message| message.content)
+            .collect();
+        assert_eq!(
+            live,
+            vec!["contract", "the objective", "step 7", "step 8", "step 9"],
+        );
+
+        // The rows are still there — the transcript is the audit trail and a
+        // compaction must never destroy it.
+        let stored: i64 = s
+            .store
+            .with(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                    [id.as_str()],
+                    |row| row.get(0),
+                )?)
+            })
+            .expect("count");
+        assert_eq!(stored, 12);
+
+        // Idempotent: a second pass has nothing left to take.
+        assert!(s
+            .compactable(id.as_str(), 3)
+            .expect("compactable")
+            .is_empty());
     }
 
     #[test]

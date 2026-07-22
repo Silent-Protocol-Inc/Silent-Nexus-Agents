@@ -15,6 +15,25 @@
   on every refresh, up or down. Previously the number a refresh produced could
   not be predicted from configuration alone.
 
+- A session that outgrows its context window now continues in place with a
+  **model-written** summary of what was folded away. The machinery for this
+  already existed and was half-wired: `ContextCompiler` compacted history when
+  it overflowed, but passed no summarizer, so the model was handed
+  `deterministic_summary` — the first 200 characters of one user message and a
+  sorted list of tool names — and everything else was discarded. Nothing was
+  shown to the operator either: `TimelineKind::Compaction` was defined and never
+  emitted by anything.
+
+  The fold now happens in the loop before the prompt is compiled, so it can make
+  a model call and persist the result. A span is summarized once instead of
+  being re-derived every turn, repeated folds append rather than overwrite, and
+  the system contract, the session objective, and the six most recent messages
+  are never folded. Folded rows stay on disk — the transcript and audit trail
+  are untouched; they are only withheld from the model, which now sees the
+  summary instead of both. When the summarizing call fails the turn still
+  proceeds on the mechanical outline, and the timeline card and toast say that
+  is what happened rather than implying an equivalent summary.
+
 ### Added
 
 - `limits.self_hosted_context_window` (default `32768`) — one setting that moves

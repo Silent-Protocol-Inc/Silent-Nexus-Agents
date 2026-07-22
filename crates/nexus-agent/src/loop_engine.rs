@@ -180,6 +180,18 @@ pub enum LoopEvent {
     PlanModeEnded {
         approved: bool,
     },
+    /// History was folded into the session summary so the turn fits the
+    /// model's window. The session continues; nothing is lost from the
+    /// transcript, only from what the model is shown verbatim.
+    ContextCompacted {
+        before_tokens: usize,
+        after_tokens: usize,
+        summarized_messages: usize,
+        /// Whether the summary came from the model rather than the mechanical
+        /// fallback. The two are not equally trustworthy and the operator is
+        /// told which one this was.
+        model_written: bool,
+    },
     PlanPromoted {
         work: WorkBreakdown,
         from: String,
@@ -763,6 +775,39 @@ impl TurnTimeline {
                         decision: Some(if *approved { "approved" } else { "denied" }.to_string()),
                         summary: "plan mode".to_string(),
                         edited: false,
+                    },
+                    None,
+                )?;
+            }
+            LoopEvent::ContextCompacted {
+                before_tokens,
+                after_tokens,
+                summarized_messages,
+                model_written,
+            } => {
+                self.append(
+                    LifecyclePhase::Progress,
+                    if *model_written {
+                        TimelineStatus::Completed
+                    } else {
+                        // Not a failure — the session continued — but the
+                        // operator lost more than they would have.
+                        TimelineStatus::Blocked
+                    },
+                    format!(
+                        "context compacted · {summarized_messages} messages · \
+                         {before_tokens} → {after_tokens} tokens{}",
+                        if *model_written {
+                            ""
+                        } else {
+                            " · mechanical summary"
+                        }
+                    ),
+                    TimelineKind::Compaction {
+                        before_tokens: *before_tokens,
+                        after_tokens: *after_tokens,
+                        summarized_messages: *summarized_messages,
+                        preserved: vec!["session objective".into(), "recent messages".into()],
                     },
                     None,
                 )?;
@@ -1920,6 +1965,20 @@ impl AgentLoop {
         let mut tools = self.select_tools(class, plan_mode_active);
         let mut tool_specs = build_tool_specs(&tools, native);
 
+        // Fold old history into the session summary before the prompt is
+        // built, so the compaction is durable. Doing it here rather than
+        // inside the context compiler is the point: the compiler runs on every
+        // turn and cannot make a model call, so it could only drop history
+        // silently and re-derive the same mechanical summary each time.
+        self.compact_history_if_needed(
+            session_id,
+            &timeline,
+            capabilities.context_window,
+            capabilities.max_output_tokens,
+            &model_name,
+        )
+        .await?;
+
         // Build the initial conversation (history now includes the objective).
         let mut messages = self.build_initial_messages(InitialContextRequest {
             objective,
@@ -2772,6 +2831,146 @@ impl AgentLoop {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Fold old history into the session summary when the next prompt would
+    /// not fit, so a long session continues in place instead of losing its
+    /// oldest turns without saying so.
+    ///
+    /// Runs before the prompt is compiled and writes its result to the
+    /// session, which is what makes it durable: the same span is summarized
+    /// once, not re-derived on every subsequent turn.
+    async fn compact_history_if_needed(
+        &self,
+        session_id: &SessionId,
+        timeline: &Arc<TurnTimeline>,
+        context_window: usize,
+        reserved_output_tokens: usize,
+        model_name: &str,
+    ) -> Result<()> {
+        /// Verbatim tail. Matches `ContextManager`'s own `keep_recent` so the
+        /// two layers agree on what "recent" means.
+        const KEEP_RECENT: usize = 6;
+        /// Fraction of the prompt budget that triggers a fold. Below the
+        /// compiler's own drop threshold so this runs first and the compiler
+        /// never has to discard anything silently.
+        const TRIGGER_PERCENT: usize = 75;
+
+        let budget = context_window.saturating_sub(reserved_output_tokens.max(1_024));
+        if budget == 0 {
+            return Ok(());
+        }
+        let history = self.runtime.sessions.messages(session_id.as_str())?;
+        let before_tokens: usize = history
+            .iter()
+            .map(nexus_context::estimate_message_tokens)
+            .sum();
+        if before_tokens * 100 <= budget * TRIGGER_PERCENT {
+            return Ok(());
+        }
+        let stale = self
+            .runtime
+            .sessions
+            .compactable(session_id.as_str(), KEEP_RECENT)?;
+        if stale.is_empty() {
+            return Ok(());
+        }
+
+        let folded: Vec<ChatMessage> = stale.iter().map(|(_, message)| message.clone()).collect();
+        let (summary, model_written) = self.summarize_for_compaction(&folded, model_name).await;
+
+        // Append rather than replace: a session compacted twice must not lose
+        // what the first fold recorded.
+        let session = self.runtime.sessions.get(session_id.as_str())?;
+        let merged = if session.summary.trim().is_empty() {
+            summary
+        } else {
+            format!("{}\n{}", session.summary.trim_end(), summary)
+        };
+        self.runtime
+            .sessions
+            .set_summary(session_id.as_str(), &merged)?;
+        let row_ids: Vec<i64> = stale.iter().map(|(row_id, _)| *row_id).collect();
+        self.runtime
+            .sessions
+            .mark_compacted(session_id.as_str(), &row_ids)?;
+
+        let after_tokens: usize = self
+            .runtime
+            .sessions
+            .messages(session_id.as_str())?
+            .iter()
+            .map(nexus_context::estimate_message_tokens)
+            .sum::<usize>()
+            + nexus_context::estimate_tokens(&merged);
+        let event = LoopEvent::ContextCompacted {
+            before_tokens,
+            after_tokens,
+            summarized_messages: folded.len(),
+            model_written,
+        };
+        timeline.record_loop_event(&event)?;
+        self.emit(event);
+        Ok(())
+    }
+
+    /// Summarize messages being folded away. Falls back to the mechanical
+    /// summary when the model call fails — losing the history entirely because
+    /// a summarizer errored would be a far worse outcome than a thin summary,
+    /// and the caller reports which one this was.
+    async fn summarize_for_compaction(
+        &self,
+        folded: &[ChatMessage],
+        model_name: &str,
+    ) -> (String, bool) {
+        let transcript = folded
+            .iter()
+            .map(|message| {
+                format!(
+                    "{:?}: {}",
+                    message.role,
+                    self.safe_model_text(&message.content)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let request = nexus_models::types::ModelRequest {
+            messages: vec![
+                ChatMessage::system(
+                    "Summarize this portion of an agent session so the work can continue \
+                     without it. Record, in compact prose: what was asked, what was decided \
+                     and why, which files and commands were touched with their outcomes, \
+                     and anything still unresolved. Preserve exact names, paths, and \
+                     identifiers — a later turn will act on them. Do not add advice or \
+                     commentary.",
+                ),
+                ChatMessage::user(transcript),
+            ],
+            max_tokens: Some(1_024),
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+        match self.runtime.models.get(model_name) {
+            Ok(provider) => match provider.complete(request).await {
+                Ok(completion) if !completion.content.trim().is_empty() => (
+                    format!(
+                        "[earlier in this session, {} messages summarized]\n{}",
+                        folded.len(),
+                        self.safe_model_text(completion.content.trim())
+                    ),
+                    true,
+                ),
+                Ok(_) => (fallback_compaction_summary(folded), false),
+                Err(error) => {
+                    tracing::warn!(%error, "compaction summary failed; using the mechanical one");
+                    (fallback_compaction_summary(folded), false)
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, "no provider for the compaction summary");
+                (fallback_compaction_summary(folded), false)
             }
         }
     }
@@ -4482,6 +4681,39 @@ fn system_context_category(content: &str) -> ContextCategory {
     } else {
         ContextCategory::RecentTranscript
     }
+}
+
+/// Mechanical summary used when the model cannot produce one. Deliberately
+/// states what it is: an operator reading it must not mistake a list of tool
+/// names for a record of what happened.
+fn fallback_compaction_summary(folded: &[ChatMessage]) -> String {
+    let mut tools: Vec<&str> = folded
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .map(|call| call.name.as_str())
+        .collect();
+    tools.sort_unstable();
+    tools.dedup();
+    let requests: Vec<String> = folded
+        .iter()
+        .filter(|message| message.role == nexus_models::types::Role::User)
+        .map(|message| summarize(&message.content, 160))
+        .collect();
+    format!(
+        "[earlier in this session, {} messages dropped — no model summary was \
+         available, so only this outline survives]\n- requests: {}\n- tools used: {}",
+        folded.len(),
+        if requests.is_empty() {
+            "(none captured)".into()
+        } else {
+            requests.join(" | ")
+        },
+        if tools.is_empty() {
+            "(none)".into()
+        } else {
+            tools.join(", ")
+        },
+    )
 }
 
 fn summarize(text: &str, max_chars: usize) -> String {
