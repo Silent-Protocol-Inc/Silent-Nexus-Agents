@@ -44,8 +44,13 @@ down. So there are two ways to change it, and they mean different things.
 **All self-hosted models at once** — you know how much memory the host has:
 
 ```sh
-snx config set global limits.self_hosted_context_window 131072
+snx config set limits.self_hosted_context_window 131072
 ```
+
+That writes the global override. Add `--workspace` to scope it to this
+checkout instead, or `snx config reset limits.self_hosted_context_window` to
+inherit the default again. The TUI equivalent names the scope explicitly:
+`/config set global limits.self_hosted_context_window 131072`.
 
 **One model, pinned** — take it out of discovery's hands:
 

@@ -1583,6 +1583,18 @@ pub async fn config(app: &App, cmd: ConfigCmd) -> Result<()> {
         ConfigCmd::Budgets => {
             ui.render_report(&nexus_app::services::limits_report(app));
         }
+        ConfigCmd::Set {
+            path,
+            value,
+            workspace,
+        } => {
+            ui.render_report(&nexus_app::services::config_set(
+                app, workspace, &path, &value,
+            )?);
+        }
+        ConfigCmd::Reset { path, workspace } => {
+            ui.render_report(&nexus_app::services::config_reset(app, workspace, &path)?);
+        }
         ConfigCmd::Path => {
             ui.field("global", &app.paths.global_file.display().to_string());
             ui.field(

@@ -587,6 +587,28 @@ pub enum ConfigCmd {
     Path,
     /// Print the configuration JSON schema.
     Schema,
+    /// Set one configuration value as a managed override.
+    ///
+    /// The value is TOML, so strings need quoting: `snx config set
+    /// limits.self_hosted_context_window 65536`, `snx config set
+    /// sandbox.backend '"none"'`.
+    Set {
+        /// Dotted path, e.g. `limits.self_hosted_context_window`.
+        path: String,
+        /// TOML value.
+        value: String,
+        /// Write the workspace override instead of the global one.
+        #[arg(long)]
+        workspace: bool,
+    },
+    /// Drop a managed override so the value is inherited again.
+    Reset {
+        /// Dotted path, e.g. `limits.self_hosted_context_window`.
+        path: String,
+        /// Clear the workspace override instead of the global one.
+        #[arg(long)]
+        workspace: bool,
+    },
 }
 
 #[derive(clap::Args, Debug)]

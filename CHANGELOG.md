@@ -34,6 +34,12 @@
   proceeds on the mechanical outline, and the timeline card and toast say that
   is what happened rather than implying an equivalent summary.
 
+  The summary is bounded by a share of the prompt budget rather than a fixed
+  size, and a fold whose summary would not be smaller than the messages it
+  replaces is skipped instead of spending a model call to lose history. This
+  matters because the summary is pinned context the compiler is not allowed to
+  trim: left unbounded it does not degrade a turn, it fails it outright.
+
 ### Added
 
 - `limits.self_hosted_context_window` (default `32768`) — one setting that moves
@@ -41,11 +47,21 @@
   `/config budgets` and printed by `snx config budgets`. To pin a single model
   instead, set its `context_window` **and** `limit_mode = "manual"`, which takes
   it out of discovery's hands; `docs/providers.md` documents both.
+- `snx config set <path> <value>` and `snx config reset <path>` — the managed
+  override editing that `/config set` has always done in the TUI, now reachable
+  from the command line. Global by default; `--workspace` writes the
+  per-checkout override instead. Without these the setting above could only be
+  changed from inside the TUI or by editing TOML by hand.
 
 ### Fixed
 
 - `snx setup` wrote `context_window = 8192` for self-hosted starter entries,
   which are unmetered. They now start at the self-hosted default.
+- Setting a model's `context_window`, `context_ceiling`, or `max_output_tokens`
+  by hand left the matching `*_limit_source` at whatever the last catalog
+  refresh wrote, so `snx model show` and `/model` reported the operator's own
+  number as having come from provider metadata. Both commands now move the
+  provenance with the value, and resetting the override restores it.
 
 ## [2.6.0] — 2026-07-22
 

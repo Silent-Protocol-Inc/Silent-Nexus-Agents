@@ -4068,6 +4068,26 @@ fn safe_config_path(path: &str) -> Result<Vec<&str>> {
     Ok(parts)
 }
 
+/// The `*_limit_source` field that has to move when a token limit is set by
+/// hand, or `None` for every other path.
+///
+/// Without this, overriding `models.<name>.context_window` leaves the
+/// provenance the last catalog refresh wrote, and `snx model show` reports the
+/// operator's own number as having come from provider metadata. The value is
+/// the same one `ModelConfig::default()` uses, so no new schema shape is
+/// introduced by writing it here.
+fn limit_provenance_path<'a>(parts: &[&'a str]) -> Option<Vec<&'a str>> {
+    let ["models", model, field] = parts else {
+        return None;
+    };
+    let source = match *field {
+        "context_window" | "context_ceiling" => "context_limit_source",
+        "max_output_tokens" => "output_limit_source",
+        _ => return None,
+    };
+    Some(vec!["models", model, source])
+}
+
 fn set_nested(table: &mut toml::value::Table, path: &[&str], value: Option<toml::Value>) {
     if path.len() == 1 {
         if let Some(value) = value {
@@ -4101,6 +4121,13 @@ pub fn config_set(app: &App, workspace: bool, path: &str, raw: &str) -> Result<R
         .ok_or_else(|| NexusError::Config("a value is required".into()))?;
     nexus_core::config::Config::update_scoped_overrides(&app.paths, workspace, |root| {
         set_nested(root, &parts, Some(value));
+        if let Some(provenance) = limit_provenance_path(&parts) {
+            set_nested(
+                root,
+                &provenance,
+                Some(toml::Value::String("configured_conservative".into())),
+            );
+        }
     })?;
     app.audit().emit(
         &nexus_core::TraceId::generate(),
@@ -4121,6 +4148,9 @@ pub fn config_reset(app: &App, workspace: bool, path: &str) -> Result<Report> {
     let parts = safe_config_path(path)?;
     nexus_core::config::Config::update_scoped_overrides(&app.paths, workspace, |root| {
         set_nested(root, &parts, None);
+        if let Some(provenance) = limit_provenance_path(&parts) {
+            set_nested(root, &provenance, None);
+        }
     })?;
     Ok(Report::new("configuration inherited")
         .field("scope", if workspace { "workspace" } else { "global" })
@@ -4693,6 +4723,28 @@ mod tests {
             .current_dir(dir)
             .output()
             .expect("git")
+    }
+
+    #[test]
+    fn setting_a_token_limit_by_hand_also_moves_its_provenance() {
+        assert_eq!(
+            limit_provenance_path(&["models", "mistral_latest", "context_window"]),
+            Some(vec!["models", "mistral_latest", "context_limit_source"])
+        );
+        assert_eq!(
+            limit_provenance_path(&["models", "mistral_latest", "max_output_tokens"]),
+            Some(vec!["models", "mistral_latest", "output_limit_source"])
+        );
+        // Everything else is left alone: only the two limits have a provenance
+        // field that could go stale, and `limits.*` is not per-model at all.
+        assert_eq!(
+            limit_provenance_path(&["models", "mistral_latest", "keep_alive"]),
+            None
+        );
+        assert_eq!(
+            limit_provenance_path(&["limits", "self_hosted_context_window"]),
+            None
+        );
     }
 
     #[test]

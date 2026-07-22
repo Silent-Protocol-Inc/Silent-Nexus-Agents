@@ -121,6 +121,11 @@ messages into the session summary *before* the prompt is compiled:
   but the transcript and audit trail are unchanged.
 - The result is persisted, so a span is summarized once instead of being
   re-derived every turn, and repeated compactions append rather than overwrite.
+- The summary is capped at a share of the prompt budget, and a fold whose
+  summary would not be smaller than the messages it replaces is skipped. The
+  summary is pinned context the compiler may not trim, so an unbounded one does
+  not degrade a turn — it fails it. When the cap truncates, the summary says so
+  and keeps its most recent part.
 
 `ContextCompiler` still trims sections to fit as a last resort; it should now
 rarely have to, because the durable fold runs first and at a lower threshold.

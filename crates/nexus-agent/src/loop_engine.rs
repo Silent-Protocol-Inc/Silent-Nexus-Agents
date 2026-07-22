@@ -2857,6 +2857,11 @@ impl AgentLoop {
         /// compiler's own drop threshold so this runs first and the compiler
         /// never has to discard anything silently.
         const TRIGGER_PERCENT: usize = 75;
+        /// Floor and ceiling for the summary's share of the budget. The floor
+        /// keeps a tiny window from asking for a one-sentence recap; the
+        /// ceiling keeps a large one from spending the prompt on history.
+        const MIN_SUMMARY_TOKENS: usize = 256;
+        const MAX_SUMMARY_TOKENS: usize = 1_024;
 
         let budget = context_window.saturating_sub(reserved_output_tokens.max(1_024));
         if budget == 0 {
@@ -2878,17 +2883,36 @@ impl AgentLoop {
             return Ok(());
         }
 
+        // The summary is pinned context: the compiler may not trim it. So it
+        // gets a share of the budget rather than a fixed size, and a fold that
+        // cannot pay for itself is not worth a model call — folding two short
+        // messages into a longer recap spends tokens to *lose* history.
+        let summary_budget = (budget / 4).clamp(MIN_SUMMARY_TOKENS, MAX_SUMMARY_TOKENS);
         let folded: Vec<ChatMessage> = stale.iter().map(|(_, message)| message.clone()).collect();
-        let (summary, model_written) = self.summarize_for_compaction(&folded, model_name).await;
+        let stale_tokens: usize = folded
+            .iter()
+            .map(nexus_context::estimate_message_tokens)
+            .sum();
+        if stale_tokens <= summary_budget {
+            return Ok(());
+        }
+
+        let (summary, model_written) = self
+            .summarize_for_compaction(&folded, model_name, summary_budget)
+            .await;
+        let summary = truncate_to_tokens(&summary, summary_budget);
 
         // Append rather than replace: a session compacted twice must not lose
-        // what the first fold recorded.
+        // what the first fold recorded. The merged result is still capped —
+        // otherwise repeated folds grow the one section nothing can trim until
+        // no turn fits at all.
         let session = self.runtime.sessions.get(session_id.as_str())?;
         let merged = if session.summary.trim().is_empty() {
             summary
         } else {
             format!("{}\n{}", session.summary.trim_end(), summary)
         };
+        let merged = truncate_to_tokens(&merged, (budget / 2).max(summary_budget));
         self.runtime
             .sessions
             .set_summary(session_id.as_str(), &merged)?;
@@ -2924,6 +2948,7 @@ impl AgentLoop {
         &self,
         folded: &[ChatMessage],
         model_name: &str,
+        summary_budget: usize,
     ) -> (String, bool) {
         let transcript = folded
             .iter()
@@ -2948,7 +2973,7 @@ impl AgentLoop {
                 ),
                 ChatMessage::user(transcript),
             ],
-            max_tokens: Some(1_024),
+            max_tokens: Some(summary_budget),
             temperature: Some(0.0),
             ..Default::default()
         };
@@ -4686,6 +4711,33 @@ fn system_context_category(content: &str) -> ContextCategory {
 /// Mechanical summary used when the model cannot produce one. Deliberately
 /// states what it is: an operator reading it must not mistake a list of tool
 /// names for a record of what happened.
+/// Cap a session summary at `max_tokens`, keeping the **end**.
+///
+/// The summary is pinned context the compiler is not allowed to trim, so an
+/// oversized one does not degrade a turn — it fails it outright ("pinned
+/// context requires N tokens but model prompt budget is M"). Keeping the tail
+/// keeps the most recent fold, which is the one the next turn is most likely to
+/// need, and the marker says plainly that older detail is gone rather than
+/// leaving a summary that silently begins mid-sentence.
+fn truncate_to_tokens(summary: &str, max_tokens: usize) -> String {
+    if nexus_context::estimate_tokens(summary) <= max_tokens {
+        return summary.to_string();
+    }
+    const MARKER: &str = "[older summary detail dropped to fit the context window]\n";
+    // `estimate_tokens` is the inverse of this ratio; leave room for the marker.
+    let keep_chars = max_tokens.saturating_sub(nexus_context::estimate_tokens(MARKER)) * 7 / 2;
+    let kept: String = summary
+        .chars()
+        .skip(summary.chars().count().saturating_sub(keep_chars))
+        .collect();
+    // Resume at a line boundary so the tail does not start mid-sentence.
+    let kept = match kept.find('\n') {
+        Some(index) => &kept[index + 1..],
+        None => kept.as_str(),
+    };
+    format!("{MARKER}{kept}")
+}
+
 fn fallback_compaction_summary(folded: &[ChatMessage]) -> String {
     let mut tools: Vec<&str> = folded
         .iter()
@@ -4856,6 +4908,31 @@ fn idempotency_key(session_scope: &str, tool: &str, args: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_capped_summary_stays_inside_the_budget_it_was_given() {
+        let long = (0..400)
+            .map(|index| format!("line {index}: something that happened earlier in the session"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(nexus_context::estimate_tokens(&long) > 512);
+
+        let capped = truncate_to_tokens(&long, 512);
+        assert!(
+            nexus_context::estimate_tokens(&capped) <= 512,
+            "a summary the compiler cannot trim must fit the budget it was given, got {}",
+            nexus_context::estimate_tokens(&capped)
+        );
+        // The tail is what survives, and the loss is stated rather than implied.
+        assert!(capped.starts_with("[older summary detail dropped"));
+        assert!(capped.ends_with("line 399: something that happened earlier in the session"));
+    }
+
+    #[test]
+    fn a_summary_already_within_budget_is_left_exactly_as_written() {
+        let short = "[earlier in this session, 4 messages summarized]\nRenamed two files.";
+        assert_eq!(truncate_to_tokens(short, 512), short);
+    }
 
     fn turn_timeline(coalesce: bool) -> TurnTimeline {
         let store = Store::open_in_memory().expect("open store");
