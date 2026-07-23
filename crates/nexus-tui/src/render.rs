@@ -9,8 +9,8 @@
 use crate::state::{Focus, Mode, State, WrapLayoutCacheEntry};
 use crate::theme::Theme;
 use crate::views::{
-    ActivityDetail, ActivityTab, Form, Menu, Overlay, Pager, Palette, Progress, SecretInput,
-    SummaryPreview,
+    ActivityDetail, ActivityTab, AsideChat, Form, Menu, Overlay, Pager, Palette, Progress,
+    SecretInput, SummaryPreview,
 };
 use nexus_app::{Item, Report, Sev};
 use nexus_core::brand::{self, BrandConstraints, BrandLockup, BrandRole, BrandVariant};
@@ -1767,6 +1767,7 @@ fn draw_overlay(f: &mut Frame, area: Rect, overlay: &Overlay, st: &State, t: &Th
         Overlay::Progress(p) => draw_progress(f, area, p, st, t),
         Overlay::Summary(s) => draw_summary(f, area, s, t),
         Overlay::ActivityDetail(d) => draw_activity_detail(f, area, d, t),
+        Overlay::Aside(a) => draw_aside(f, area, a, t),
     }
 }
 
@@ -2378,6 +2379,80 @@ fn draw_secret(f: &mut Frame, area: Rect, s: &SecretInput, t: &Theme) {
             .wrap(Wrap { trim: false }),
         rect,
     );
+}
+
+fn draw_aside(f: &mut Frame, area: Rect, a: &AsideChat, t: &Theme) {
+    let rect = overlay_rect(area, 78, 22);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(t.secondary())
+        .title(Span::styled(" by the way — aside ", t.brand()));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+
+    // Body: the exchange log. Empty state explains what this surface is for.
+    let mut lines: Vec<Line> = Vec::new();
+    if a.exchanges.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Ask a question or hand the agent context.",
+            t.muted(),
+        )));
+        lines.push(Line::from(Span::styled(
+            "This runs separately — the main turn keeps going, and nothing here",
+            t.muted(),
+        )));
+        lines.push(Line::from(Span::styled(
+            "joins the transcript. It is kept as side context for this session.",
+            t.muted(),
+        )));
+    }
+    for exchange in &a.exchanges {
+        lines.push(Line::from(vec![
+            Span::styled("❯ ", t.primary()),
+            Span::styled(exchange.question.clone(), t.text()),
+        ]));
+        match &exchange.answer {
+            Some(answer) => {
+                for line in answer.lines() {
+                    lines.push(Line::from(Span::styled(line.to_string(), t.muted())));
+                }
+            }
+            None => lines.push(Line::from(Span::styled(
+                "  …thinking (separate from the main turn)",
+                t.secondary(),
+            ))),
+        }
+        lines.push(Line::from(""));
+    }
+    // Pin to the newest content: approximate wrapped height by logical lines.
+    let body_height = rows[0].height as usize;
+    let scroll = lines.len().saturating_sub(body_height) as u16;
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        rows[0],
+    );
+
+    // Footer: the input line and the key hint.
+    let footer = Text::from(vec![
+        Line::from(vec![
+            Span::styled("btw ❯ ", t.secondary()),
+            Span::styled(a.input().to_string(), t.text()),
+            Span::styled("▏", t.primary()),
+        ]),
+        Line::from(Span::styled(
+            "Enter ask · Esc close — kept as side context, never added to the transcript",
+            t.muted(),
+        )),
+    ]);
+    f.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), rows[1]);
 }
 
 fn draw_form(f: &mut Frame, area: Rect, form: &Form, t: &Theme) {

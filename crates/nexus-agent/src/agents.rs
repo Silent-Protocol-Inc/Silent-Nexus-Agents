@@ -140,10 +140,12 @@ impl AgentRole {
     }
 
     /// Tool categories this role may use. Read-only roles get no terminal or
-    /// write tools.
+    /// write tools, but every role may record memory: a curated, budgeted
+    /// (`max_memory_writes`) side store that is not a workspace mutation, so an
+    /// analyst role instructed to log its findings can actually do so.
     pub fn tool_categories(&self) -> Vec<ToolCategory> {
         use ToolCategory::*;
-        match self {
+        let mut cats = match self {
             AgentRole::Nexus | AgentRole::Orchestrator => {
                 vec![Filesystem, Repo, Terminal, Web, Diagnostics, Memory, Goal]
             }
@@ -171,7 +173,11 @@ impl AgentRole {
             AgentRole::AccessibilityReviewer
             | AgentRole::DependencyAuditor
             | AgentRole::UiUxReviewer => vec![Filesystem, Repo, Diagnostics, Web],
+        };
+        if !cats.contains(&Memory) {
+            cats.push(Memory);
         }
+        cats
     }
 
     /// Whether this role may mutate the workspace at all.
@@ -290,6 +296,21 @@ mod tests {
             assert!(!role.tool_categories().contains(&ToolCategory::Terminal));
             assert!(!role.can_write());
         }
+    }
+
+    #[test]
+    fn every_role_may_record_memory() {
+        // A read-only analyst told to log its findings must actually be able
+        // to reach the memory tool; granting Memory does not grant write/risk.
+        for role in AgentRole::all() {
+            assert!(
+                role.tool_categories().contains(&ToolCategory::Memory),
+                "{} lacks Memory",
+                role.as_str()
+            );
+        }
+        assert!(!AgentRole::Reviewer.can_write());
+        assert_eq!(AgentRole::Reviewer.max_risk(), RiskLevel::Read);
     }
 
     #[test]

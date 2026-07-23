@@ -1189,28 +1189,120 @@ fn plan_title(objective: &str) -> String {
     }
 }
 
+/// Detect the operator asserting their own name, anywhere in the message.
+///
+/// Two tiers keep this from firing on ordinary sentences. The strong forms
+/// (`my name is …`, `call me …`) are explicit enough to take whatever follows;
+/// the weaker self-introductions (`I'm …`, `I am …`, `this is …`) are only
+/// honored when what follows is name-shaped, so "I am tired" and "I'm working
+/// on the parser" produce nothing.
 fn explicit_name(text: &str) -> Option<&str> {
     let trimmed = text.trim();
+    // ASCII-lowercased haystack: same byte length, so indices map back onto the
+    // original slice and preserve the name's original casing.
     let lower = trimmed.to_ascii_lowercase();
-    for prefix in ["my name is ", "call me ", "you can call me "] {
-        if lower.starts_with(prefix) {
-            let candidate = trimmed[prefix.len()..]
-                .trim()
-                .trim_end_matches(['.', '!', '?'])
-                .trim();
-            if !candidate.is_empty()
-                && candidate.chars().count() <= 64
-                && candidate.chars().all(|character| {
-                    character.is_alphanumeric()
-                        || character.is_whitespace()
-                        || matches!(character, '-' | '_' | '\'' | '.')
-                })
-            {
-                return Some(candidate);
+
+    for marker in ["you can call me ", "my name is ", "call me "] {
+        if let Some(rest) = after_marker(trimmed, &lower, marker) {
+            if let Some(name) = free_name(rest) {
+                return Some(name);
+            }
+        }
+    }
+    for marker in ["i'm ", "i am ", "this is "] {
+        if let Some(rest) = after_marker(trimmed, &lower, marker) {
+            if let Some(name) = leading_name(rest) {
+                return Some(name);
             }
         }
     }
     None
+}
+
+/// The text following `marker`'s first occurrence at a word boundary (message
+/// start, or preceded by a non-alphanumeric character), sliced from `orig`.
+fn after_marker<'a>(orig: &'a str, lower: &str, marker: &str) -> Option<&'a str> {
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(marker) {
+        let idx = from + rel;
+        let boundary = idx == 0
+            || lower[..idx]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric());
+        if boundary {
+            return Some(&orig[idx + marker.len()..]);
+        }
+        from = idx + 1;
+    }
+    None
+}
+
+/// A strong-form name: everything up to the next sentence boundary, kept only
+/// if it reads as a name (letters, spaces, and the usual name punctuation).
+fn free_name(rest: &str) -> Option<&str> {
+    let end = rest
+        .find(['.', '!', '?', ',', ';', '\n'])
+        .unwrap_or(rest.len());
+    let candidate = rest[..end].trim();
+    if !candidate.is_empty()
+        && candidate.chars().count() <= 64
+        && candidate.chars().all(|character| {
+            character.is_alphanumeric()
+                || character.is_whitespace()
+                || matches!(character, '-' | '_' | '\'')
+        })
+    {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// A weak-form name: the leading 1–3 capitalized tokens, stopping at the first
+/// lowercase word or punctuation. Rejects "tired", "working on the parser".
+fn leading_name(rest: &str) -> Option<&str> {
+    let s = rest.trim_start();
+    let mut pos = 0usize;
+    let mut end = 0usize;
+    let mut count = 0usize;
+    while count < 3 && pos < s.len() {
+        let ws = s[pos..]
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(s.len() - pos);
+        pos += ws;
+        if pos >= s.len() {
+            break;
+        }
+        let tok_end = s[pos..]
+            .find(char::is_whitespace)
+            .map(|k| pos + k)
+            .unwrap_or(s.len());
+        let token = &s[pos..tok_end];
+        let core = token.trim_end_matches([',', '.', '!', '?', ';', ':']);
+        if core.is_empty() || !is_name_token(core) {
+            break;
+        }
+        end = pos + core.len();
+        count += 1;
+        pos = tok_end;
+        // Trailing punctuation ends the name phrase.
+        if core.len() != token.len() {
+            break;
+        }
+    }
+    (count > 0).then(|| &s[..end])
+}
+
+/// A single name-shaped token: an uppercase letter followed by letters and the
+/// interior punctuation names carry (`-`, `'`).
+fn is_name_token(token: &str) -> bool {
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() && c.is_uppercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_alphabetic() || matches!(c, '-' | '\''))
 }
 
 fn explicit_memory(text: &str) -> Option<&str> {
@@ -1241,6 +1333,25 @@ mod tests {
         assert_eq!(explicit_name("call me Alex"), Some("Alex"));
         assert_eq!(explicit_name("I am tired"), None);
         assert_eq!(explicit_name("my name might be Sans"), None);
+    }
+
+    #[test]
+    fn explicit_identity_detection_reads_self_introductions_anywhere() {
+        // Weak forms are accepted when what follows is name-shaped …
+        assert_eq!(explicit_name("I'm Sans"), Some("Sans"));
+        assert_eq!(explicit_name("hi, I am Sans"), Some("Sans"));
+        assert_eq!(explicit_name("this is Sans"), Some("Sans"));
+        // … anywhere in the message, and stopping at punctuation.
+        assert_eq!(explicit_name("btw I'm Sans, can you help?"), Some("Sans"));
+        assert_eq!(
+            explicit_name("I'm Jean-Luc and I love rust"),
+            Some("Jean-Luc")
+        );
+        // … but not when what follows is an ordinary lowercase clause.
+        assert_eq!(explicit_name("I'm working on the parser"), None);
+        assert_eq!(explicit_name("this is a test"), None);
+        // Strong forms still work mid-sentence.
+        assert_eq!(explicit_name("ok, my name is Sans"), Some("Sans"));
     }
 
     #[test]

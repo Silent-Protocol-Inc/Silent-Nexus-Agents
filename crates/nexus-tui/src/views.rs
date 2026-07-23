@@ -102,6 +102,11 @@ pub enum UiAction {
         workspace: bool,
         entries: Vec<(String, String)>,
     },
+    /// Ask the `/btw` aside sidecar a question from the pop-up. Runs
+    /// concurrently with the main turn and never joins the transcript.
+    AsideAsk {
+        text: String,
+    },
 }
 
 /// Data loads the event loop performs in the background for views.
@@ -763,6 +768,80 @@ impl SecretInput {
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.value.push(c);
+                Outcome::Consumed
+            }
+            _ => Outcome::Consumed,
+        }
+    }
+}
+
+// ---------------------------------------------------------------- /btw aside
+
+/// One question/answer pair in the `/btw` aside. `answer` is `None` while the
+/// sidecar is still working.
+pub struct AsideExchange {
+    pub question: String,
+    pub answer: Option<String>,
+}
+
+/// The `/btw` aside: a pop-up the operator types into to ask the agent a
+/// question or hand it context. Answered by the read-only sidecar concurrently
+/// with the main turn — the exchange informs this session as side context but
+/// never enters the transcript or disturbs the running inference.
+#[derive(Default)]
+pub struct AsideChat {
+    input: String,
+    pub exchanges: Vec<AsideExchange>,
+    /// A sidecar call is in flight; block a second until it lands.
+    pub pending: bool,
+}
+
+impl AsideChat {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    /// Record a new question awaiting an answer and mark a call in flight.
+    /// Used both by the Enter key and by `/btw <note>` seeding the first ask.
+    pub fn begin(&mut self, question: String) {
+        self.exchanges.push(AsideExchange {
+            question,
+            answer: None,
+        });
+        self.pending = true;
+    }
+
+    /// Attach the sidecar's reply to the most recent unanswered question.
+    pub fn resolve(&mut self, answer: String) {
+        if let Some(exchange) = self.exchanges.iter_mut().rev().find(|e| e.answer.is_none()) {
+            exchange.answer = Some(answer);
+        }
+        self.pending = false;
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Esc => Outcome::Close,
+            KeyCode::Backspace => {
+                self.input.pop();
+                Outcome::Consumed
+            }
+            KeyCode::Enter => {
+                let text = self.input.trim().to_string();
+                // One aside in flight at a time keeps `resolve` unambiguous.
+                if text.is_empty() || self.pending {
+                    return Outcome::Consumed;
+                }
+                self.input.clear();
+                self.begin(text.clone());
+                Outcome::ActionKeepOpen(UiAction::AsideAsk { text })
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input.push(c);
                 Outcome::Consumed
             }
             _ => Outcome::Consumed,
@@ -1612,6 +1691,7 @@ pub enum Overlay {
     Progress(Progress),
     Summary(SummaryPreview),
     ActivityDetail(Box<ActivityDetail>),
+    Aside(AsideChat),
 }
 
 impl Overlay {
@@ -1626,6 +1706,7 @@ impl Overlay {
             Overlay::Progress(p) => p.handle_key(key),
             Overlay::Summary(s) => s.handle_key(key),
             Overlay::ActivityDetail(d) => d.handle_key(key),
+            Overlay::Aside(a) => a.handle_key(key),
         }
     }
 }
@@ -2101,5 +2182,48 @@ mod tests {
             Outcome::Action(_) => "Action",
             Outcome::ActionKeepOpen(_) => "ActionKeepOpen",
         }
+    }
+
+    #[test]
+    fn aside_enter_asks_and_keeps_the_popup_open() {
+        let mut aside = AsideChat::new();
+        for c in "hi there".chars() {
+            assert_eq!(
+                discriminant_name(&aside.handle_key(key(KeyCode::Char(c)))),
+                "Consumed"
+            );
+        }
+        match aside.handle_key(key(KeyCode::Enter)) {
+            Outcome::ActionKeepOpen(UiAction::AsideAsk { text }) => assert_eq!(text, "hi there"),
+            other => panic!("expected AsideAsk, got {}", discriminant_name(&other)),
+        }
+        // The question is recorded, a call is in flight, and the input cleared.
+        assert!(aside.pending);
+        assert_eq!(aside.exchanges.len(), 1);
+        assert!(aside.exchanges[0].answer.is_none());
+        assert!(aside.input().is_empty());
+
+        // A second Enter is ignored until the first reply lands.
+        assert_eq!(
+            discriminant_name(&aside.handle_key(key(KeyCode::Enter))),
+            "Consumed"
+        );
+        aside.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(
+            discriminant_name(&aside.handle_key(key(KeyCode::Enter))),
+            "Consumed"
+        );
+        assert_eq!(aside.exchanges.len(), 1);
+
+        // The reply attaches to the pending question and frees the next ask.
+        aside.resolve("an answer".into());
+        assert!(!aside.pending);
+        assert_eq!(aside.exchanges[0].answer.as_deref(), Some("an answer"));
+
+        // Esc closes the pop-up.
+        assert_eq!(
+            discriminant_name(&aside.handle_key(key(KeyCode::Esc))),
+            "Close"
+        );
     }
 }

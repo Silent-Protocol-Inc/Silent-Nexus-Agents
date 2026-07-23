@@ -95,6 +95,11 @@ enum UiMsg {
         title: Option<String>,
         report: Report,
     },
+    /// The `/btw` sidecar's reply, routed to the open aside pop-up.
+    AsideAnswer {
+        generation: u64,
+        answer: String,
+    },
 }
 
 /// Typed data for view loads.
@@ -1504,6 +1509,85 @@ fn run_command_parsed(
     run_command_parsed_with_mode(st, cmd, app, session, ui_tx, true);
 }
 
+/// The read-only grounding handed to the `/btw` sidecar: a compact view of the
+/// recent durable timeline. Shared by the command path and the aside pop-up.
+fn aside_sidecar_context(st: &State) -> String {
+    let timeline = st
+        .timeline
+        .iter()
+        .rev()
+        .take(32)
+        .map(|event| {
+            format!(
+                "{} [{}] {}",
+                event.kind.type_label(),
+                event.status.as_str(),
+                event.summary
+            )
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Durable timeline:\n{timeline}")
+}
+
+/// The `/btw` report body, minus its title — the answer plus its side-context
+/// note, for display inside the aside pop-up.
+fn report_body_text(report: &Report) -> String {
+    report
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            nexus_app::Item::Line { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Run one `/btw` aside from the pop-up: record the note and, if it reads as a
+/// question, answer it — concurrently, without disturbing the main turn or its
+/// transcript. The reply is delivered back to the overlay via `AsideAnswer`.
+fn ask_aside(
+    st: &mut State,
+    text: String,
+    app: &Arc<App>,
+    session: &mut Option<SessionId>,
+    ui_tx: &mpsc::UnboundedSender<UiMsg>,
+) {
+    // Reuse the active session untouched. Only when there is none — i.e. the
+    // operator is idle, so nothing is running to disturb — open and adopt one.
+    let session_id = match session.as_ref() {
+        Some(id) => id.as_str().to_string(),
+        None => match nexus_app::services::btw_session(app, None) {
+            Ok((id, _created)) => {
+                attach_session(st, &id, app, session);
+                id
+            }
+            Err(e) => {
+                if let Some(Overlay::Aside(aside)) = st.overlays.last_mut() {
+                    aside.resolve(format!("could not open a session: {e}"));
+                }
+                return;
+            }
+        },
+    };
+    let app2 = app.clone();
+    let tx = ui_tx.clone();
+    let generation = st.generation;
+    let context = aside_sidecar_context(st);
+    st.busy += 1;
+    tokio::spawn(async move {
+        let answer = match nexus_app::services::btw(&app2, &session_id, &text, &context).await {
+            Ok(report) => report_body_text(&report),
+            Err(e) => format!("sidecar error: {e}"),
+        };
+        let _ = tx.send(UiMsg::AsideAnswer { generation, answer });
+    });
+}
+
 fn run_command_parsed_with_mode(
     st: &mut State,
     cmd: nexus_app::SlashCommand,
@@ -1531,9 +1615,27 @@ fn run_command_parsed_with_mode(
         return;
     }
 
-    if nexus_app::registry::find(&cmd.name).is_some() {
+    if let Some(def) = nexus_app::registry::find(&cmd.name) {
         let name = cmd.name.clone();
         let _ = app.update_ui_state(move |s| s.push_recent_command(&name));
+
+        // `/btw` opens the aside pop-up: a separate surface for asking the agent
+        // or handing it context, answered concurrently without touching the
+        // main turn or its transcript. Flag forms (`--list`, `--clear`, and the
+        // deprecated `--remember`/`--add`) still route through the CLI path.
+        if def.id == nexus_app::registry::CommandId::Btw
+            && !cmd.args.iter().any(|arg| arg.starts_with("--"))
+        {
+            st.push_overlay(Overlay::Aside(views::AsideChat::new()));
+            let note = cmd.rest.trim().to_string();
+            if !note.is_empty() {
+                if let Some(Overlay::Aside(aside)) = st.overlays.last_mut() {
+                    aside.begin(note.clone());
+                }
+                ask_aside(st, note, app, session, ui_tx);
+            }
+            return;
+        }
     }
 
     let exec_ctx = ExecCtx {
@@ -1546,27 +1648,7 @@ fn run_command_parsed_with_mode(
             pending_approvals: st.pending_approvals,
             last_error: st.last_error.clone(),
         },
-        sidecar_context: {
-            let timeline = st
-                .timeline
-                .iter()
-                .rev()
-                .take(32)
-                .map(|event| {
-                    format!(
-                        "{} [{}] {}",
-                        event.kind.type_label(),
-                        event.status.as_str(),
-                        event.summary
-                    )
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("Durable timeline:\n{timeline}")
-        },
+        sidecar_context: aside_sidecar_context(st),
     };
     let app2 = app.clone();
     let tx = ui_tx.clone();
@@ -1787,6 +1869,16 @@ fn handle_ui_msg(
             match title {
                 Some(title) => st.push_overlay(Overlay::Pager(Pager::new(title, report))),
                 None => st.push_report(&report),
+            }
+        }
+        UiMsg::AsideAnswer { generation, answer } => {
+            st.busy = st.busy.saturating_sub(1);
+            let _ = generation;
+            // Deliver only if the aside is still open; if the operator closed
+            // it, the note was already recorded, so the reply is simply dropped
+            // rather than leaking into the main transcript.
+            if let Some(Overlay::Aside(aside)) = st.overlays.last_mut() {
+                aside.resolve(answer);
             }
         }
     }
@@ -2127,6 +2219,7 @@ fn handle_action(
         }
         UiAction::Load(req) => start_load(st, req, app, ui_tx),
         UiAction::AttachSession(id) => attach_session(st, &id, app, session),
+        UiAction::AsideAsk { text } => ask_aside(st, text, app, session, ui_tx),
         UiAction::ResumeGoal(id) => resume_goal(st, &id, app, session),
         UiAction::SetTheme(name) => {
             let name2 = name.clone();

@@ -1,5 +1,39 @@
 # Changelog
 
+## [2.9.0] — 2026-07-24
+
+### Added
+
+- `/btw` now opens an **aside pop-up** you type into, instead of answering
+  inline in the transcript. Ask the agent a question or hand it context there
+  and it is answered by the read-only sidecar **concurrently** — the main turn's
+  inference keeps running and nothing from the aside joins the conversation
+  history. Whatever you say is still recorded as session-scoped side context (so
+  later turns are informed without re-paying for it), exactly as before; only
+  the surface changed. `/btw <note>` opens the pop-up and asks in one step;
+  `/btw --list` / `--clear` still work from the command line.
+
+### Changed
+
+- Every agent role can now record memory. A read-only role such as **reviewer**
+  previously had no memory tool at all, so instructing a review subagent to note
+  its findings to `/memory` silently did nothing. Memory is a curated, budgeted
+  side store rather than a workspace mutation, so granting it does not raise a
+  role's write or risk ceiling.
+- The reasoning-effort picker (low / medium / high / …) now reappears when you
+  re-select an **already-configured** Codex model. It was only offered the first
+  time a model was added; selecting a saved model afterward pinned it silently at
+  its original effort with no way to change it. Re-picking updates the existing
+  entry in place.
+
+### Fixed
+
+- The operator's name is now detected far more widely so a profile card is
+  created automatically. Detection was limited to `my name is …` / `call me …`
+  at the very start of a message; it now recognizes self-introductions
+  (`I'm …`, `I am …`, `this is …`) **anywhere** in a message, while a
+  name-shape check keeps ordinary sentences like "I am tired" from matching.
+
 ## [2.8.0] — 2026-07-22
 
 ### Changed

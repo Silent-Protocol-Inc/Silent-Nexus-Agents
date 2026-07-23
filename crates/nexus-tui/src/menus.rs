@@ -779,15 +779,30 @@ pub fn provider_menu(
 ) -> Menu {
     let mut items = Vec::new();
 
-    // Configured entries first (selectable immediately).
+    // Configured entries first (selectable immediately). Codex entries route
+    // back through the reasoning-effort picker so the effort can be changed on
+    // an already-saved model — selecting it directly would pin it silently at
+    // whatever effort it was first saved with.
     for (name, model_id) in configured {
-        items.push(
-            MenuItem::new(
+        let (label, action, detail) = if entry.id == "codex" {
+            (
+                format!("Select {name}"),
+                UiAction::PickCodexEffort {
+                    model_id: model_id.clone(),
+                },
+                format!("model {model_id} — pick reasoning effort, then pin routing"),
+            )
+        } else {
+            (
                 format!("Select {name}"),
                 UiAction::SelectModel(name.clone()),
+                format!("model {model_id} — pins routing to this entry"),
             )
-            .badge("configured")
-            .detail(format!("model {model_id} — pins routing to this entry")),
+        };
+        items.push(
+            MenuItem::new(label, action)
+                .badge("configured")
+                .detail(detail),
         );
         items.push(
             MenuItem::new(
