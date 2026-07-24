@@ -791,6 +791,10 @@ fn component_header(
     let mark = match &event.kind {
         TimelineKind::BackgroundTask { .. } if !failed => "◆",
         TimelineKind::ProviderLimit { .. } => "△",
+        // `◢` while a segment is live, `◆` once it is part of the record. The
+        // pair reads as one thing settling rather than two different events.
+        TimelineKind::AgentActivity { .. } if running => "◢",
+        TimelineKind::AgentActivity { .. } => "◆",
         _ => mark,
     };
 
@@ -864,6 +868,21 @@ fn component_header(
             retryable.then(|| "retryable".to_string()).or(duration),
         ),
         TimelineKind::ProviderLimit { .. } => ("Provider limit".to_string(), None),
+        // Whoever is actually running names itself, and the phase says what
+        // kind of moment this is. Neither is ever a hardcoded product name.
+        TimelineKind::AgentActivity {
+            role, step, phase, ..
+        } => {
+            let role = role.trim();
+            let role = if role.is_empty() { "AGENT" } else { role };
+            let step = step
+                .map(|(index, total)| format!(" · STEP {index}/{total}"))
+                .unwrap_or_default();
+            (
+                format!("{} {}{step}", role.to_uppercase(), phase.label()),
+                duration,
+            )
+        }
         // The answer is the point of the turn: no status word, no type label,
         // just a quiet marker and any evidence worth citing.
         TimelineKind::FinalAnswer { .. } => ("Answer".to_string(), {
@@ -882,6 +901,8 @@ fn component_header(
     let body_style = match &event.kind {
         TimelineKind::Error { .. } => t.failure(),
         TimelineKind::ProviderLimit { .. } => t.warning(),
+        // Identity, in the accent that means identity everywhere else.
+        TimelineKind::AgentActivity { .. } => t.secondary(),
         _ => t.text(),
     };
     let mut spans = vec![
@@ -953,6 +974,7 @@ fn event_lines(
         | TimelineKind::AssistantMessage { text, .. }
         | TimelineKind::FinalAnswer { text }
         | TimelineKind::ReasoningSummary { text }
+        | TimelineKind::AgentActivity { text, .. }
         | TimelineKind::Notice { text, .. } => !text.trim().is_empty(),
         TimelineKind::Error { message, .. }
         | TimelineKind::Retry {
@@ -974,6 +996,25 @@ fn event_lines(
         }
         TimelineKind::ReasoningSummary { text } => {
             push_wrapped(&mut lines, text, width, t.muted());
+        }
+        TimelineKind::AgentActivity { text, tools, .. } => {
+            push_wrapped(&mut lines, text, width, t.text());
+            // The tools that ran under this segment, listed once here instead
+            // of narrated one by one above. Bounded: a segment that ran forty
+            // reads should not push the rest of the turn off the screen.
+            const MAX_TOOL_ROWS: usize = 6;
+            let tier = crate::glyphs::tier();
+            for tool in tools.iter().take(MAX_TOOL_ROWS) {
+                push_wrapped(
+                    &mut lines,
+                    &format!("  {} {tool}", crate::glyphs::tool_glyph(tool, tier)),
+                    width,
+                    t.muted(),
+                );
+            }
+            if let Some(extra) = tools.len().checked_sub(MAX_TOOL_ROWS).filter(|n| *n > 0) {
+                push_wrapped(&mut lines, &format!("  +{extra} more"), width, t.muted());
+            }
         }
         TimelineKind::Notice { text, severity } => {
             let style = match severity.as_str() {
@@ -3355,6 +3396,80 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert_eq!(text.matches(&event.summary).count(), 1, "{text}");
+        }
+    }
+
+    fn activity_event(
+        role: &str,
+        step: Option<(u32, u32)>,
+        tools: &[&str],
+    ) -> nexus_core::timeline::TimelineEvent {
+        message_event(
+            "activity",
+            TimelineKind::AgentActivity {
+                role: role.into(),
+                step,
+                phase: nexus_core::timeline::ActivityPhase::Analysis,
+                text: "Inspecting repository structure before choosing the review path.".into(),
+                tools: tools.iter().map(|tool| tool.to_string()).collect(),
+            },
+        )
+    }
+
+    fn rendered(event: &nexus_core::timeline::TimelineEvent, width: usize) -> String {
+        let theme = Theme::new("nexus-dark", ColorSupport::None);
+        event_lines(
+            event,
+            TranscriptDetail::Compact,
+            false,
+            false,
+            width,
+            &theme,
+        )
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
+    #[test]
+    fn activity_header_names_the_running_role_and_its_step() {
+        let text = rendered(
+            &activity_event("reviewer", Some((2, 5)), &["repo.structure"]),
+            80,
+        );
+        assert!(text.contains("REVIEWER ANALYSIS"), "{text}");
+        assert!(text.contains("STEP 2/5"), "{text}");
+        assert!(text.contains("choosing the review path"), "{text}");
+    }
+
+    #[test]
+    fn an_unnamed_role_renders_as_agent_not_a_product_name() {
+        let text = rendered(&activity_event("   ", None, &[]), 80);
+        assert!(text.contains("AGENT ANALYSIS"), "{text}");
+        // A plan-less turn simply has no step to show.
+        assert!(!text.contains("STEP"), "{text}");
+    }
+
+    #[test]
+    fn grouped_tools_are_listed_once_and_bounded() {
+        let many: Vec<String> = (0..12).map(|i| format!("fs.read_file_{i}")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let text = rendered(&activity_event("reviewer", None, &refs), 80);
+        assert!(text.contains("fs.read_file_0"), "{text}");
+        // A segment with forty reads must not push the turn off the screen.
+        assert!(!text.contains("fs.read_file_11"), "{text}");
+        assert!(text.contains("+6 more"), "{text}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_renders_activity_without_panicking() {
+        for width in [8, 20, 40] {
+            let text = rendered(
+                &activity_event("implementer", Some((10, 10)), &["fs.write_file"]),
+                width,
+            );
+            assert!(!text.is_empty(), "width {width}");
         }
     }
 

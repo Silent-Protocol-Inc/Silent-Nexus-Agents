@@ -13,6 +13,7 @@
 //! counter, so a stale result can never overwrite a newer view.
 
 mod approver;
+mod glyphs;
 mod input;
 mod intro;
 mod layout;
@@ -301,6 +302,7 @@ async fn event_loop(
         _ => 2,
     };
     st.reduced_motion = st.reduced_motion || activity.reduced_motion;
+    glyphs::configure(&activity.tool_icons);
     st.active_work = nexus_app::services::active_work_snapshot(&app, None, "idle");
 
     // Channels.
@@ -638,6 +640,9 @@ fn apply_turn_done(
     st.turn_started = None;
     st.turn_abort = None;
     st.active_turn_id = None;
+    // Read the step counts before the tracker goes: a paused run has to be
+    // able to say how far it got, and that is the only place holding it.
+    let progress = st.pinned_plan.as_ref().map(|plan| plan.progress());
     // The tracker is a live view of work in progress. With the turn over it has
     // nothing left to track, and the plan is already in the transcript once —
     // leaving it pinned would park stale state above the composer.
@@ -645,14 +650,30 @@ fn apply_turn_done(
     // A turn that ended while a review was outstanding has no one left to
     // answer; drop the request rather than leaving the panel asking forever.
     st.plan_review = None;
+    // The open activity segment belongs to a turn that is over.
+    st.live_activity_events.remove(turn_id.as_str());
     match result {
         Ok(outcome) => {
             st.bar.tokens_in += outcome.input_tokens;
             st.bar.tokens_out += outcome.output_tokens;
             st.bar.tokens_cached += outcome.cache.read;
+            // One classification, so the line above the composer cannot say
+            // "done" about a run that paused with steps outstanding.
+            let run = outcome.outcome();
+            let progress = progress
+                .filter(|(_, total)| *total > 0)
+                .map(|(done, total)| format!(" · {done}/{total} tasks"))
+                .unwrap_or_default();
+            let resumable = if run.is_resumable() {
+                " · resumable"
+            } else {
+                ""
+            };
             st.activity(format!(
-                "turn done · {} steps · {} tool calls · {}",
-                outcome.steps, outcome.tool_calls, outcome.stopped_reason
+                "{}{progress}{resumable} · {} steps · {} tool calls",
+                run.label(),
+                outcome.steps,
+                outcome.tool_calls
             ));
         }
         Err(error) => {
@@ -3661,6 +3682,93 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
         LoopEvent::ThinkingResolved { show, reason, .. } => {
             st.thinking_show = Some(show);
             st.thinking_reason = Some(reason);
+        }
+        LoopEvent::AgentActivity {
+            role,
+            step,
+            phase,
+            text,
+        } => {
+            let open = st.live_activity_events.get(&turn_key).cloned();
+            // Same phase and a text that grows from what is on screen is the
+            // stream still arriving; anything else is a new direction. Without
+            // this test every partial chunk would append its own row.
+            let extends = open.as_ref().is_some_and(|(_, open_phase, open_text)| {
+                *open_phase == phase
+                    && (text.starts_with(open_text.as_str()) || open_text.starts_with(&text))
+            });
+            let kind = TimelineKind::AgentActivity {
+                role,
+                step,
+                phase,
+                text: text.clone(),
+                // The live card knows only what it was told; the tools are
+                // attached by the durable timeline, which owns that record.
+                tools: Vec::new(),
+            };
+            let summary = text.chars().take(120).collect::<String>();
+            match (extends, open) {
+                (true, Some((id, _, _))) => {
+                    st.update_event(
+                        &id,
+                        TimelineEventUpdate {
+                            status: TimelineStatus::Running,
+                            phase: LifecyclePhase::Progress,
+                            summary: Some(summary),
+                            kind,
+                            duration_ms: None,
+                            artifacts: Vec::new(),
+                        },
+                    );
+                    st.live_activity_events.insert(turn_key, (id, phase, text));
+                }
+                (_, previous) => {
+                    if let Some((id, previous_phase, previous_text)) = previous {
+                        st.update_event(
+                            &id,
+                            TimelineEventUpdate {
+                                status: TimelineStatus::Completed,
+                                phase: LifecyclePhase::Completed,
+                                summary: None,
+                                kind: TimelineKind::AgentActivity {
+                                    role: st.bar.agent.clone(),
+                                    step: None,
+                                    phase: previous_phase,
+                                    text: previous_text,
+                                    tools: Vec::new(),
+                                },
+                                duration_ms: None,
+                                artifacts: Vec::new(),
+                            },
+                        );
+                    }
+                    let id = st.push_local_event_for_turn(
+                        turn_id.clone(),
+                        TimelineStatus::Running,
+                        summary,
+                        kind,
+                    );
+                    st.live_activity_events.insert(turn_key, (id, phase, text));
+                }
+            }
+        }
+        LoopEvent::ProviderLimitReached {
+            provider,
+            kind,
+            reset_at,
+            message,
+        } => {
+            st.push_local_event_for_turn(
+                turn_id.clone(),
+                TimelineStatus::Waiting,
+                message.chars().take(120).collect::<String>(),
+                TimelineKind::ProviderLimit {
+                    provider,
+                    limit_kind: kind,
+                    reset_at,
+                    message,
+                },
+            );
         }
         LoopEvent::ReasoningSummary(t) if st.thinking_mode != nexus_core::ThinkingMode::Off => {
             if let Some(id) = st.live_assistant_events.remove(&turn_key) {

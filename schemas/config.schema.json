@@ -52,6 +52,29 @@
           "default": false,
           "description": "Show token usage in progress/completion summaries.",
           "type": "boolean"
+        },
+        "tool_icons": {
+          "default": "geometric",
+          "description": "Marks drawn beside tool rows: `geometric` (default), `emoji`, `ascii`.\n\nGeometric is the default because it is single-width in every terminal and needs no emoji font. `emoji` is opt-in: those marks are two cells wide and render as boxes on several mobile clients. A terminal that cannot draw Unicode at all falls back to `ascii` whatever this says.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "CompactionConfig": {
+      "additionalProperties": false,
+      "description": "Folding a turn's own history so it can keep going.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Turning this off restores the pre-2.10 behaviour: a turn that outgrows its window stops instead of folding.",
+          "type": "boolean"
+        },
+        "trigger_ratio": {
+          "default": 0.75,
+          "description": "Fraction of the prompt budget that triggers a fold, 0.1–0.95. Below the context compiler's own drop threshold so this runs first and nothing is discarded silently.",
+          "format": "float",
+          "type": "number"
         }
       },
       "type": "object"
@@ -117,6 +140,18 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "context_compaction": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CompactionConfig"
+            }
+          ],
+          "default": {
+            "enabled": true,
+            "trigger_ratio": 0.75
+          },
+          "description": "When a turn folds its own history to keep going."
+        },
         "goal_runtime_budget_min": {
           "default": 120,
           "description": "Default per-goal wall-clock budget in minutes.",
@@ -130,6 +165,20 @@
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "local_runaway_guard": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RunawayGuardConfig"
+            }
+          ],
+          "default": {
+            "enabled": true,
+            "max_identical_tool_repeats": 3,
+            "max_no_progress_cycles": 3,
+            "max_weighted_tokens": null
+          },
+          "description": "Protection against an agent that has stopped getting anywhere."
         },
         "max_cost_micros_per_turn": {
           "default": 0,
@@ -214,6 +263,18 @@
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "retry": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RetryConfig"
+            }
+          ],
+          "default": {
+            "max_attempts": 3,
+            "max_wait_seconds": 120
+          },
+          "description": "How long to sit out a provider's rate limit before giving up on it."
         },
         "self_hosted_context_window": {
           "default": 32768,
@@ -568,6 +629,27 @@
       },
       "type": "object"
     },
+    "RetryConfig": {
+      "additionalProperties": false,
+      "description": "Waiting out a provider quota, within bounds.\n\nThe bounds are the point. A window that resets in twenty seconds is worth waiting for; one that resets in six hours is not something to block a terminal on, and neither is an unbounded sequence of short waits.",
+      "properties": {
+        "max_attempts": {
+          "default": 3,
+          "description": "Rate-limit waits one turn will sit out before pausing instead.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_wait_seconds": {
+          "default": 120,
+          "description": "Longest single wait. A reset further out than this pauses the run so the operator decides, rather than the terminal blocking on it.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "RoutingConfig": {
       "additionalProperties": false,
       "properties": {
@@ -600,6 +682,42 @@
           "description": "Model name for trivial classification/routing turns.",
           "type": [
             "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RunawayGuardConfig": {
+      "additionalProperties": false,
+      "description": "Local protection against a loop that is no longer making progress.\n\nDistinct from the provider's quota and from the model's context window, which are not ours to set. This is the harness deciding that continuing has stopped being useful — so it is measured in *progress*, and only secondarily in tokens.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Turning this off leaves `max_tokens_per_turn` as the only backstop.",
+          "type": "boolean"
+        },
+        "max_identical_tool_repeats": {
+          "default": 3,
+          "description": "Repeats of one identical call before the guard fires.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_no_progress_cycles": {
+          "default": 3,
+          "description": "Consecutive cycles that change nothing before the guard fires.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_weighted_tokens": {
+          "default": null,
+          "description": "Weighted token ceiling for one turn. Unset inherits `max_tokens_per_turn`, so an existing configuration keeps its number.\n\nWeighted, not raw: input served from a provider cache bills at roughly a tenth of the full rate, and counting it whole made a warm turn look as expensive as a cold one. What the context gauge reports is unaffected — that still shows the true size of the prompt.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
             "null"
           ]
         }
@@ -744,7 +862,8 @@
             "reasoning_preview_lines": 3,
             "reduced_motion": false,
             "show_diagnostics": false,
-            "show_token_usage": false
+            "show_token_usage": false,
+            "tool_icons": "geometric"
           },
           "description": "Live activity / inference timeline behavior (`[tui.activity]`)."
         }
@@ -833,8 +952,18 @@
       ],
       "default": {
         "completion_reserve_tokens": 1024,
+        "context_compaction": {
+          "enabled": true,
+          "trigger_ratio": 0.75
+        },
         "goal_runtime_budget_min": 120,
         "goal_step_budget": 200,
+        "local_runaway_guard": {
+          "enabled": true,
+          "max_identical_tool_repeats": 3,
+          "max_no_progress_cycles": 3,
+          "max_weighted_tokens": null
+        },
         "max_cost_micros_per_turn": 0,
         "max_failures_per_turn": 6,
         "max_memory_writes_per_turn": 8,
@@ -847,6 +976,10 @@
         "max_tokens_per_turn": 250000,
         "max_tool_calls_per_turn": 48,
         "max_turn_runtime_min": 30,
+        "retry": {
+          "max_attempts": 3,
+          "max_wait_seconds": 120
+        },
         "self_hosted_context_window": 32768,
         "self_hosted_max_tokens_per_turn": 5000000
       }
@@ -971,7 +1104,8 @@
           "reasoning_preview_lines": 3,
           "reduced_motion": false,
           "show_diagnostics": false,
-          "show_token_usage": false
+          "show_token_usage": false,
+          "tool_icons": "geometric"
         }
       },
       "description": "Terminal UI preferences, e.g. `[tui.activity]`."

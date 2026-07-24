@@ -168,6 +168,12 @@ pub struct State {
     /// Streaming assistant cards, keyed by logical turn. A turn can update
     /// only its own card, even if an older task drains after a new turn starts.
     pub live_assistant_events: std::collections::BTreeMap<String, String>,
+    /// The open activity segment per turn: `(event id, phase, text)`. Keeping
+    /// the phase and text is what lets a streamed update land on the same card
+    /// while a genuine change of direction opens a new one — without it, every
+    /// partial chunk would be its own row.
+    pub live_activity_events:
+        std::collections::BTreeMap<String, (String, nexus_core::timeline::ActivityPhase, String)>,
     /// Terminal assistant cards, keyed by logical turn. This makes terminal
     /// delivery idempotent without comparing answer text across turns.
     pub terminal_events: std::collections::BTreeMap<String, String>,
@@ -278,6 +284,7 @@ impl State {
             collapsed_cards: std::collections::BTreeSet::new(),
             selected_event: None,
             live_assistant_events: std::collections::BTreeMap::new(),
+            live_activity_events: std::collections::BTreeMap::new(),
             terminal_events: std::collections::BTreeMap::new(),
             turn_sequences: std::collections::BTreeMap::new(),
             active_turn_id: None,
@@ -613,6 +620,7 @@ impl State {
             .unwrap_or(0);
         self.selected_event = self.timeline.len().checked_sub(1);
         self.live_assistant_events.clear();
+        self.live_activity_events.clear();
         self.terminal_events.clear();
         self.turn_sequences.clear();
         self.active_turn_id = None;

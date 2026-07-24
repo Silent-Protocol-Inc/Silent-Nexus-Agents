@@ -116,6 +116,13 @@ pub struct ActivityConfig {
     pub reduced_motion: bool,
     /// Coalesce related events (tool start/complete, retries) into one entry.
     pub coalesce_events: bool,
+    /// Marks drawn beside tool rows: `geometric` (default), `emoji`, `ascii`.
+    ///
+    /// Geometric is the default because it is single-width in every terminal
+    /// and needs no emoji font. `emoji` is opt-in: those marks are two cells
+    /// wide and render as boxes on several mobile clients. A terminal that
+    /// cannot draw Unicode at all falls back to `ascii` whatever this says.
+    pub tool_icons: String,
 }
 
 impl Default for ActivityConfig {
@@ -130,6 +137,7 @@ impl Default for ActivityConfig {
             animation_speed: "normal".into(),
             reduced_motion: false,
             coalesce_events: true,
+            tool_icons: "geometric".into(),
         }
     }
 }
@@ -612,6 +620,94 @@ pub struct LimitsConfig {
     pub goal_runtime_budget_min: u32,
     /// Tokens reserved for the model completion when packing context.
     pub completion_reserve_tokens: usize,
+    /// Protection against an agent that has stopped getting anywhere.
+    pub local_runaway_guard: RunawayGuardConfig,
+    /// When a turn folds its own history to keep going.
+    pub context_compaction: CompactionConfig,
+    /// How long to sit out a provider's rate limit before giving up on it.
+    pub retry: RetryConfig,
+}
+
+/// Waiting out a provider quota, within bounds.
+///
+/// The bounds are the point. A window that resets in twenty seconds is worth
+/// waiting for; one that resets in six hours is not something to block a
+/// terminal on, and neither is an unbounded sequence of short waits.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct RetryConfig {
+    /// Rate-limit waits one turn will sit out before pausing instead.
+    pub max_attempts: u32,
+    /// Longest single wait. A reset further out than this pauses the run so
+    /// the operator decides, rather than the terminal blocking on it.
+    pub max_wait_seconds: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            max_wait_seconds: 120,
+        }
+    }
+}
+
+/// Local protection against a loop that is no longer making progress.
+///
+/// Distinct from the provider's quota and from the model's context window,
+/// which are not ours to set. This is the harness deciding that continuing has
+/// stopped being useful — so it is measured in *progress*, and only secondarily
+/// in tokens.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct RunawayGuardConfig {
+    /// Turning this off leaves `max_tokens_per_turn` as the only backstop.
+    pub enabled: bool,
+    /// Weighted token ceiling for one turn. Unset inherits
+    /// `max_tokens_per_turn`, so an existing configuration keeps its number.
+    ///
+    /// Weighted, not raw: input served from a provider cache bills at roughly a
+    /// tenth of the full rate, and counting it whole made a warm turn look as
+    /// expensive as a cold one. What the context gauge reports is unaffected —
+    /// that still shows the true size of the prompt.
+    pub max_weighted_tokens: Option<usize>,
+    /// Consecutive cycles that change nothing before the guard fires.
+    pub max_no_progress_cycles: u32,
+    /// Repeats of one identical call before the guard fires.
+    pub max_identical_tool_repeats: u32,
+}
+
+impl Default for RunawayGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_weighted_tokens: None,
+            max_no_progress_cycles: 3,
+            max_identical_tool_repeats: 3,
+        }
+    }
+}
+
+/// Folding a turn's own history so it can keep going.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct CompactionConfig {
+    /// Turning this off restores the pre-2.10 behaviour: a turn that outgrows
+    /// its window stops instead of folding.
+    pub enabled: bool,
+    /// Fraction of the prompt budget that triggers a fold, 0.1–0.95. Below the
+    /// context compiler's own drop threshold so this runs first and nothing is
+    /// discarded silently.
+    pub trigger_ratio: f32,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trigger_ratio: 0.75,
+        }
+    }
 }
 
 impl Default for LimitsConfig {
@@ -634,7 +730,27 @@ impl Default for LimitsConfig {
             goal_step_budget: 200,
             goal_runtime_budget_min: 120,
             completion_reserve_tokens: 1024,
+            local_runaway_guard: RunawayGuardConfig::default(),
+            context_compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         }
+    }
+}
+
+impl LimitsConfig {
+    /// The weighted ceiling for a turn on `provider_kind`.
+    ///
+    /// Falls back to the legacy per-turn keys when the guard names no ceiling
+    /// of its own, so an existing configuration keeps exactly the number it
+    /// already had. An old value is never reinterpreted as something else.
+    pub fn weighted_token_ceiling(&self, self_hosted: bool) -> usize {
+        self.local_runaway_guard
+            .max_weighted_tokens
+            .unwrap_or(if self_hosted {
+                self.self_hosted_max_tokens_per_turn
+            } else {
+                self.max_tokens_per_turn
+            })
     }
 }
 
@@ -973,6 +1089,15 @@ impl Config {
 
     /// Validate cross-field invariants with actionable messages.
     pub fn validate(&self) -> Result<()> {
+        let compaction = &self.limits.context_compaction;
+        // A ratio outside this band is not a preference: at 0 every turn folds
+        // before it starts, and at 1 the fold never runs early enough to help.
+        if !(0.1..=0.95).contains(&compaction.trigger_ratio) {
+            return Err(NexusError::Config(format!(
+                "limits.context_compaction.trigger_ratio must be 0.1-0.95, got {}",
+                compaction.trigger_ratio
+            )));
+        }
         let activity = &self.tui.activity;
         if crate::timeline::ActivityMode::parse(&activity.mode).is_none() {
             return Err(NexusError::Config(format!(
@@ -996,6 +1121,12 @@ impl Config {
             return Err(NexusError::Config(format!(
                 "tui.activity.animation must be one of nexus|minimal|off, got `{}`",
                 activity.animation
+            )));
+        }
+        if !["geometric", "emoji", "ascii"].contains(&activity.tool_icons.as_str()) {
+            return Err(NexusError::Config(format!(
+                "tui.activity.tool_icons must be one of geometric|emoji|ascii, got `{}`",
+                activity.tool_icons
             )));
         }
         // A long floor would hide the component for entire turns rather than

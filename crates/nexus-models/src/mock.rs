@@ -43,6 +43,10 @@ pub struct MockProvider {
     pub locality: ModelLocality,
     pub privacy: ModelPrivacy,
     pub context_window: usize,
+    /// Usage every scripted call reports. Lets a test drive the turn budget
+    /// without a real provider, which is the only way to exercise a ceiling
+    /// that a 10-token mock would never reach.
+    pub usage: Usage,
     calls: Mutex<Vec<ModelRequest>>,
 }
 
@@ -57,6 +61,11 @@ impl MockProvider {
             locality: ModelLocality::Local,
             privacy: ModelPrivacy::LocalOnly,
             context_window: 8192,
+            usage: Usage {
+                prompt_tokens: 10,
+                completion_tokens: 10,
+                ..Usage::default()
+            },
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -108,12 +117,7 @@ impl MockProvider {
             .unwrap_or(MockScript::Text("mock script exhausted".into()))
     }
 
-    fn to_completion(script: MockScript) -> Result<ModelResponse> {
-        let usage = Usage {
-            prompt_tokens: 10,
-            completion_tokens: 10,
-            ..Usage::default()
-        };
+    fn to_completion(script: MockScript, usage: Usage) -> Result<ModelResponse> {
         match script {
             MockScript::Text(t) => Ok(ModelResponse {
                 content: t,
@@ -215,7 +219,7 @@ impl ModelProvider for MockProvider {
     }
 
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
-        Self::to_completion(self.next_script(&request))
+        Self::to_completion(self.next_script(&request), self.usage.clone())
     }
 
     async fn stream(
@@ -234,7 +238,7 @@ impl ModelProvider for MockProvider {
             ];
             return Ok(futures::stream::iter(events).boxed());
         }
-        let completion = Self::to_completion(script)?;
+        let completion = Self::to_completion(script, self.usage.clone())?;
         let mut events: Vec<Result<StreamEvent>> = Vec::new();
         // Split text into small deltas to exercise incremental rendering.
         for chunk in completion.content.as_bytes().chunks(8) {

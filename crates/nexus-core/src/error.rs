@@ -30,6 +30,26 @@ pub enum NexusError {
     // --- Model providers ---
     #[error("provider `{provider}` error: {message}")]
     Provider { provider: String, message: String },
+    /// The provider is refusing to serve us right now — a quota, not a fault.
+    ///
+    /// Kept apart from [`Self::Provider`] because the two call for opposite
+    /// responses: a provider error means something is wrong with the request,
+    /// while this means the request was fine and the answer is to wait. Folded
+    /// into one string, the operator could not tell which had happened, and the
+    /// runtime could not decide whether retrying was sensible.
+    #[error("provider `{provider}` limit reached: {message}")]
+    ProviderLimit {
+        provider: String,
+        /// `requests`, `tokens`, `plan_window`, or `unknown` when the provider
+        /// says only that a limit was hit.
+        kind: String,
+        /// Seconds to wait, when the provider said. `None` means it did not —
+        /// never a guess.
+        retry_after_secs: Option<u64>,
+        /// When the window resets, verbatim from the provider if it said.
+        reset_at: Option<String>,
+        message: String,
+    },
     #[error("model produced invalid action: {0}")]
     InvalidAction(String),
     #[error("model request timed out after {0}s")]

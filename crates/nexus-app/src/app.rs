@@ -315,14 +315,23 @@ impl App {
                 max_model_calls: self.config.limits.max_model_calls_per_turn,
                 max_tool_calls: self.config.limits.max_tool_calls_per_turn,
                 max_failures: self.config.limits.max_failures_per_turn,
-                max_total_tokens: self.config.limits.max_tokens_per_turn,
-                self_hosted_max_total_tokens: self.config.limits.self_hosted_max_tokens_per_turn,
+                // Weighted now: the ceiling compares against what the turn
+                // cost, not against the raw sum of every token that crossed
+                // the wire. `weighted_token_ceiling` falls back to these same
+                // legacy keys when the guard names no ceiling of its own.
+                max_total_tokens: self.config.limits.weighted_token_ceiling(false),
+                self_hosted_max_total_tokens: self.config.limits.weighted_token_ceiling(true),
                 max_cost_micros: self.config.limits.max_cost_micros_per_turn,
                 max_duration_ms: u64::from(self.config.limits.max_turn_runtime_min)
                     .saturating_mul(60_000),
                 max_memory_writes: self.config.limits.max_memory_writes_per_turn,
                 max_subagents: self.config.limits.max_subagents_per_run,
                 max_recursion_depth: self.config.limits.max_recursion_depth,
+                no_progress_limit: self
+                    .config
+                    .limits
+                    .local_runaway_guard
+                    .max_no_progress_cycles,
             },
             recursion_depth: 0,
             // An explicit `/thinking` choice is persisted in UI state and

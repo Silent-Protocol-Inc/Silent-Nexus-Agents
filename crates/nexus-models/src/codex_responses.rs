@@ -543,7 +543,19 @@ impl ModelProvider for CodexResponsesProvider {
         })?;
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
+            // A plan window being spent is not a broken session. Distinguished
+            // here so the loop can pause and say when it resets, instead of
+            // reporting the same generic provider failure as a bad request.
+            if crate::rate_limit::is_rate_limit(status.as_u16()) {
+                return Err(crate::rate_limit::error(
+                    "codex",
+                    &headers,
+                    status.as_u16(),
+                    &text,
+                ));
+            }
             let hint = if status.as_u16() == 401 {
                 " — the Codex session may have expired; run /login again"
             } else {

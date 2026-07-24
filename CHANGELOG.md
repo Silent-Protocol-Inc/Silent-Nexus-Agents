@@ -52,6 +52,33 @@
   than the pop-up was unreadable: there were no scroll keys, and the
   follow-the-bottom offset was computed from unwrapped lines, so it stopped
   short and cut off the newest text.
+- **Live activity in the timeline.** A running turn showed its tool calls and
+  nothing between them; the operator watched `fs.read_file` land with no idea
+  why. Each turn now opens **activity segments** — `◢ REVIEWER ACTIVITY ·
+  STEP 2/5` with a one-line operational summary and the tools it grouped
+  (`✓ ⌗ repo.structure`, `✓ ⎇ repo.git_status`). A new segment opens when
+  intent materially changes — a new plan step, a new tool family, a failure, a
+  validation, a compaction, a retry — and updates in place while streaming, so
+  partial chunks never duplicate a line. The text is the model's own public
+  prose where it offers any, and otherwise a factual line the harness composes
+  from state it already holds (active role and step, tool intent, the last
+  result and the paths it touched). No second model call, no extra tokens, and
+  **no private reasoning** — a silent model still narrates, where before it
+  emitted the literal `[structured tool action omitted]`.
+- **Per-tool glyphs**, cyberpunk-native, in a three-tier ladder: geometric by
+  default (`⌗ ⌕ ⏵ ⎇ ⌸`), opt-in emoji (`[tui.activity] tool_icons = "emoji"`),
+  and ASCII (`[r] [s] [x] [g]`) under `SNX_ASCII`, `TERM=dumb`, or a `C`/`POSIX`
+  locale. Width is measured with `unicode_width` in every tier, so truncation is
+  honest on a 40-column phone terminal.
+- **429 is a first-class signal.** A provider rate or quota limit collapsed into
+  a generic `Provider` error string in every adapter, and no adapter read
+  `Retry-After`. The Codex, OpenAI-compatible, and Anthropic adapters now parse
+  the status and the `Retry-After` / `x-ratelimit-reset-*` /
+  `anthropic-ratelimit-*-reset` headers into a typed `ProviderLimit` — a short
+  reset drives a bounded retry, a long one pauses the turn with its state
+  preserved and the reset time shown. Missing metadata is reported as
+  *unavailable*, never estimated. Ollama and llama.cpp inherit no cloud quota
+  assumptions.
 
 ### Changed
 
@@ -76,6 +103,28 @@
   non-interactive run — was not there to answer. Every action is still
   policy-checked, sandboxed, and audited; only the standing authorization is now
   stated.
+- **A budget that measures risk, not work.** A productive long turn died at
+  `aggregate token budget 250000 exhausted` — a monotonic sum of input plus
+  output that reached the ceiling identically whether the agent read twelve
+  files across a large repo or re-read one file twelve times, and that (since
+  2.10.0's caching) counted cache reads at full weight though they bill at a
+  tenth. The budget is now **weighted spend** — `uncached_input +
+  cache_read/10 + cache_write*5/4 + output` — paired with a **progress guard**
+  that accumulates pressure on repetition and relieves it on genuine discovery
+  (a completed plan step, a changed file, a new validation outcome). At the
+  ceiling with progress still being made, the turn **compacts its history mid-run
+  and continues** under the same run identity and tracker, rather than stopping;
+  it pauses (resumably) only when there is nothing left to compact or progress
+  has stalled. The context gauge and the true prompt size are unchanged — this
+  changes the budget's unit, not what the operator sees as context used.
+- **Terminal outcomes are typed and agree everywhere.** The stop reason was a
+  free-form string read by two print statements, which let a red failure be
+  followed by a green `DONE` while tasks were still pending. A typed
+  `RunOutcome` — `Completed`, `CompletedWithWarnings`, `Paused`, `Cancelled`,
+  `Declined`, `Failed`, `StoppedByGuard`, `WaitingForProvider` — is now the one
+  value the timeline, the pinned tracker, the side panel, and the status bar all
+  derive from, so a paused turn never reads as complete and a local guard is
+  never labelled a provider limit.
 
 ### Fixed
 

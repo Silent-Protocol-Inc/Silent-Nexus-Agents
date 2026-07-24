@@ -21,7 +21,8 @@ use nexus_core::orchestration::{
 };
 use nexus_core::store::Store;
 use nexus_core::timeline::{
-    ArtifactReference, LifecyclePhase, TimelineEvent, TimelineKind, TimelineStatus, TimelineStore,
+    ActivityPhase, ArtifactReference, LifecyclePhase, TimelineEvent, TimelineKind, TimelineStatus,
+    TimelineStore,
 };
 use nexus_core::{Decision, NexusError, Result};
 use nexus_models::types::{
@@ -51,6 +52,10 @@ const MAX_STALE_PLAN_REVIEWS: usize = 3;
 /// How many rounds of "request changes" one planning turn will run before it
 /// hands the conversation back rather than re-planning indefinitely.
 const MAX_PLAN_REVISIONS: u32 = 5;
+/// How many times one turn will fold its own history to keep going. A turn
+/// that has compacted this many times and is still at the ceiling is not
+/// going to be rescued by another fold.
+const MAX_MID_TURN_COMPACTIONS: u32 = 3;
 
 /// Per-turn safety limits.
 #[derive(Debug, Clone)]
@@ -73,6 +78,10 @@ pub struct TurnLimits {
     pub max_memory_writes: u32,
     pub max_subagents: u32,
     pub max_recursion_depth: u8,
+    /// Consecutive cycles that change nothing before the local guard fires.
+    /// Distinct from `max_repeated_calls`, which counts one identical call;
+    /// this counts a run that keeps moving without getting anywhere.
+    pub no_progress_limit: u32,
 }
 
 impl TurnLimits {
@@ -105,6 +114,7 @@ impl Default for TurnLimits {
             max_memory_writes: 8,
             max_subagents: 8,
             max_recursion_depth: 2,
+            no_progress_limit: 3,
         }
     }
 }
@@ -314,6 +324,19 @@ pub enum LoopEvent {
     /// Provider-supplied reasoning summary accompanying a real tool plan.
     /// Hidden chain-of-thought is never requested or surfaced.
     ReasoningSummary(String),
+    /// What the agent is doing now, for the operator.
+    ///
+    /// Assembled from what the runtime observed — the model's own public
+    /// prose when it offered any, otherwise the active role, plan step, tool
+    /// intent and last result. Never private reasoning, and never a guess
+    /// about intent the harness did not witness. Consumers keep one open
+    /// segment per phase and fold the tools that follow into it.
+    AgentActivity {
+        role: String,
+        step: Option<(u32, u32)>,
+        phase: ActivityPhase,
+        text: String,
+    },
     /// Sanitized assistant text produced while the provider stream remains
     /// active. Consumers append this delta to one stable running card.
     AssistantTextDelta(String),
@@ -344,6 +367,17 @@ pub enum LoopEvent {
         plan_id: String,
         version: u32,
         decision: PlanDecision,
+    },
+    /// The provider is refusing to serve us for now.
+    ///
+    /// Its own event because a quota is not a failure: the request was fine
+    /// and the answer is to wait. Reported with whatever reset the provider
+    /// actually stated, and with nothing when it stated nothing.
+    ProviderLimitReached {
+        provider: String,
+        kind: String,
+        reset_at: Option<String>,
+        message: String,
     },
     /// History was folded into the session summary so the turn fits the
     /// model's window. The session continues; nothing is lost from the
@@ -469,6 +503,18 @@ struct TurnTimeline {
     /// One card per plan stage, keyed by stage id, so a stage moving
     /// pending → running → completed stays a single row.
     stage_cards: Mutex<BTreeMap<String, AssistantCard>>,
+    /// The open activity segment, if any. One at a time: the tools that run
+    /// after a segment opens belong to it, and a new segment closes the last.
+    activity_card: Mutex<Option<ActivityCard>>,
+}
+
+/// The open activity segment. Tools accumulate here so a run of related
+/// discovery calls reads as one phase instead of narrating each of them.
+struct ActivityCard {
+    event: TimelineEvent,
+    started: Instant,
+    phase: ActivityPhase,
+    tools: Vec<String>,
 }
 
 struct TimelineReset(Arc<Mutex<Option<Arc<TurnTimeline>>>>);
@@ -565,6 +611,7 @@ impl TurnTimeline {
             provider_activity: Mutex::new(BTreeMap::new()),
             retry_card: Mutex::new(None),
             stage_cards: Mutex::new(BTreeMap::new()),
+            activity_card: Mutex::new(None),
         }
     }
 
@@ -766,6 +813,115 @@ impl TurnTimeline {
         Ok(true)
     }
 
+    /// Open a segment, or extend the open one.
+    ///
+    /// Same phase and a text that grows from what is already there is the
+    /// streaming case: it updates the one card rather than appending a second.
+    /// Anything else is a genuine change of direction and gets its own segment,
+    /// which is what makes the timeline readable instead of a running total of
+    /// every partial chunk.
+    fn record_activity(
+        &self,
+        role: &str,
+        step: Option<(u32, u32)>,
+        phase: ActivityPhase,
+        text: &str,
+    ) -> Result<()> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        let mut active = self
+            .activity_card
+            .lock()
+            .map_err(|_| NexusError::other("activity timeline card lock poisoned"))?;
+
+        if let Some(card) = active.as_mut() {
+            let extends = card.phase == phase
+                && matches!(&card.event.kind,
+                    TimelineKind::AgentActivity { text: existing, .. }
+                        if text.starts_with(existing.as_str()) || existing.starts_with(text));
+            if extends {
+                card.event.summary = summarize(text, 120);
+                card.event.kind = TimelineKind::AgentActivity {
+                    role: role.to_string(),
+                    step,
+                    phase,
+                    text: text.to_string(),
+                    tools: card.tools.clone(),
+                };
+                card.event.duration_ms = Some(card.started.elapsed().as_millis() as u64);
+                self.store.update(&card.event)?;
+                return Ok(());
+            }
+        }
+        if let Some(previous) = active.take() {
+            Self::seal(&self.store, previous)?;
+        }
+
+        let event = self.append(
+            LifecyclePhase::Progress,
+            TimelineStatus::Running,
+            summarize(text, 120),
+            TimelineKind::AgentActivity {
+                role: role.to_string(),
+                step,
+                phase,
+                text: text.to_string(),
+                tools: Vec::new(),
+            },
+            None,
+        )?;
+        *active = Some(ActivityCard {
+            event,
+            started: Instant::now(),
+            phase,
+            tools: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Record that a tool ran under the open segment. Repeats are kept — three
+    /// reads of three files is what happened, and collapsing them would hide
+    /// the very repetition the runaway guard exists to notice.
+    fn attach_tool_to_activity(&self, tool: &str) -> Result<()> {
+        let mut active = self
+            .activity_card
+            .lock()
+            .map_err(|_| NexusError::other("activity timeline card lock poisoned"))?;
+        let Some(card) = active.as_mut() else {
+            return Ok(());
+        };
+        card.tools.push(tool.to_string());
+        if let TimelineKind::AgentActivity { tools, .. } = &mut card.event.kind {
+            tools.push(tool.to_string());
+        }
+        card.event.duration_ms = Some(card.started.elapsed().as_millis() as u64);
+        self.store.update(&card.event)?;
+        Ok(())
+    }
+
+    /// Close the open segment, if there is one. Called when the turn ends so a
+    /// segment never stays `Running` in scrollback after the run is over.
+    fn finish_activity(&self) -> Result<()> {
+        let Some(card) = self
+            .activity_card
+            .lock()
+            .map_err(|_| NexusError::other("activity timeline card lock poisoned"))?
+            .take()
+        else {
+            return Ok(());
+        };
+        Self::seal(&self.store, card)
+    }
+
+    fn seal(store: &TimelineStore, mut card: ActivityCard) -> Result<()> {
+        card.event.phase = LifecyclePhase::Completed;
+        card.event.status = TimelineStatus::Completed;
+        card.event.duration_ms = Some(card.started.elapsed().as_millis() as u64);
+        store.update(&card.event)
+    }
+
     fn record_loop_event(&self, event: &LoopEvent) -> Result<()> {
         match event {
             // Deliberately not recorded. The deliberation decision drives one
@@ -880,6 +1036,33 @@ impl TurnTimeline {
                     )?;
                 }
             }
+            LoopEvent::AgentActivity {
+                role,
+                step,
+                phase,
+                text,
+            } => {
+                self.record_activity(role, *step, *phase, text)?;
+            }
+            LoopEvent::ProviderLimitReached {
+                provider,
+                kind,
+                reset_at,
+                message,
+            } => {
+                self.append(
+                    LifecyclePhase::Progress,
+                    TimelineStatus::Waiting,
+                    summarize(message, 120),
+                    TimelineKind::ProviderLimit {
+                        provider: provider.clone(),
+                        limit_kind: kind.clone(),
+                        reset_at: reset_at.clone(),
+                        message: message.clone(),
+                    },
+                    None,
+                )?;
+            }
             LoopEvent::AssistantTextDelta(delta) => {
                 self.append_assistant_delta(delta)?;
             }
@@ -906,6 +1089,9 @@ impl TurnTimeline {
                 )?;
             }
             LoopEvent::FinalAnswer(text) => {
+                // Seal the open segment before the answer lands, so scrollback
+                // never keeps a segment marked running after the turn is over.
+                self.finish_activity()?;
                 if !self.finalize_assistant(
                     summarize(text, 120),
                     TimelineKind::FinalAnswer { text: text.clone() },
@@ -1199,6 +1385,7 @@ impl TurnTimeline {
                     };
                     self.store.update(&timeline_event)?;
                 }
+                self.attach_tool_to_activity(tool)?;
             }
             LoopEvent::DiffProduced {
                 tool,
@@ -1283,6 +1470,7 @@ impl TurnTimeline {
                 }
             }
             LoopEvent::Error(message) => {
+                self.finish_activity()?;
                 self.append(
                     LifecyclePhase::Failed,
                     TimelineStatus::Failed,
@@ -1321,6 +1509,77 @@ impl CacheTokens {
     }
 }
 
+/// How a turn actually ended, for every surface that reports it.
+///
+/// Derived from `stopped_reason` rather than replacing it: the string is a
+/// stable record and several consumers match on it. What this adds is a single
+/// answer to "did the work finish?", so the timeline, the pinned tracker and
+/// the status bar cannot disagree — which is how a run could previously show a
+/// red failure, then a green DONE, with steps still pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutcome {
+    Completed,
+    /// Finished, but something the operator should know happened on the way.
+    CompletedWithWarnings,
+    /// Stopped with state preserved; `/resume` continues it.
+    Paused,
+    /// Stopped by our own guard rather than by a provider or a fault.
+    StoppedByGuard,
+    /// Waiting on a provider quota to reset.
+    WaitingForProvider,
+    Cancelled,
+    /// The operator declined the plan.
+    Declined,
+    Failed,
+}
+
+impl RunOutcome {
+    /// Classify a `stopped_reason`.
+    ///
+    /// Unrecognized reasons are `Failed`, deliberately: an outcome nobody
+    /// taught this function about is not something to report as success.
+    pub fn classify(stopped_reason: &str) -> Self {
+        match stopped_reason {
+            "finished" | "complete" => Self::Completed,
+            "provider_limit" => Self::WaitingForProvider,
+            "local_runaway_guard" | "loop_detected" => Self::StoppedByGuard,
+            "run_ceiling" | "token_budget" | "agent_token_budget" | "step_limit"
+            | "model_call_limit" | "tool_call_limit" | "time_budget" => Self::Paused,
+            "cancelled" => Self::Cancelled,
+            "plan_declined" | "declined" => Self::Declined,
+            _ => Self::Failed,
+        }
+    }
+
+    /// Whether the turn delivered what it set out to.
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Completed | Self::CompletedWithWarnings)
+    }
+
+    /// Whether `/resume` can pick this up.
+    pub fn is_resumable(self) -> bool {
+        matches!(
+            self,
+            Self::Paused | Self::StoppedByGuard | Self::WaitingForProvider
+        )
+    }
+
+    /// The word shown to the operator.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "COMPLETE",
+            Self::CompletedWithWarnings => "COMPLETE WITH WARNINGS",
+            Self::Paused => "PAUSED",
+            Self::StoppedByGuard => "STOPPED",
+            Self::WaitingForProvider => "WAITING",
+            Self::Cancelled => "CANCELLED",
+            Self::Declined => "DECLINED",
+            Self::Failed => "FAILED",
+        }
+    }
+}
+
 /// Result of running a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopOutcome {
@@ -1333,6 +1592,13 @@ pub struct LoopOutcome {
     /// Absent from records written by earlier versions, which reads as zero.
     #[serde(default)]
     pub cache: CacheTokens,
+}
+
+impl LoopOutcome {
+    /// How this turn ended, in one value every surface can agree on.
+    pub fn outcome(&self) -> RunOutcome {
+        RunOutcome::classify(&self.stopped_reason)
+    }
 }
 
 pub struct AgentLoop {
@@ -1383,6 +1649,32 @@ impl AgentLoop {
         } else {
             name.to_string()
         }
+    }
+
+    /// Position of the active stage as `(index, total)`, 1-based.
+    ///
+    /// `None` for a plan with no active stage — the segment header simply
+    /// leaves the step off rather than inventing one.
+    fn active_step(work: &WorkBreakdown) -> Option<(u32, u32)> {
+        let total = u32::try_from(work.stages.len()).ok().filter(|n| *n > 0)?;
+        let current = work.current_stage.as_deref()?;
+        let index = work.stages.iter().position(|s| s.id == current)?;
+        Some((u32::try_from(index).ok()?.saturating_add(1), total))
+    }
+
+    /// Emit one activity segment. The single door every narration goes through,
+    /// so the "never private reasoning" rule has one place to hold.
+    fn narrate(&self, work: &WorkBreakdown, phase: ActivityPhase, text: impl AsRef<str>) {
+        let text = text.as_ref().trim();
+        if text.is_empty() {
+            return;
+        }
+        self.emit(LoopEvent::AgentActivity {
+            role: self.review_agent_name(),
+            step: Self::active_step(work),
+            phase,
+            text: self.safe_model_text(text),
+        });
     }
 
     fn agent_can_write(&self) -> bool {
@@ -2199,6 +2491,7 @@ impl AgentLoop {
             capabilities.context_window,
             capabilities.max_output_tokens,
             &model_name,
+            false,
         )
         .await?;
 
@@ -2300,6 +2593,17 @@ impl AgentLoop {
         let mut input_tokens = 0usize;
         let mut output_tokens = 0usize;
         let mut cache = CacheTokens::default();
+        // What the turn has cost, in units of one uncached input token. Kept
+        // apart from `input_tokens`, which stays the true prompt size that the
+        // context gauge and the session record report.
+        let mut weighted_spend = 0usize;
+        // Compactions this turn, so a fold that frees nothing cannot be retried
+        // forever at the ceiling.
+        let mut mid_turn_compactions = 0u32;
+        // The single recovery the no-progress guard is allowed to offer.
+        let mut no_progress_recovery_used = false;
+        // Rate-limit waits sat out this turn, bounded by config.
+        let mut provider_waits = 0u32;
         let mut fallback_locked = false;
         let mut recent_calls: Vec<String> = Vec::new();
         let mut recent_errors: Vec<String> = Vec::new();
@@ -2436,6 +2740,74 @@ impl AgentLoop {
             };
             let routed = match routed_result {
                 Ok(routed) => routed,
+                // A quota, handled before the generic retry path: the answer to
+                // "wait 20 seconds" and the answer to "that request was wrong"
+                // are not the same, and folding both into a provider string
+                // meant neither the runtime nor the operator could tell which
+                // had happened.
+                Err(NexusError::ProviderLimit {
+                    provider: limit_provider,
+                    kind,
+                    retry_after_secs,
+                    reset_at,
+                    message,
+                }) => {
+                    let retry_config = &self.runtime.tool_ctx.config.limits.retry;
+                    timeline.record_loop_event(&LoopEvent::ProviderLimitReached {
+                        provider: limit_provider.clone(),
+                        kind: kind.clone(),
+                        reset_at: reset_at.clone(),
+                        message: message.clone(),
+                    })?;
+                    self.emit(LoopEvent::ProviderLimitReached {
+                        provider: limit_provider.clone(),
+                        kind: kind.clone(),
+                        reset_at: reset_at.clone(),
+                        message: message.clone(),
+                    });
+                    let short_wait = retry_after_secs
+                        .filter(|secs| *secs <= retry_config.max_wait_seconds)
+                        .filter(|_| provider_waits < retry_config.max_attempts);
+                    if let Some(secs) = short_wait {
+                        // Short enough to sit out. Bounded twice over: by the
+                        // configured ceiling on one wait, and by how many waits
+                        // a single turn will do at all.
+                        provider_waits += 1;
+                        self.narrate(
+                            &work,
+                            ActivityPhase::Waiting,
+                            format!(
+                                "{limit_provider} is rate limiting; waiting {secs}s before \
+                                 retrying."
+                            ),
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                        continue;
+                    }
+                    // Too long to wait on, or waited enough already. Stop with
+                    // the reset the provider stated — never an invented one —
+                    // and say the work survived.
+                    let when = match (retry_after_secs, reset_at.as_deref()) {
+                        (Some(secs), _) => format!("resets in about {}m", secs.div_ceil(60)),
+                        (None, Some(reset)) => format!("resets at {reset}"),
+                        (None, None) => "reset time not reported by the provider".to_string(),
+                    };
+                    let message = format!(
+                        "waiting: {limit_provider} usage limit reached ({kind}) — {when}. \
+                         Completed work is preserved and the run is resumable."
+                    );
+                    self.narrate(&work, ActivityPhase::Waiting, &message);
+                    self.emit(LoopEvent::Error(message.clone()));
+                    return Ok(LoopOutcome {
+                        final_message: message,
+                        steps,
+                        tool_calls: tool_calls_count,
+                        stopped_reason: "provider_limit".into(),
+                        input_tokens,
+                        output_tokens,
+                        cache,
+                    });
+                }
                 Err(e) if e.is_model_recoverable() || e.is_provider_retryable() => {
                     retries += 1;
                     failure_count += 1;
@@ -2671,18 +3043,107 @@ impl AgentLoop {
             output_tokens += completion.usage.completion_tokens;
             cache.read += completion.usage.cache_read_tokens;
             cache.write += completion.usage.cache_write_tokens;
+            weighted_spend = weighted_spend.saturating_add(completion.usage.weighted_spend());
             harness_state.token_count = input_tokens.saturating_add(output_tokens) as u64;
             // Read from the provider that actually served this step, so a
             // fallback onto a metered model re-tightens the ceiling mid-turn.
             let token_ceiling = limits.token_ceiling(provider.kind());
-            if input_tokens.saturating_add(output_tokens) > token_ceiling {
-                let message = format!("stopped: aggregate token budget {token_ceiling} exhausted");
+            if weighted_spend > token_ceiling {
+                // Reaching the ceiling is not by itself a reason to stop. A
+                // turn that is still finding new things has more to do; one
+                // that is repeating itself does not. Earlier versions could
+                // not tell the two apart and ended both with a bare
+                // "aggregate token budget exhausted".
+                let stalled = harness_state.no_progress_count > 0;
+                let compactable = self
+                    .runtime
+                    .tool_ctx
+                    .config
+                    .limits
+                    .context_compaction
+                    .enabled
+                    && mid_turn_compactions < MAX_MID_TURN_COMPACTIONS;
+                if !stalled && compactable {
+                    mid_turn_compactions += 1;
+                    let before = self.session_history_tokens(session_id)?;
+                    self.compact_history_if_needed(
+                        session_id,
+                        &timeline,
+                        capabilities.context_window,
+                        capabilities.max_output_tokens,
+                        &model_name,
+                        true,
+                    )
+                    .await?;
+                    let after = self.session_history_tokens(session_id)?;
+                    if after < before {
+                        // The conversation the model sees was rebuilt from the
+                        // compacted session, so the next call carries the
+                        // summary rather than the history it replaced.
+                        messages = self.build_initial_messages(InitialContextRequest {
+                            objective,
+                            tools: &tools,
+                            native,
+                            session_id,
+                            work: &work,
+                            context_window: capabilities.context_window,
+                            reserved_output_tokens: capabilities.max_output_tokens,
+                            constrained_model,
+                            supports_system_prompt: capabilities.system_prompt,
+                            preapproved: approver.preapproved(),
+                        })?;
+                        // Spend already paid is not refunded, but the prefix it
+                        // bought is gone; charging the rest of the turn for it
+                        // would make the second wind shorter than the first for
+                        // no reason the operator could act on.
+                        weighted_spend = weighted_spend.saturating_sub(token_ceiling / 2);
+                        self.narrate(
+                            &work,
+                            ActivityPhase::Compaction,
+                            format!(
+                                "Context compacted. Completed findings preserved; continuing with \
+                                 {} step(s) remaining.",
+                                work.stages
+                                    .iter()
+                                    .filter(|stage| !matches!(
+                                        stage.status,
+                                        StageStatus::Completed | StageStatus::Skipped
+                                    ))
+                                    .count()
+                            ),
+                        );
+                        continue;
+                    }
+                }
+                // Nothing left to free, or nothing left being learned. Say
+                // which, so the operator is not told a local guard was a
+                // provider quota.
+                let (message, reason) = if stalled {
+                    (
+                        format!(
+                            "paused: local runaway guard — {token_ceiling} weighted tokens spent \
+                             without new progress. Completed work is preserved and the run is \
+                             resumable."
+                        ),
+                        "local_runaway_guard",
+                    )
+                } else {
+                    (
+                        format!(
+                            "paused: run ceiling of {token_ceiling} weighted tokens reached with \
+                             nothing left to compact. Completed work is preserved and the run is \
+                             resumable."
+                        ),
+                        "run_ceiling",
+                    )
+                };
+                self.narrate(&work, ActivityPhase::Waiting, &message);
                 self.emit(LoopEvent::Error(message.clone()));
                 return Ok(LoopOutcome {
                     final_message: message,
                     steps,
                     tool_calls: tool_calls_count,
-                    stopped_reason: "token_budget".into(),
+                    stopped_reason: reason.into(),
                     input_tokens,
                     output_tokens,
                     cache,
@@ -2844,14 +3305,28 @@ impl AgentLoop {
                         delegated_runs += 1;
                         harness_state.subagent_count = delegated_runs;
                     }
+                    // The operator-facing line for this step. The model's own
+                    // public prose when it offered any; otherwise a factual
+                    // line about the call itself. Earlier versions emitted the
+                    // placeholder "[structured tool action omitted]" here,
+                    // which told the operator only that there was nothing to
+                    // tell them.
                     let reasoning = tool_reasoning_summary(&completion.content, native);
-                    if !reasoning.is_empty() {
+                    if reasoning.is_empty() {
+                        let arguments =
+                            serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
+                        self.narrate(
+                            &work,
+                            ActivityPhase::Execution,
+                            derived_activity(&call.name, &arguments),
+                        );
+                    } else {
+                        self.narrate(&work, ActivityPhase::Analysis, &reasoning);
+                        // Still recorded as a provider summary: the two are
+                        // different claims, and only this one came from the
+                        // provider.
                         self.emit(LoopEvent::ReasoningSummary(
                             self.safe_model_text(&reasoning),
-                        ));
-                    } else if !completion.content.trim().is_empty() {
-                        self.emit(LoopEvent::ReasoningSummary(
-                            "[structured tool action omitted]".into(),
                         ));
                     }
                     // Record the assistant's tool request.
@@ -2865,24 +3340,79 @@ impl AgentLoop {
 
                     // Loop detection: identical (tool,args) repeated.
                     let sig = format!("{}::{}", call.name, call.arguments);
-                    let _ = harness_state.observe_progress(progress_fingerprint(&[
+                    // The answer is no longer discarded. `LoopState` has
+                    // modelled no-progress since it was written; nothing read
+                    // it, so a turn could spin against the same fingerprint
+                    // until the token ceiling stopped it — which then reported
+                    // a budget problem for what was a loop.
+                    let stalled = harness_state.observe_progress(progress_fingerprint(&[
                         "tool_call",
                         call.name.as_str(),
                         call.arguments.as_str(),
                     ]));
+                    if stalled {
+                        if no_progress_recovery_used {
+                            let msg = format!(
+                                "paused: local runaway guard — {} cycles with no progress. \
+                                 Completed work is preserved and the run is resumable.",
+                                harness_state.no_progress_count
+                            );
+                            self.narrate(&work, ActivityPhase::Waiting, &msg);
+                            self.emit(LoopEvent::Error(msg.clone()));
+                            return Ok(LoopOutcome {
+                                final_message: msg,
+                                steps,
+                                tool_calls: tool_calls_count,
+                                stopped_reason: "local_runaway_guard".into(),
+                                input_tokens,
+                                output_tokens,
+                                cache,
+                            });
+                        }
+                        // One bounded recovery: say what the runtime observed
+                        // and let the model choose differently. Exactly one —
+                        // a guard that keeps offering second chances is not a
+                        // guard.
+                        no_progress_recovery_used = true;
+                        harness_state.no_progress_count = 0;
+                        self.narrate(
+                            &work,
+                            ActivityPhase::Observation,
+                            "The last few actions changed nothing. Trying a different approach.",
+                        );
+                        messages.push(ChatMessage::user(
+                            "The last few actions produced no new information or change. Do not \
+                             repeat them. Either take a materially different action, or finish \
+                             and report what you have established and what remains unresolved.",
+                        ));
+                        continue;
+                    }
                     recent_calls.push(sig.clone());
                     let repeats = recent_calls.iter().filter(|s| **s == sig).count() as u32;
-                    if repeats > limits.max_repeated_calls {
+                    let repeat_ceiling = self
+                        .runtime
+                        .tool_ctx
+                        .config
+                        .limits
+                        .local_runaway_guard
+                        .max_identical_tool_repeats
+                        .min(limits.max_repeated_calls);
+                    if repeats > repeat_ceiling {
+                        // Named as what it is. This is our guard reacting to a
+                        // repetition, not a provider refusing to serve us, and
+                        // the two used to be indistinguishable in the report.
                         let msg = format!(
-                            "stopped: tool `{}` called with identical arguments {repeats} times (possible loop)",
+                            "paused: local runaway guard — `{}` called with identical arguments \
+                             {repeats} times. Completed work is preserved and the run is resumable.",
                             call.name
                         );
+                        self.narrate(&work, ActivityPhase::Waiting, &msg);
                         self.emit(LoopEvent::Error(msg.clone()));
                         return Ok(LoopOutcome {
                             final_message: msg,
                             steps,
                             tool_calls: tool_calls_count,
-                            stopped_reason: "loop_detected".into(),
+                            stopped_reason: "local_runaway_guard".into(),
                             input_tokens,
                             output_tokens,
                             cache,
@@ -3153,6 +3683,22 @@ impl AgentLoop {
     /// Runs before the prompt is compiled and writes its result to the
     /// session, which is what makes it durable: the same span is summarized
     /// once, not re-derived on every subsequent turn.
+    /// Estimated size of the session history the model would be shown.
+    fn session_history_tokens(&self, session_id: &SessionId) -> Result<usize> {
+        Ok(self
+            .runtime
+            .sessions
+            .messages(session_id.as_str())?
+            .iter()
+            .map(nexus_context::estimate_message_tokens)
+            .sum())
+    }
+
+    /// Fold stale history into the session summary.
+    ///
+    /// `forced` skips the trigger ratio: the caller has already established
+    /// that the turn cannot continue without freeing something, which is a
+    /// stronger reason than the ratio was ever meant to detect.
     async fn compact_history_if_needed(
         &self,
         session_id: &SessionId,
@@ -3160,15 +3706,16 @@ impl AgentLoop {
         context_window: usize,
         reserved_output_tokens: usize,
         model_name: &str,
+        forced: bool,
     ) -> Result<()> {
         /// Verbatim tail. Matches `ContextManager`'s own `keep_recent` so the
         /// two layers agree on what "recent" means.
         const KEEP_RECENT: usize = 6;
-        /// Fraction of the prompt budget that triggers a fold. Below the
-        /// compiler's own drop threshold so this runs first and the compiler
-        /// never has to discard anything silently.
-        const TRIGGER_PERCENT: usize = 75;
 
+        let compaction = &self.runtime.tool_ctx.config.limits.context_compaction;
+        if !compaction.enabled {
+            return Ok(());
+        }
         let budget = context_window.saturating_sub(reserved_output_tokens.max(1_024));
         if budget == 0 {
             return Ok(());
@@ -3178,7 +3725,8 @@ impl AgentLoop {
             .iter()
             .map(nexus_context::estimate_message_tokens)
             .sum();
-        if before_tokens * 100 <= budget * TRIGGER_PERCENT {
+        let trigger = (budget as f32 * compaction.trigger_ratio) as usize;
+        if !forced && before_tokens <= trigger {
             return Ok(());
         }
         let stale = self
@@ -4097,6 +4645,23 @@ impl AgentLoop {
                 })
                 .unwrap_or_default(),
         });
+        // A failure is the moment the operator most needs a sentence: it is
+        // where the execution direction changes. Success stays silent here —
+        // the tool row already says it worked, and a line per successful call
+        // is the flood this feature exists to avoid.
+        let observation = observation_activity(&call.name, ok, &output);
+        if !observation.is_empty() {
+            self.narrate(work, ActivityPhase::Observation, observation);
+        } else if validation_action {
+            // A passing check is the exception worth a line of its own: it is
+            // the evidence a turn is judged on, and silence would leave the
+            // operator unable to tell "tests ran" from "tests passed".
+            self.narrate(
+                work,
+                ActivityPhase::Validation,
+                format!("{} passed.", call.name),
+            );
+        }
         let changed_paths = if action_req.risk >= nexus_core::RiskLevel::Write {
             action_req.paths.clone()
         } else {
@@ -4871,7 +5436,7 @@ fn harness_limits(limits: &TurnLimits, provider_kind: &str) -> HarnessLoopLimits
         max_subagents: limits.max_subagents,
         max_concurrency: limits.max_subagents.min(4),
         max_memory_writes: limits.max_memory_writes,
-        no_progress_limit: limits.max_repeated_calls.max(1),
+        no_progress_limit: limits.no_progress_limit.max(1),
     }
 }
 
@@ -5236,6 +5801,102 @@ fn tool_reasoning_summary(content: &str, native_tool_calls: bool) -> String {
         .unwrap_or(before_fence)
         .trim();
     before_object.to_string()
+}
+
+/// The most identifying argument of a call, for narration only.
+///
+/// Never the whole argument object: that is where secrets and long payloads
+/// live, and the segment is a one-line summary, not a record of the request.
+fn narration_subject(arguments: &Value) -> Option<String> {
+    const KEYS: [&str; 8] = [
+        "path",
+        "file",
+        "pattern",
+        "query",
+        "command",
+        "cmd",
+        "objective",
+        "name",
+    ];
+    let subject = KEYS.iter().find_map(|key| {
+        arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })?;
+    Some(summarize(subject, 60))
+}
+
+/// A factual line describing a call, for when the model offered no prose.
+///
+/// Every branch describes something the harness is about to do, in the
+/// operator's terms. Nothing here infers intent the runtime did not observe —
+/// the phrasing says what is happening, never why the model wanted it.
+fn derived_activity(tool: &str, arguments: &Value) -> String {
+    let subject = narration_subject(arguments);
+    let lower = tool.to_ascii_lowercase();
+    let with = |verb: &str, fallback: &str| match &subject {
+        Some(subject) => format!("{verb} {subject}."),
+        None => fallback.to_string(),
+    };
+    if lower.contains("list") || lower.contains("dir") {
+        return with("Listing", "Listing the working directory.");
+    }
+    if lower.contains("structure") || lower.contains("tree") {
+        return "Mapping the repository structure.".into();
+    }
+    if lower.contains("git") {
+        return "Checking the working tree.".into();
+    }
+    if lower.contains("search") || lower.contains("grep") || lower.contains("find") {
+        return with("Searching for", "Searching the workspace.");
+    }
+    if lower.contains("read") || lower.contains("open") || lower.contains("cat") {
+        return with("Reading", "Reading a file.");
+    }
+    if lower.contains("write") || lower.contains("edit") || lower.contains("patch") {
+        return with("Editing", "Editing a file.");
+    }
+    if lower.contains("delete") || lower.contains("remove") {
+        return with("Removing", "Removing a file.");
+    }
+    if lower.contains("memory") {
+        return "Recording a finding.".into();
+    }
+    if lower.contains("plan") {
+        return "Revising the plan.".into();
+    }
+    if lower.contains("agent") || lower.contains("delegate") {
+        return with("Delegating", "Delegating to another agent.");
+    }
+    if lower.contains("shell")
+        || lower.contains("exec")
+        || lower.contains("run")
+        || lower.contains("command")
+    {
+        return with("Running", "Running a command.");
+    }
+    with(&format!("Running {tool} on"), &format!("Running {tool}."))
+}
+
+/// What a finished call actually showed, and what follows from it.
+///
+/// Reports the outcome and nothing beyond it. A failure says what failed and
+/// that the agent is continuing; it does not claim to know the cause.
+fn observation_activity(tool: &str, ok: bool, detail: &str) -> String {
+    let detail = detail.trim();
+    if ok {
+        return String::new();
+    }
+    if detail.is_empty() {
+        format!("{tool} failed. Adjusting before continuing.")
+    } else {
+        format!(
+            "{tool} failed: {}. Adjusting before continuing.",
+            summarize(detail, 120).trim_end_matches('.')
+        )
+    }
 }
 
 fn is_validation_action(tool: &str, command: Option<&str>) -> bool {

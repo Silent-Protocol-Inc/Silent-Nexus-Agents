@@ -289,11 +289,20 @@ impl ModelProvider for AnthropicProvider {
             .await
             .map_err(map_reqwest_error)?;
         let status = response.status();
+        let headers = response.headers().clone();
         let text = response
             .text()
             .await
             .map_err(|error| provider_error(format!("reading response: {error}")))?;
         if !status.is_success() {
+            if crate::rate_limit::is_rate_limit(status.as_u16()) {
+                return Err(crate::rate_limit::error(
+                    "anthropic",
+                    &headers,
+                    status.as_u16(),
+                    &text,
+                ));
+            }
             return Err(provider_error(format!(
                 "HTTP {status}: {}",
                 truncate_error(&text)
@@ -315,7 +324,16 @@ impl ModelProvider for AnthropicProvider {
             .map_err(map_reqwest_error)?;
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
+            if crate::rate_limit::is_rate_limit(status.as_u16()) {
+                return Err(crate::rate_limit::error(
+                    "anthropic",
+                    &headers,
+                    status.as_u16(),
+                    &text,
+                ));
+            }
             return Err(provider_error(format!(
                 "HTTP {status}: {}",
                 truncate_error(&text)

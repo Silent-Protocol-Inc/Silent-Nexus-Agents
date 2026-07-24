@@ -150,6 +150,22 @@ pub async fn run(app: &App, args: RunArgs, json: bool) -> Result<()> {
                 ui.field("session", session_id.as_str());
                 ui.field("steps", &o.steps.to_string());
                 ui.field("tool calls", &o.tool_calls.to_string());
+                // The classification first: `stopped_reason` is a precise
+                // internal name, but on its own it left the operator to work
+                // out whether the run had actually delivered anything.
+                let run = o.outcome();
+                ui.field(
+                    "outcome",
+                    &format!(
+                        "{}{}",
+                        run.label(),
+                        if run.is_resumable() {
+                            " · resumable with `snx resume`"
+                        } else {
+                            ""
+                        }
+                    ),
+                );
                 ui.field("stopped", &o.stopped_reason);
                 ui.field(
                     "tokens",
@@ -185,6 +201,27 @@ fn print_event(ui: &Ui, ev: &LoopEvent) {
         // transitions as they happen instead, so echoing the whole list here
         // would say the same thing twice.
         LoopEvent::WorkPlanned { .. } => {}
+        LoopEvent::AgentActivity {
+            role,
+            step,
+            phase,
+            text,
+        } => {
+            let step = step
+                .map(|(index, total)| format!(" {index}/{total}"))
+                .unwrap_or_default();
+            // `ui.dim` returns a styled string rather than printing it, so the
+            // line has to be printed here — an earlier version computed it and
+            // dropped it, and the narration never reached the terminal.
+            println!(
+                "{} {}",
+                ui.dim(&format!("{} {}{step}", role.to_uppercase(), phase.label())),
+                ui.safe(text)
+            );
+        }
+        LoopEvent::ProviderLimitReached { message, .. } => {
+            ui.warn(&ui.safe(message));
+        }
         LoopEvent::PlanReviewRequested { request } => {
             ui.warn(&format!(
                 "{} submitted plan v{} ({} step(s)) for approval",

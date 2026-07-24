@@ -118,6 +118,38 @@ architecture maximum. It is one number for every such model; see
 [providers.md](providers.md#changing-the-window) for how to raise it or pin a
 single model instead.
 
+The budget a turn spends is **weighted**, not a raw token sum: a cache read
+counts at a tenth and a cache write at five-quarters, so a warm turn survives
+where an identical cold one would pause. Three nested blocks tune the guard, all
+with `#[serde(default)]` so an existing config is untouched:
+
+```toml
+[limits.local_runaway_guard]
+enabled = true
+max_weighted_tokens = 250000    # inherits max_tokens_per_turn when unset
+max_no_progress_cycles = 3      # cycles without progress before recovery + pause
+max_identical_tool_repeats = 3  # identical calls that trip the guard at once
+
+[limits.context_compaction]
+enabled = true
+trigger_ratio = 0.75            # fraction of the window that triggers compaction
+
+[limits.retry]
+max_attempts = 3
+max_wait_seconds = 120          # a 429 whose reset exceeds this pauses instead
+```
+
+`max_tokens_per_turn` and `self_hosted_max_tokens_per_turn` are kept and honored
+as the guard's ceiling when `max_weighted_tokens` is unset — no old numeric value
+is reinterpreted. When the guard is reached with progress still being made, the
+turn compacts its history and continues rather than stopping; it pauses resumably
+only when nothing is left to compact or progress has stalled.
+
+`[tui.activity]` controls the live activity segments shown during a turn.
+`tool_icons` selects the glyph tier — `"geometric"` (default), `"emoji"`, or
+`"ascii"`; `SNX_ASCII`, `TERM=dumb`, and a `C`/`POSIX` locale force ASCII
+regardless. Activity text is harness-derived and never carries private reasoning.
+
 `[mcp.<name>]` configures `stdio` or `http`, command/arguments or URL, enabled
 state, trust, environment allowlist, and timeout. Imports are disabled and
 untrusted until explicitly reviewed.

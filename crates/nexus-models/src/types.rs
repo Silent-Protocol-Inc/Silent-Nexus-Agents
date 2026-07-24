@@ -183,6 +183,24 @@ impl Usage {
             .saturating_add(self.cache_write_tokens)
     }
 
+    /// What this call cost, in units of one uncached input token.
+    ///
+    /// Cache reads bill at roughly a tenth of the full rate and writes at a
+    /// quarter above it, so a budget that counts all three the same charges a
+    /// warm turn as if it were cold. This is the number a spend ceiling should
+    /// compare against; [`Self::total_input`] remains the number for anything
+    /// asking how large the prompt actually was.
+    ///
+    /// Integer arithmetic, deliberately: a budget that drifts with float
+    /// rounding across hundreds of calls is worse than one that is slightly
+    /// coarse.
+    pub fn weighted_spend(&self) -> usize {
+        self.prompt_tokens
+            .saturating_add(self.cache_read_tokens / 10)
+            .saturating_add(self.cache_write_tokens * 5 / 4)
+            .saturating_add(self.completion_tokens)
+    }
+
     /// Split an OpenAI-family input count into uncached and cached parts.
     ///
     /// `input_tokens` there covers the whole prompt, with the cached portion
@@ -488,6 +506,55 @@ mod tests {
         // The same prompt on the call that fills the cache: identical total,
         // billed differently. Neither reading may change the budget's answer.
         assert_eq!(cold.total_input(), warm.total_input());
+    }
+
+    #[test]
+    fn a_warm_turn_costs_less_budget_than_a_cold_one_of_the_same_size() {
+        // The regression that made long reviews die sooner once caching
+        // shipped: identical prompt sizes, wildly different bills, and a
+        // budget that could not tell them apart.
+        let cold = Usage {
+            prompt_tokens: 40_000,
+            completion_tokens: 500,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        let warm = Usage {
+            prompt_tokens: 4_000,
+            completion_tokens: 500,
+            cache_read_tokens: 36_000,
+            cache_write_tokens: 0,
+        };
+        assert_eq!(cold.total_input(), warm.total_input());
+        assert!(
+            warm.weighted_spend() * 4 < cold.weighted_spend(),
+            "warm {} vs cold {}",
+            warm.weighted_spend(),
+            cold.weighted_spend()
+        );
+        // Writing the cache costs more than sending the same tokens uncached;
+        // that premium is the whole reason the read is cheap later.
+        let writing = Usage {
+            prompt_tokens: 4_000,
+            completion_tokens: 500,
+            cache_read_tokens: 0,
+            cache_write_tokens: 36_000,
+        };
+        assert!(writing.weighted_spend() > cold.weighted_spend());
+    }
+
+    #[test]
+    fn an_uncached_call_is_billed_exactly_as_before() {
+        // Nothing about caching may change what a provider that reports no
+        // cache costs against the budget.
+        let usage = Usage {
+            prompt_tokens: 1_200,
+            completion_tokens: 300,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        assert_eq!(usage.weighted_spend(), 1_500);
+        assert_eq!(usage.weighted_spend(), usage.total_input() + 300);
     }
 
     #[test]

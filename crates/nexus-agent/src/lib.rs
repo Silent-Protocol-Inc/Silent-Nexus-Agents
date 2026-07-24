@@ -25,7 +25,7 @@ pub use agents::AgentRole;
 pub use custom_agents::{AgentCatalog, CustomAgentDefinition};
 pub use loop_engine::{
     AgentLoop, ApprovalDecision, ApprovalHandler, CacheTokens, LoopEvent, LoopOutcome,
-    PlanDecision, PlanReviewRequest, PlanReviewResponse, PlanReviewStage, TurnLimits,
+    PlanDecision, PlanReviewRequest, PlanReviewResponse, PlanReviewStage, RunOutcome, TurnLimits,
 };
 pub use session::{SessionMeta, SessionStore, SessionUsage};
 

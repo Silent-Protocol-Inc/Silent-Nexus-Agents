@@ -485,7 +485,14 @@ async fn repeated_identical_calls_trip_loop_detection() {
         .run(&session, "read repeatedly", Arc::new(AutoApprove))
         .await
         .expect("run");
-    assert_eq!(outcome.stopped_reason, "loop_detected");
+    // Classified as our guard, not as a provider or budget problem — the
+    // distinction the operator needs in order to know whose limit was hit.
+    assert_eq!(outcome.stopped_reason, "local_runaway_guard");
+    assert!(
+        outcome.final_message.contains("resumable"),
+        "a paused run must say the work survived: {}",
+        outcome.final_message
+    );
 }
 
 #[tokio::test]
@@ -1476,6 +1483,136 @@ async fn a_turn_that_grows_into_planned_work_gains_no_approval_gate() {
                 "a promoted plan must not park a gate nothing will resolve: {:?}",
                 work.stages.iter().map(|s| &s.title).collect::<Vec<_>>(),
             );
+        }
+    }
+}
+
+/// Reaching the ceiling no longer ends a run with a bare internal error.
+///
+/// Before this, `input + output` was summed across every call and compared to
+/// a fixed number, producing `agent loop stopped: aggregate token budget
+/// 250000 exhausted` — indistinguishable from a genuine loop, and with no
+/// statement about what survived. A run that spends its ceiling now pauses,
+/// says so in the operator's terms, and says the work was kept.
+#[tokio::test]
+async fn spending_the_ceiling_pauses_resumably_instead_of_erroring() {
+    let dir = tempfile::tempdir().expect("dir");
+    let mut script = Vec::new();
+    for index in 0..5 {
+        let name = format!("file_{index}.txt");
+        std::fs::write(dir.path().join(&name), format!("contents {index}")).expect("write");
+        script.push(MockScript::ToolCall {
+            name: "fs.read_file".into(),
+            arguments: json!({ "path": name }).to_string(),
+        });
+    }
+    script.push(MockScript::Text("reviewed every file".into()));
+
+    let mut provider = MockProvider::new(script);
+    // A fifth of the default ceiling per call, entirely uncached: six model
+    // calls put the turn over 250k.
+    provider.usage = nexus_models::types::Usage {
+        prompt_tokens: 50_000,
+        completion_tokens: 1_000,
+        ..Default::default()
+    };
+    let (runtime, session) = runtime_with_provider(Arc::new(provider), dir.path());
+    let agent = AgentLoop::new(runtime, AgentRole::Reviewer);
+    let outcome = agent
+        .run(&session, "review every file", Arc::new(AutoApprove))
+        .await
+        .expect("run");
+
+    assert_eq!(outcome.stopped_reason, "run_ceiling");
+    assert!(
+        !outcome.final_message.contains("aggregate token budget"),
+        "the bare internal failure came back: {}",
+        outcome.final_message
+    );
+    assert!(
+        outcome.final_message.contains("resumable") && outcome.final_message.contains("preserved"),
+        "a paused run must say the work survived: {}",
+        outcome.final_message
+    );
+}
+
+/// The same volume of prompt, served from cache, finishes where the cold turn
+/// paused. This is the whole point of weighting: cache reads bill at about a
+/// tenth, and charging them in full made a warm review die as early as a cold
+/// one while costing a fraction as much.
+#[tokio::test]
+async fn a_cached_turn_finishes_where_an_uncached_one_would_pause() {
+    let dir = tempfile::tempdir().expect("dir");
+    let mut script = Vec::new();
+    for index in 0..5 {
+        let name = format!("file_{index}.txt");
+        std::fs::write(dir.path().join(&name), format!("contents {index}")).expect("write");
+        script.push(MockScript::ToolCall {
+            name: "fs.read_file".into(),
+            arguments: json!({ "path": name }).to_string(),
+        });
+    }
+    script.push(MockScript::Text("reviewed every file".into()));
+
+    let mut provider = MockProvider::new(script);
+    // The same 51k prompt as the turn above, almost all of it a cache read —
+    // about a fifth of the weighted cost, which is what lets it finish.
+    provider.usage = nexus_models::types::Usage {
+        prompt_tokens: 5_000,
+        completion_tokens: 1_000,
+        cache_read_tokens: 45_000,
+        cache_write_tokens: 0,
+    };
+    let (runtime, session) = runtime_with_provider(Arc::new(provider), dir.path());
+    let agent = AgentLoop::new(runtime, AgentRole::Reviewer);
+    let outcome = agent
+        .run(&session, "review every file", Arc::new(AutoApprove))
+        .await
+        .expect("run");
+
+    assert_eq!(
+        outcome.stopped_reason, "finished",
+        "a cached turn was stopped anyway: {}",
+        outcome.final_message
+    );
+    // Caching changes what a turn costs, not how large its prompt was. The
+    // context gauge and the session record still see the whole thing.
+    assert!(
+        outcome.input_tokens >= 5 * 50_000,
+        "cached input vanished from the reported total: {}",
+        outcome.input_tokens
+    );
+    assert!(outcome.cache.read > 0);
+}
+
+/// Every stop the loop can produce must classify to something truthful.
+///
+/// The failure this prevents: a run that paused with steps outstanding
+/// rendering a red failure, then a green DONE, then "turn done" — three
+/// surfaces disagreeing because each derived its own answer from a free-form
+/// string.
+#[test]
+fn every_stop_reason_classifies_and_nothing_incomplete_reads_as_success() {
+    use nexus_agent::RunOutcome;
+
+    for (reason, expected, resumable) in [
+        ("finished", RunOutcome::Completed, false),
+        ("provider_limit", RunOutcome::WaitingForProvider, true),
+        ("local_runaway_guard", RunOutcome::StoppedByGuard, true),
+        ("run_ceiling", RunOutcome::Paused, true),
+        ("step_limit", RunOutcome::Paused, true),
+        ("cancelled", RunOutcome::Cancelled, false),
+        ("plan_declined", RunOutcome::Declined, false),
+        ("failure_budget", RunOutcome::Failed, false),
+        // A reason nobody taught the classifier about must not read as
+        // success — silence about an outcome is not evidence of one.
+        ("something_new_and_unhandled", RunOutcome::Failed, false),
+    ] {
+        let outcome = RunOutcome::classify(reason);
+        assert_eq!(outcome, expected, "{reason}");
+        assert_eq!(outcome.is_resumable(), resumable, "{reason}");
+        if reason != "finished" {
+            assert!(!outcome.is_success(), "{reason} reported as success");
         }
     }
 }

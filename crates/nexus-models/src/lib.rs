@@ -14,6 +14,7 @@ pub mod mock;
 pub mod ollama;
 pub mod openai_compat;
 pub mod provider;
+pub mod rate_limit;
 pub mod sse;
 pub mod types;
 

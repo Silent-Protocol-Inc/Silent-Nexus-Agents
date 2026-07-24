@@ -394,11 +394,22 @@ impl ModelProvider for OpenAiCompatProvider {
                 .map_err(|_| NexusError::ModelFirstTokenTimeout(first_token))?
                 .map_err(|e| map_reqwest_error(self.kind, &e, self.config.timeout_secs))?;
         let status = response.status();
+        let headers = response.headers().clone();
         let text = response
             .text()
             .await
             .map_err(|e| self.provider_err(format!("reading response: {e}")))?;
         if !status.is_success() {
+            // A quota is not a fault. Reported as its own kind so the loop can
+            // wait rather than treat it as a broken request.
+            if crate::rate_limit::is_rate_limit(status.as_u16()) {
+                return Err(crate::rate_limit::error(
+                    self.kind,
+                    &headers,
+                    status.as_u16(),
+                    &text,
+                ));
+            }
             return Err(self.provider_err(format!("HTTP {status}: {}", truncate_err(&text))));
         }
         let value: Value = serde_json::from_str(&text)
@@ -445,7 +456,16 @@ impl ModelProvider for OpenAiCompatProvider {
                 .map_err(|e| map_reqwest_error(kind, &e, timeout))?;
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
+            if crate::rate_limit::is_rate_limit(status.as_u16()) {
+                return Err(crate::rate_limit::error(
+                    kind,
+                    &headers,
+                    status.as_u16(),
+                    &text,
+                ));
+            }
             return Err(NexusError::Provider {
                 provider: kind.to_string(),
                 message: format!("HTTP {status}: {}", truncate_err(&text)),

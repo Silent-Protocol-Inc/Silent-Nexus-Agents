@@ -204,6 +204,9 @@ impl TranscriptFilter {
                 TimelineKind::UserMessage { .. }
                     | TimelineKind::AssistantMessage { .. }
                     | TimelineKind::FinalAnswer { .. }
+                    // Narrative, not tooling: filtering to messages should
+                    // leave the thread of what the agent said it was doing.
+                    | TimelineKind::AgentActivity { .. }
                     | TimelineKind::Notice { .. }
             ),
             Self::Plans => matches!(
@@ -320,6 +323,25 @@ pub enum TimelineKind {
     },
     ReasoningSummary {
         text: String,
+    },
+    /// What the agent is doing now, in the operator's terms.
+    ///
+    /// Distinct from [`Self::ReasoningSummary`], which is whatever public
+    /// summary a provider chose to emit. This is the harness speaking: it is
+    /// assembled from state the runtime already holds — role, plan step, tool
+    /// intent, results, validation — and falls back to that assembly whenever
+    /// the model says nothing. Private reasoning is never a source, which is
+    /// why the two stay separate kinds rather than one blurred channel.
+    AgentActivity {
+        /// Uppercased at render. `AGENT` when the role is absent or unknown;
+        /// never a hardcoded product name.
+        role: String,
+        /// `(index, total)` of the active plan step, when there is a plan.
+        step: Option<(u32, u32)>,
+        phase: ActivityPhase,
+        text: String,
+        /// Tools executed under this segment, newest last.
+        tools: Vec<String>,
     },
     WorkBreakdown {
         breakdown: WorkBreakdown,
@@ -463,6 +485,53 @@ pub enum TimelineKind {
     },
 }
 
+/// What kind of moment an [`TimelineKind::AgentActivity`] segment describes.
+///
+/// Drives the header word and the accent colour, and nothing else — the phase
+/// is derived from runtime transitions, so it can never assert more than the
+/// harness actually observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityPhase {
+    /// Choosing a direction: reading, searching, orienting.
+    Analysis,
+    /// Carrying it out: edits, commands, mutations.
+    Execution,
+    /// What a result actually showed.
+    Observation,
+    /// Tests, checks, builds — and what they returned.
+    Validation,
+    /// Waiting on something outside the loop: a provider, an approval, a reset.
+    Waiting,
+    /// History was folded so the run could continue.
+    Compaction,
+}
+
+impl ActivityPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Analysis => "analysis",
+            Self::Execution => "execution",
+            Self::Observation => "observation",
+            Self::Validation => "validation",
+            Self::Waiting => "waiting",
+            Self::Compaction => "compaction",
+        }
+    }
+
+    /// The word shown after the role in the segment header.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Analysis => "ANALYSIS",
+            Self::Execution => "EXECUTION",
+            Self::Observation => "OBSERVATION",
+            Self::Validation => "VALIDATION",
+            Self::Waiting => "WAITING",
+            Self::Compaction => "COMPACTION",
+        }
+    }
+}
+
 /// How prominently an event should surface in the live timeline. Independent of
 /// the content-type [`TranscriptFilter`] and the per-event [`TranscriptDetail`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,6 +600,10 @@ impl TimelineKind {
             Self::UserMessage { .. }
             | Self::AssistantMessage { .. }
             | Self::FinalAnswer { .. }
+            // The point of the segment: it is what the operator reads between
+            // tool calls. Filed as detail, it would be dropped by the default
+            // view and the timeline would be tool calls again.
+            | Self::AgentActivity { .. }
             | Self::ToolExecution { .. }
             | Self::ToolProgress { .. }
             | Self::FileMutation { .. }
@@ -566,13 +639,17 @@ impl TimelineKind {
                     CollapsedDetail
                 }
             }
+            // Compaction changes what the model can still see. Filed as detail
+            // it was invisible, so a run that folded its history looked
+            // identical to one that had not — and the operator had no way to
+            // account for an agent that stopped referring to earlier findings.
+            Self::Compaction { .. } => Essential,
             Self::ReasoningSummary { .. }
             | Self::WorkBreakdown { .. }
             | Self::PlanRevision { .. }
             | Self::StageChanged { .. }
             | Self::ToolProposal { .. }
             | Self::Checkpoint { .. }
-            | Self::Compaction { .. }
             | Self::ContextPacked { .. } => CollapsedDetail,
             Self::Classification { .. }
             | Self::ModelRouting { .. }
@@ -591,6 +668,7 @@ impl TimelineKind {
             Self::ModelRouting { .. } => "model_routing",
             Self::ProviderActivity { .. } => "provider_activity",
             Self::ReasoningSummary { .. } => "reasoning_summary",
+            Self::AgentActivity { .. } => "agent_activity",
             Self::WorkBreakdown { .. } => "work_breakdown",
             Self::PlanRevision { .. } => "plan_revision",
             Self::StageChanged { .. } => "stage_changed",

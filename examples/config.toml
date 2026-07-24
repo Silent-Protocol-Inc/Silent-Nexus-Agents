@@ -143,6 +143,26 @@ goal_step_budget = 200
 goal_runtime_budget_min = 120
 completion_reserve_tokens = 1024
 
+# Weighted-spend guard: cache reads count at 1/10, writes at 5/4, so a warm
+# turn survives where an identical cold one would pause. All optional.
+[limits.local_runaway_guard]
+enabled = true
+# max_weighted_tokens = 250000    # inherits max_tokens_per_turn when unset
+max_no_progress_cycles = 3
+max_identical_tool_repeats = 3
+
+[limits.context_compaction]
+enabled = true
+trigger_ratio = 0.75             # fraction of the window that triggers compaction
+
+[limits.retry]
+max_attempts = 3
+max_wait_seconds = 120           # a 429 whose reset exceeds this pauses instead
+
+# Live activity segments shown during a turn.
+[tui.activity]
+tool_icons = "geometric"         # geometric | emoji | ascii
+
 # ---------------------------------------------------------------------------
 # MCP servers (optional). Untrusted by default; registering is explicit.
 # ---------------------------------------------------------------------------
