@@ -81,6 +81,10 @@ pub struct ResponsiveLayout {
     pub header_rows: u16,
     pub status_rows: u16,
     pub input_max_rows: u16,
+    /// Rows the pinned plan tracker may take above the composer, once the rest
+    /// of the chrome has been paid for. Zero when the terminal is too short to
+    /// spend any: the conversation and the input matter more than the tracker.
+    pub plan_panel_max_rows: u16,
     pub compact_labels: bool,
     pub too_small: bool,
 }
@@ -135,6 +139,16 @@ pub fn classify(area: Rect) -> ResponsiveLayout {
     let show_sidebar =
         roomy_width && roomy_height && area.width >= MIN_CONVERSATION_WIDTH + SIDEBAR_WIDTH;
 
+    // Three lines is the smallest useful tracker (title, active step, and one
+    // either side); seven is enough to show a window of a long plan without
+    // crowding the conversation.
+    let plan_panel_max_rows = match height_class {
+        HeightClass::VeryShort => 0,
+        HeightClass::Short => 3,
+        HeightClass::Standard => 5,
+        HeightClass::Tall => 7,
+    };
+
     ResponsiveLayout {
         width_class,
         height_class,
@@ -143,6 +157,7 @@ pub fn classify(area: Rect) -> ResponsiveLayout {
         header_rows,
         status_rows,
         input_max_rows,
+        plan_panel_max_rows,
         compact_labels: width_class != WidthClass::Wide,
         too_small: area.width < 24 || area.height < 8,
     }
@@ -195,7 +210,7 @@ pub fn compact_path(path: &str, max: usize, project_only: bool) -> String {
 }
 
 /// Truncate to at most `max` display columns without splitting a character.
-fn truncate_display(text: &str, max: usize) -> String {
+pub fn truncate_display(text: &str, max: usize) -> String {
     let mut out = String::new();
     let mut used = 0usize;
     for ch in text.chars() {

@@ -179,6 +179,12 @@ impl OllamaProvider {
         (content, tool_calls)
     }
 
+    /// Ollama reports no cache accounting, so the cache fields stay zero.
+    ///
+    /// That is accurate rather than missing: the server reuses its KV cache
+    /// across requests without telling us how much it reused, and there is no
+    /// request-side knob to set. Keeping the model resident — which is what
+    /// actually preserves that reuse — is already handled by `keep_alive`.
     fn parse_usage(value: &Value) -> Usage {
         Usage {
             prompt_tokens: value
@@ -187,6 +193,7 @@ impl OllamaProvider {
                 .unwrap_or(0) as usize,
             completion_tokens: value.get("eval_count").and_then(Value::as_u64).unwrap_or(0)
                 as usize,
+            ..Usage::default()
         }
     }
 

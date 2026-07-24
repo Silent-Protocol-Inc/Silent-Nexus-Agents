@@ -456,6 +456,22 @@ fn update_claude_usage(usage: Option<&Value>, state: &mut ClaudeStreamState) {
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize,
     );
+    // The CLI owns its own request body, so caching here is whatever it decides
+    // to do. These counts are read-only reporting — the same Anthropic
+    // (input-exclusive) shape as the direct API, taken with `max` because the
+    // stream restates usage as it progresses.
+    state.usage.cache_read_tokens = state.usage.cache_read_tokens.max(
+        usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+    );
+    state.usage.cache_write_tokens = state.usage.cache_write_tokens.max(
+        usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+    );
 }
 
 fn serialize_request(request: &CompletionRequest) -> Result<String> {

@@ -174,6 +174,14 @@ impl OpenAiCompatProvider {
         if request.json_mode {
             body["response_format"] = json!({"type": "json_object"});
         }
+        // Only OpenAI itself documents this field, and this adapter also serves
+        // llama.cpp, vLLM, LM Studio and arbitrary custom endpoints — several
+        // of which reject unknown keys outright. Same restraint as
+        // `reasoning_effort` below. Caching still happens on servers that do it
+        // implicitly; the key just pins which warm copy a repeat request finds.
+        if self.kind == "openai" && self.config.prompt_cache_enabled() {
+            body["prompt_cache_key"] = json!(request.prompt_cache_key());
+        }
         if let Some(effort) = self.config.reasoning_effort.as_deref() {
             if self.base_url.contains("openrouter.ai/") {
                 // OpenRouter's normalized contract. Reasoning output is
@@ -289,16 +297,16 @@ fn parse_tool_calls(value: &Value) -> Vec<ToolCallRequest> {
 }
 
 fn parse_usage(value: &Value) -> Usage {
-    Usage {
-        prompt_tokens: value
-            .pointer("/usage/prompt_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize,
-        completion_tokens: value
-            .pointer("/usage/completion_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize,
-    }
+    // Chat Completions reports the cached portion as a detail *inside*
+    // `prompt_tokens`, so it is subtracted rather than added. A self-hosted
+    // server that reports no details object simply looks fully uncached.
+    let count = |path: &str| value.pointer(path).and_then(Value::as_u64).unwrap_or(0) as usize;
+    Usage::from_inclusive_input(
+        count("/usage/prompt_tokens"),
+        count("/usage/prompt_tokens_details/cached_tokens"),
+        count("/usage/prompt_tokens_details/cache_write_tokens"),
+        count("/usage/completion_tokens"),
+    )
 }
 
 #[async_trait::async_trait]
@@ -636,6 +644,108 @@ mod tests {
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["reasoning"]["exclude"], true);
         assert!(body.get("include_reasoning").is_none());
+    }
+
+    #[test]
+    fn cached_tokens_are_subtracted_from_the_inclusive_prompt_count() {
+        let usage = parse_usage(&json!({
+            "usage": {
+                "prompt_tokens": 1012,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 900},
+            }
+        }));
+        // 1012 already contains the 900: reporting both would double-count the
+        // prefix and inflate every turn's input by the size of the cache.
+        assert_eq!(usage.prompt_tokens, 112);
+        assert_eq!(usage.cache_read_tokens, 900);
+        assert_eq!(usage.total_input(), 1012);
+    }
+
+    #[test]
+    fn a_response_without_cache_details_is_unchanged() {
+        let usage = parse_usage(&json!({
+            "usage": {"prompt_tokens": 40, "completion_tokens": 2}
+        }));
+        assert_eq!(usage.prompt_tokens, 40);
+        assert_eq!(usage.cache_read_tokens, 0);
+        assert_eq!(usage.total_input(), 40);
+    }
+
+    #[test]
+    fn both_api_families_normalize_to_the_same_total_input() {
+        // The same logical prompt — 1012 tokens, 900 of them cached — as each
+        // family reports it. This pair is the regression guard for the one
+        // difference between them: Anthropic excludes the cached portion from
+        // its input count, the OpenAI family includes it.
+        let openai = parse_usage(&json!({
+            "usage": {
+                "prompt_tokens": 1012,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 900},
+            }
+        }));
+        let anthropic = crate::anthropic::parse_usage(Some(&json!({
+            "input_tokens": 112,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 900,
+        })));
+        assert_eq!(openai.total_input(), anthropic.total_input());
+        assert_eq!(openai.cache_read_tokens, anthropic.cache_read_tokens);
+        assert_eq!(openai.prompt_tokens, anthropic.prompt_tokens);
+    }
+
+    #[test]
+    fn the_cache_key_is_stable_within_a_conversation_and_distinct_across_them() {
+        let config = ModelConfig {
+            provider: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            model: "exact-model".into(),
+            resolved_api_key: Some(nexus_core::SecretString::new("test-only")),
+            ..Default::default()
+        };
+        let provider = OpenAiCompatProvider::new("openai", &config).expect("provider");
+        let mut request = CompletionRequest {
+            messages: vec![
+                ChatMessage::system("stable rules"),
+                ChatMessage::user("first ask"),
+            ],
+            ..Default::default()
+        };
+        let first = provider.build_body(&request, false)["prompt_cache_key"].clone();
+        // A turn grows by tool results and assistant replies; the key is taken
+        // from the prefix, so it must not move as that happens.
+        request.messages.push(ChatMessage::user("a later step"));
+        assert_eq!(
+            provider.build_body(&request, false)["prompt_cache_key"],
+            first
+        );
+
+        let other = CompletionRequest {
+            messages: vec![
+                ChatMessage::system("stable rules"),
+                ChatMessage::user("an unrelated ask"),
+            ],
+            ..Default::default()
+        };
+        assert_ne!(
+            provider.build_body(&other, false)["prompt_cache_key"],
+            first
+        );
+    }
+
+    #[test]
+    fn the_cache_key_is_withheld_from_endpoints_that_do_not_document_it() {
+        // llama.cpp, vLLM and custom endpoints reject unknown body keys.
+        let config = ModelConfig {
+            provider: "openai_compatible".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model: "exact/model".into(),
+            ..Default::default()
+        };
+        let provider = OpenAiCompatProvider::new("openai_compatible", &config).expect("provider");
+        let body = provider.build_body(&CompletionRequest::default(), false);
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     #[test]

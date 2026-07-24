@@ -128,6 +128,10 @@ pub struct AutoApproveApprover;
 
 #[async_trait::async_trait]
 impl ApprovalHandler for AutoApproveApprover {
+    fn preapproved(&self) -> bool {
+        true
+    }
+
     async fn request_approval(
         &self,
         _action: &ActionRequest,

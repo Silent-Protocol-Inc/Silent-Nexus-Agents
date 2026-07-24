@@ -116,10 +116,93 @@ pub struct ModelRequest {
     pub json_mode: bool,
 }
 
+impl ModelRequest {
+    /// A stable routing hint for OpenAI-family prefix caching.
+    ///
+    /// The backend caches by prefix regardless; the key exists so requests that
+    /// *share* a prefix land on the same machine and actually find the warm
+    /// copy. It is therefore derived from the prefix itself — the system
+    /// material plus the opening turn, the part that stays fixed while a turn
+    /// grows — rather than from a session id, which we do not carry here and
+    /// which would split the cache between two sessions doing identical work.
+    ///
+    /// The digest is a plain FNV-1a: this is a routing bucket, not a secret,
+    /// and a collision costs at worst one missed cache read.
+    pub fn prompt_cache_key(&self) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let prefix = self
+            .messages
+            .iter()
+            .take_while(|message| message.role == Role::System)
+            .chain(
+                self.messages
+                    .iter()
+                    .find(|message| message.role != Role::System),
+            );
+        for message in prefix {
+            for byte in message.content.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        format!("snx-{hash:016x}")
+    }
+}
+
+/// Token accounting for one provider call.
+///
+/// The two API families disagree about what the input count means: Anthropic's
+/// `input_tokens` excludes cached tokens, while the OpenAI/Responses families
+/// report `cached_tokens` as a *subset* of `input_tokens` (verified against the
+/// live backend: `total_tokens == input_tokens + output_tokens` while
+/// `cached_tokens` was non-zero). Adapters normalize to the contract below, so
+/// a consumer can add the three input fields without knowing the provider.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
+    /// Input tokens billed at full rate — the uncached remainder only.
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
+    /// Input served from a warm cache, billed at a fraction of the full rate.
+    #[serde(default)]
+    pub cache_read_tokens: usize,
+    /// Input written to the cache on this call, billed at a premium once so
+    /// later calls can read it cheaply.
+    #[serde(default)]
+    pub cache_write_tokens: usize,
+}
+
+impl Usage {
+    /// Every input token the provider processed, cached or not.
+    ///
+    /// This is the size of the prompt that was actually sent, which is what
+    /// context accounting and turn budgets care about — `prompt_tokens` alone
+    /// under-reports by the whole cached prefix once a cache is warm.
+    pub fn total_input(&self) -> usize {
+        self.prompt_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_write_tokens)
+    }
+
+    /// Split an OpenAI-family input count into uncached and cached parts.
+    ///
+    /// `input_tokens` there covers the whole prompt, with the cached portion
+    /// reported as a detail inside it; `saturating_sub` keeps the arithmetic
+    /// safe if a provider ever reports the parts as additive instead.
+    pub fn from_inclusive_input(
+        input_tokens: usize,
+        cached: usize,
+        cache_write: usize,
+        completion_tokens: usize,
+    ) -> Self {
+        Self {
+            prompt_tokens: input_tokens
+                .saturating_sub(cached)
+                .saturating_sub(cache_write),
+            completion_tokens,
+            cache_read_tokens: cached,
+            cache_write_tokens: cache_write,
+        }
+    }
 }
 
 /// Provider-neutral response returned by every model adapter.
@@ -381,6 +464,60 @@ impl TaskClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_warm_cache_does_not_shrink_the_prompt_the_consumers_see() {
+        // The context manifest and the aggregate token budget both read
+        // `total_input()`. If either reverted to `prompt_tokens` a 40k prompt
+        // would be reported as 4k the moment the cache warmed up — the budget
+        // would stop firing and the context gauge would read near-empty.
+        let warm = Usage {
+            prompt_tokens: 4_000,
+            completion_tokens: 120,
+            cache_read_tokens: 36_000,
+            cache_write_tokens: 0,
+        };
+        assert_eq!(warm.total_input(), 40_000);
+
+        let cold = Usage {
+            prompt_tokens: 4_000,
+            completion_tokens: 120,
+            cache_read_tokens: 0,
+            cache_write_tokens: 36_000,
+        };
+        // The same prompt on the call that fills the cache: identical total,
+        // billed differently. Neither reading may change the budget's answer.
+        assert_eq!(cold.total_input(), warm.total_input());
+    }
+
+    #[test]
+    fn usage_records_written_before_caching_existed_still_load() {
+        let legacy: Usage = serde_json::from_value(
+            serde_json::json!({"prompt_tokens": 12, "completion_tokens": 3}),
+        )
+        .expect("a two-field record stays readable");
+        assert_eq!(legacy.cache_read_tokens, 0);
+        assert_eq!(legacy.total_input(), 12);
+    }
+
+    #[test]
+    fn the_cache_key_ignores_everything_after_the_opening_turn() {
+        let base = ModelRequest {
+            messages: vec![ChatMessage::system("rules"), ChatMessage::user("ask")],
+            ..Default::default()
+        };
+        let mut grown = base.clone();
+        grown
+            .messages
+            .push(ChatMessage::tool_result("call-1", "fs.read", "contents"));
+        assert_eq!(base.prompt_cache_key(), grown.prompt_cache_key());
+
+        let different = ModelRequest {
+            messages: vec![ChatMessage::system("rules"), ChatMessage::user("other ask")],
+            ..Default::default()
+        };
+        assert_ne!(base.prompt_cache_key(), different.prompt_cache_key());
+    }
 
     #[test]
     fn legacy_capability_documents_receive_safe_metadata_defaults() {

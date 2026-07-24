@@ -32,7 +32,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
-use nexus_agent::{AgentLoop, ApprovalDecision, ApprovalHandler, LoopEvent};
+use nexus_agent::{AgentLoop, ApprovalDecision, ApprovalHandler, LoopEvent, PlanDecision};
 use nexus_app::codex::DeviceLoginEvent;
 use nexus_app::providers::ProviderEntry;
 use nexus_app::status::StatusSnapshot;
@@ -260,6 +260,7 @@ fn build_bar(app: &App) -> StatusBar {
         git_branch: nexus_app::gitx::branch(&app.workspace),
         tokens_in: 0,
         tokens_out: 0,
+        tokens_cached: 0,
         permission_mode: nexus_app::services::permission_mode(&app.config.policy).to_string(),
         plan_mode: app.read_ui_state(|s| s.plan_mode),
     }
@@ -305,6 +306,7 @@ async fn event_loop(
     // Channels.
     let (turn_tx, mut turn_rx) = mpsc::unbounded_channel::<TurnMessage>();
     let (appr_tx, mut appr_rx) = mpsc::unbounded_channel::<ApprovalRequest>();
+    let (plan_tx, mut plan_rx) = mpsc::unbounded_channel::<approver::PlanReview>();
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Event>();
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiMsg>();
 
@@ -323,7 +325,7 @@ async fn event_loop(
         }
     });
 
-    let approver: Arc<dyn ApprovalHandler> = Arc::new(TuiApprover::new(appr_tx));
+    let approver: Arc<dyn ApprovalHandler> = Arc::new(TuiApprover::new(appr_tx, plan_tx));
     let mut session: Option<SessionId> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut last_background_poll = std::time::Instant::now();
@@ -386,10 +388,20 @@ async fn event_loop(
                 handle_key(&mut st, evt, &app, &mut session, &turn_tx, &approver, &ui_tx);
             }
             Some(req) = appr_rx.recv() => {
-                st.pending_approvals = 1;
-                st.approval_selected = 0;
-                st.approval_edit = None;
-                st.pending = Some(req);
+                // Queue rather than replace: overwriting a pending request drops
+                // its reply channel, which the loop reads as a denial for an
+                // action the operator was never shown.
+                if st.pending.is_some() {
+                    st.approval_queue.push_back(req);
+                } else {
+                    st.approval_selected = 0;
+                    st.approval_edit = None;
+                    st.pending = Some(req);
+                }
+                st.pending_approvals = 1 + st.approval_queue.len() as u32;
+            }
+            Some(review) = plan_rx.recv() => {
+                open_plan_review(&mut st, review);
             }
             Some(message) = turn_rx.recv() => {
                 let turn_id = match &message {
@@ -626,10 +638,18 @@ fn apply_turn_done(
     st.turn_started = None;
     st.turn_abort = None;
     st.active_turn_id = None;
+    // The tracker is a live view of work in progress. With the turn over it has
+    // nothing left to track, and the plan is already in the transcript once —
+    // leaving it pinned would park stale state above the composer.
+    st.pinned_plan = None;
+    // A turn that ended while a review was outstanding has no one left to
+    // answer; drop the request rather than leaving the panel asking forever.
+    st.plan_review = None;
     match result {
         Ok(outcome) => {
             st.bar.tokens_in += outcome.input_tokens;
             st.bar.tokens_out += outcome.output_tokens;
+            st.bar.tokens_cached += outcome.cache.read;
             st.activity(format!(
                 "turn done · {} steps · {} tool calls · {}",
                 outcome.steps, outcome.tool_calls, outcome.stopped_reason
@@ -1064,6 +1084,16 @@ fn handle_key(
             let line = st.input.take();
             let trimmed = line.trim().to_string();
             if trimmed.is_empty() {
+                // Enter on an empty composer was a no-op. While a plan is
+                // waiting it reopens the review the operator dismissed, which
+                // is the one thing they are being asked to do.
+                if st
+                    .plan_review
+                    .as_ref()
+                    .is_some_and(|pending| pending.reply.is_some())
+                {
+                    show_plan_review(st);
+                }
                 return;
             }
             let final_history: Vec<String> = st.input.history_snapshot().to_vec();
@@ -1162,10 +1192,110 @@ fn resolve_approval(st: &mut State, decision: ApprovalDecision) {
                 *edited = matches!(&decision, ApprovalDecision::ApproveEdited(_));
             }
         }
-        st.pending_approvals = 0;
         st.approval_edit = None;
         let _ = req.reply.send(decision);
+        // Show the next one that was waiting rather than leaving the loop
+        // parked on a request nobody can see.
+        st.pending = st.approval_queue.pop_front();
+        st.approval_selected = 0;
+        st.pending_approvals = st.pending.iter().count() as u32 + st.approval_queue.len() as u32;
     }
+}
+
+/// Put a plan in front of the operator: hold the reply channel in state and
+/// open the pop-up over it.
+fn open_plan_review(st: &mut State, review: approver::PlanReview) {
+    let request = review.request.clone();
+    st.plan_review = Some(state::PendingPlanReview {
+        request: request.clone(),
+        reply: Some(review.reply),
+    });
+    // The pinned panel shows the plan under review, so a dismissed pop-up still
+    // says what is owed.
+    st.pinned_plan = Some(plan_from_review(&request));
+    show_plan_review(st);
+}
+
+/// Open (or re-open) the pop-up for the plan currently awaiting a decision.
+fn show_plan_review(st: &mut State) {
+    let Some(pending) = st.plan_review.as_ref() else {
+        return;
+    };
+    if pending.reply.is_none() {
+        return;
+    }
+    if st
+        .overlays
+        .iter()
+        .any(|overlay| matches!(overlay, Overlay::PlanReview(_)))
+    {
+        return;
+    }
+    st.push_overlay(Overlay::PlanReview(Box::new(views::PlanReview::new(
+        pending.request.clone(),
+    ))));
+}
+
+/// The pinned view of a plan that is waiting on a decision.
+fn plan_from_review(request: &nexus_agent::PlanReviewRequest) -> state::PinnedPlan {
+    state::PinnedPlan {
+        plan_id: request.plan_id.clone(),
+        agent: request.agent.clone(),
+        objective: request.objective.clone(),
+        version: request.version,
+        steps: request
+            .stages
+            .iter()
+            .map(|stage| state::PinnedStep {
+                sequence: stage.sequence,
+                title: stage.title.clone(),
+                status: nexus_core::orchestration::StageStatus::Pending,
+            })
+            .collect(),
+        awaiting_approval: true,
+    }
+}
+
+/// Answer the plan under review, once.
+///
+/// A decision naming another revision is discarded: the operator may still have
+/// had an older pop-up open when a revised plan replaced it, and that answer was
+/// about work that no longer exists.
+fn resolve_plan_review(st: &mut State, plan_id: &str, version: u32, decision: PlanDecision) {
+    let Some(pending) = st.plan_review.as_mut() else {
+        return;
+    };
+    if pending.request.plan_id != plan_id || pending.request.version != version {
+        st.toast(
+            "that decision was about an earlier version of the plan",
+            Sev::Warn,
+        );
+        return;
+    }
+    // `take` makes this idempotent: a second confirmation finds no sender and
+    // cannot start execution twice.
+    let Some(reply) = pending.reply.take() else {
+        return;
+    };
+    let label = match &decision {
+        PlanDecision::Approve => "plan approved",
+        PlanDecision::ApproveWithNote(_) => "plan approved with a note",
+        PlanDecision::RequestChanges(_) => "changes requested",
+        PlanDecision::Decline => "plan declined",
+    };
+    let _ = reply.send(nexus_agent::PlanReviewResponse {
+        plan_id: plan_id.to_string(),
+        version,
+        decision: decision.clone(),
+    });
+    st.plan_review = None;
+    if let Some(plan) = st.pinned_plan.as_mut() {
+        plan.awaiting_approval = false;
+    }
+    if matches!(decision, PlanDecision::Decline) {
+        st.pinned_plan = None;
+    }
+    st.toast(label, Sev::Ok);
 }
 
 fn open_palette(st: &mut State, app: &Arc<App>) {
@@ -1547,6 +1677,23 @@ fn report_body_text(report: &Report) -> String {
         .join("\n")
 }
 
+/// Hand the sidecar's reply to the aside pop-up, wherever it sits in the
+/// overlay stack. A command already in flight when the pop-up opened can land a
+/// pager on top of it, so matching only the topmost overlay would drop the
+/// reply and leave the pop-up wedged with a question it can never answer. If
+/// the operator closed it, the note was already recorded, so the reply is
+/// dropped rather than leaking into the main transcript.
+fn deliver_aside_answer(st: &mut State, answer: String) {
+    if let Some(Overlay::Aside(aside)) = st
+        .overlays
+        .iter_mut()
+        .rev()
+        .find(|overlay| matches!(overlay, Overlay::Aside(_)))
+    {
+        aside.resolve(answer);
+    }
+}
+
 /// Run one `/btw` aside from the pop-up: record the note and, if it reads as a
 /// question, answer it — concurrently, without disturbing the main turn or its
 /// transcript. The reply is delivered back to the overlay via `AsideAnswer`.
@@ -1618,6 +1765,20 @@ fn run_command_parsed_with_mode(
     if let Some(def) = nexus_app::registry::find(&cmd.name) {
         let name = cmd.name.clone();
         let _ = app.update_ui_state(move |s| s.push_recent_command(&name));
+
+        // A plan waiting on a decision owns `/plan`: the operator asking for
+        // the plan while one is under review wants to see that one, not a
+        // stored version of an earlier turn's.
+        if def.id == nexus_app::registry::CommandId::Plan
+            && cmd.args.is_empty()
+            && st
+                .plan_review
+                .as_ref()
+                .is_some_and(|pending| pending.reply.is_some())
+        {
+            show_plan_review(st);
+            return;
+        }
 
         // `/btw` opens the aside pop-up: a separate surface for asking the agent
         // or handing it context, answered concurrently without touching the
@@ -1874,12 +2035,7 @@ fn handle_ui_msg(
         UiMsg::AsideAnswer { generation, answer } => {
             st.busy = st.busy.saturating_sub(1);
             let _ = generation;
-            // Deliver only if the aside is still open; if the operator closed
-            // it, the note was already recorded, so the reply is simply dropped
-            // rather than leaking into the main transcript.
-            if let Some(Overlay::Aside(aside)) = st.overlays.last_mut() {
-                aside.resolve(answer);
-            }
+            deliver_aside_answer(st, answer);
         }
     }
 }
@@ -2359,6 +2515,11 @@ fn handle_action(
                 st.toast("cancelling…", Sev::Warn);
             }
         }
+        UiAction::ResolvePlan {
+            plan_id,
+            version,
+            decision,
+        } => resolve_plan_review(st, &plan_id, version, decision),
         UiAction::SelectModel(name) => match nexus_app::services::model_select(app, &name) {
             Ok(report) => {
                 if let Some(id) = session.as_ref() {
@@ -2414,16 +2575,27 @@ fn handle_action(
                 Some(m) if !m.reasoning_efforts.is_empty() => {
                     push_menu(st, app, menus::effort_menu(m));
                 }
-                _ => handle_action(
-                    st,
-                    UiAction::UseCodexModel {
-                        model_id,
-                        effort: None,
-                    },
-                    app,
-                    session,
-                    ui_tx,
-                ),
+                // No efforts to pick from — the plan cache is cold, or the plan
+                // no longer lists this model. An entry that is already
+                // configured is pinned as-is: rewriting it here would silently
+                // reset the effort (and the saved limits) the operator chose.
+                // Only a model with no entry yet is saved from scratch.
+                _ => {
+                    let configured = app
+                        .config
+                        .models
+                        .iter()
+                        .find(|(_, m)| m.provider == "codex" && m.model == model_id)
+                        .map(|(name, _)| name.clone());
+                    let next = match configured {
+                        Some(name) => UiAction::SelectModel(name),
+                        None => UiAction::UseCodexModel {
+                            model_id,
+                            effort: None,
+                        },
+                    };
+                    handle_action(st, next, app, session, ui_tx);
+                }
             }
         }
         UiAction::UseCodexModel { model_id, effort } => {
@@ -3643,6 +3815,57 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
                 st.toast("plan declined — still in plan mode", Sev::Warn);
             }
         }
+        // The pinned tracker is a live view of one plan, updated in place. It
+        // is deliberately not pushed to the timeline: the plan is already
+        // recorded there once, and repeating it every transition would bury the
+        // conversation under copies of the same list.
+        LoopEvent::WorkPlanned { work } => {
+            st.pinned_plan = Some(state::PinnedPlan {
+                plan_id: work.id.as_str().to_string(),
+                agent: st.bar.agent.clone(),
+                objective: work.objective.clone(),
+                version: work.version,
+                steps: work
+                    .stages
+                    .iter()
+                    .map(|stage| state::PinnedStep {
+                        sequence: stage.sequence,
+                        title: stage.title.clone(),
+                        status: stage.status,
+                    })
+                    .collect(),
+                awaiting_approval: false,
+            });
+        }
+        LoopEvent::PlanReviewRequested { request } => {
+            // The pop-up itself is opened when the request arrives on the plan
+            // channel; this only makes the panel say what is owed, and names
+            // whichever agent actually authored the plan.
+            let mut plan = plan_from_review(&request);
+            if let Some(existing) = st.pinned_plan.as_ref() {
+                if existing.plan_id == plan.plan_id {
+                    plan.steps = existing
+                        .steps
+                        .iter()
+                        .map(|step| state::PinnedStep {
+                            sequence: step.sequence,
+                            title: step.title.clone(),
+                            status: step.status,
+                        })
+                        .collect();
+                }
+            }
+            st.pinned_plan = Some(plan);
+        }
+        LoopEvent::PlanReviewResolved {
+            plan_id, version, ..
+        } => {
+            if let Some(plan) = st.pinned_plan.as_mut() {
+                if plan.plan_id == plan_id && plan.version == version {
+                    plan.awaiting_approval = false;
+                }
+            }
+        }
         // Compaction is not a detail: the operator's earlier turns stopped
         // being visible to the model, and they are entitled to know when and
         // whether a real summary replaced them.
@@ -3793,6 +4016,13 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
             status,
             next_action,
         } => {
+            // Update the pinned tracker in place. Appending a fresh list per
+            // transition is what made progress scroll away in the first place.
+            if let Some(plan) = st.pinned_plan.as_mut() {
+                if plan.plan_id == plan_id {
+                    plan.update_step(&title, status);
+                }
+            }
             st.push_local_event_for_turn(
                 turn_id.clone(),
                 match status {
@@ -4075,6 +4305,7 @@ mod tests {
                 git_branch: Some("main".into()),
                 tokens_in: 0,
                 tokens_out: 0,
+                tokens_cached: 0,
                 permission_mode: "default".into(),
                 plan_mode: false,
             },
@@ -4091,6 +4322,7 @@ mod tests {
             stopped_reason: "complete".into(),
             input_tokens: 3,
             output_tokens: 5,
+            cache: Default::default(),
         }
     }
 
@@ -4102,6 +4334,47 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn an_aside_answer_lands_even_when_an_overlay_opened_on_top_of_it() {
+        let mut st = turn_test_state();
+        st.push_overlay(Overlay::Aside(views::AsideChat::new()));
+        if let Some(Overlay::Aside(aside)) = st.overlays.last_mut() {
+            aside.begin("how big is the cache?".into());
+        }
+        // A command that was already in flight lands its report on top.
+        st.push_overlay(Overlay::Pager(views::Pager::new(
+            "doctor",
+            Report::new("doctor"),
+        )));
+
+        deliver_aside_answer(&mut st, "about 40MB".into());
+
+        let Some(Overlay::Aside(aside)) = st.overlays.first() else {
+            panic!("the aside is still on the stack, under the pager");
+        };
+        assert!(
+            !aside.pending,
+            "a wedged pending flag would refuse every later question",
+        );
+        assert_eq!(
+            aside.exchanges[0].answer.as_deref(),
+            Some("about 40MB"),
+            "the reply belongs to the aside, not to whatever sits on top of it",
+        );
+    }
+
+    #[test]
+    fn an_aside_answer_with_no_pop_up_open_is_dropped() {
+        let mut st = turn_test_state();
+        deliver_aside_answer(&mut st, "answer to a closed pop-up".into());
+        assert!(
+            !st.timeline
+                .iter()
+                .any(|event| event.summary.contains("closed pop-up")),
+            "a closed aside drops its reply rather than leaking it into the transcript",
+        );
     }
 
     #[test]

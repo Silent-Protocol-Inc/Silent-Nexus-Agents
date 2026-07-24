@@ -429,6 +429,22 @@
           "default": "configured_conservative",
           "description": "Provenance for the effective cached output limit."
         },
+        "prompt_cache": {
+          "default": null,
+          "description": "Ask the provider to cache the stable prefix of each request.\n\n`None` means on for metered providers: every turn re-sends the whole conversation, so a turn with two or more model calls always repays the one-time write premium. Set `false` to send exactly what earlier versions sent. Self-hosted providers ignore this — Ollama has no knob, and its KV reuse is governed by `keep_alive` instead.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "prompt_cache_ttl": {
+          "default": null,
+          "description": "How long a cached prefix stays warm: `\"5m\"` (default) or `\"1h\"`.\n\nOnly the Anthropic family takes a lifetime; the Responses backend manages its own. The longer window survives gaps between turns but the write costs more, so it needs more reuse to pay for itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "provider": {
           "default": "llamacpp",
           "description": "Provider kind: `llamacpp`, `ollama`, `openai_compatible`, `claude-plan`, `anthropic`, `custom_http`, or `mock`.",

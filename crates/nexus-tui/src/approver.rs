@@ -5,7 +5,9 @@
 //! so the operator sees a modal and their keypress becomes the decision. If the
 //! UI is gone, the request is denied — the safe default.
 
-use nexus_agent::{ApprovalDecision, ApprovalHandler};
+use nexus_agent::{
+    ApprovalDecision, ApprovalHandler, PlanDecision, PlanReviewRequest, PlanReviewResponse,
+};
 use nexus_policy::ActionRequest;
 use tokio::sync::{mpsc, oneshot};
 
@@ -18,13 +20,28 @@ pub struct ApprovalRequest {
     pub reply: oneshot::Sender<ApprovalDecision>,
 }
 
+/// A plan surfaced to the render loop for review.
+///
+/// Carried on its own channel rather than folded into [`ApprovalRequest`]: the
+/// two ask different questions, offer different answers, and are rendered by
+/// different surfaces. Sharing a channel would force one to pretend to be the
+/// other.
+pub struct PlanReview {
+    pub request: PlanReviewRequest,
+    pub reply: oneshot::Sender<PlanReviewResponse>,
+}
+
 pub struct TuiApprover {
     tx: mpsc::UnboundedSender<ApprovalRequest>,
+    plan_tx: mpsc::UnboundedSender<PlanReview>,
 }
 
 impl TuiApprover {
-    pub fn new(tx: mpsc::UnboundedSender<ApprovalRequest>) -> Self {
-        Self { tx }
+    pub fn new(
+        tx: mpsc::UnboundedSender<ApprovalRequest>,
+        plan_tx: mpsc::UnboundedSender<PlanReview>,
+    ) -> Self {
+        Self { tx, plan_tx }
     }
 }
 
@@ -32,6 +49,21 @@ impl TuiApprover {
 impl ApprovalHandler for TuiApprover {
     fn interactive(&self) -> bool {
         true
+    }
+
+    async fn review_plan(&self, request: &PlanReviewRequest) -> PlanReviewResponse {
+        let (reply, rx) = oneshot::channel();
+        let review = PlanReview {
+            request: request.clone(),
+            reply,
+        };
+        // If the UI is gone there is nobody to decide, and an unreviewed plan
+        // must not execute — the same safe default the action approver takes.
+        if self.plan_tx.send(review).is_err() {
+            return PlanReviewResponse::to(request, PlanDecision::Decline);
+        }
+        rx.await
+            .unwrap_or_else(|_| PlanReviewResponse::to(request, PlanDecision::Decline))
     }
 
     async fn request_approval(

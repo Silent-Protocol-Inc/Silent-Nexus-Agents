@@ -24,6 +24,13 @@ snx memory export        # JSON
 
 Full-text search uses SQLite FTS5 with sanitized queries.
 
+The agent writes memories through the `memory.add` tool, offered to every role
+(recording a finding is not a workspace write, so a read-only role such as
+`reviewer` may call it). Agent-authored entries are always candidates: they
+appear in `/memory` and `snx memory list --all` straight away, and are retrieved
+into later turns only after `snx memory approve <id>`. The number an agent may
+write in one run is capped by `limits.max_memory_writes`.
+
 Retrieval is bounded and re-ranked by scope, approval, confidence, correction
 priority, verification/recency, and normalized-content deduplication. Memory is
 still advisory: prompt precedence is immutable safety, policy/sandbox, project

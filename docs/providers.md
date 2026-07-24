@@ -86,6 +86,43 @@ connection, first-token, and total latency separately — and prefer a model the
 host can hold. An Ollama `unexpected EOF` means the model process died, which is
 almost always the server running out of memory.
 
+### Prompt caching
+
+Every turn re-sends the whole conversation, so a turn that takes five model
+calls sends its system prompt, tool schemas, and history five times. Caching is
+what makes the repeats cheap, and it is on by default for metered providers.
+
+What each provider actually does:
+
+| Provider | What snx sends | What it reports |
+| --- | --- | --- |
+| `anthropic` | Two `cache_control` breakpoints: one after the system prompt (which also covers the tool schemas, rendered before it) and one at the end of the conversation, so this turn's write is next turn's read | `cache_read_input_tokens`, `cache_creation_input_tokens` |
+| `codex`, `openai` | A `prompt_cache_key` derived from the conversation's opening turn. The backend caches by prefix on its own; the key keeps repeat calls on the machine holding the warm copy | `cached_tokens` |
+| `openai_compatible`, `custom_http`, `llamacpp` | Nothing — several of these endpoints reject unknown body keys, and the field is OpenAI's alone | whatever the endpoint reports, if anything |
+| `claude-plan` | Nothing; the `claude` CLI builds its own request | cache usage from its stream |
+| `ollama` | Nothing — there is no caching API. `keep_alive` is the equivalent lever | nothing; the figures read 0, which is accurate rather than missing |
+
+Two per-model fields:
+
+```toml
+[models.my_claude]
+prompt_cache = false             # send exactly what pre-2.10 versions sent
+prompt_cache_ttl = "1h"          # default "5m"; Anthropic only
+```
+
+The five-minute window costs 1.25× to write and pays for itself on the second
+call of the same turn. The hour-long window costs 2× and only pays off when
+turns minutes apart share a prefix. Reads are billed at roughly a tenth of the
+full rate either way. Setting `prompt_cache = false` on a `codex` model removes
+the routing key but cannot switch the backend's own prefix caching off.
+
+`snx run` prints a `cache` line when the provider reported one, and the TUI
+status bar appends `≡` to the token segment once a cache has been read from.
+
+Context usage and the aggregate token budget are unaffected: both count the full
+prompt whether or not it was cached. Caching changes what a turn costs, not when
+one gets stopped.
+
 ### Using GPT
 
 OpenAI's API is OpenAI-compatible, so GPT works with the dedicated `openai`

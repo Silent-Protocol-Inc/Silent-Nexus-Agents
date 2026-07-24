@@ -15,6 +15,7 @@
 pub mod diag;
 pub mod fs;
 pub mod html;
+pub mod memory;
 pub mod net_guard;
 pub mod plan;
 pub mod pty;
@@ -176,6 +177,7 @@ impl ToolRegistry {
         web::register(&mut r);
         diag::register(&mut r);
         plan::register(&mut r);
+        memory::register(&mut r);
         r
     }
 

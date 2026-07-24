@@ -43,6 +43,14 @@ use tokio::sync::mpsc;
 /// harness. Named here rather than at the call site so the loop and the tool
 /// registration cannot drift apart silently.
 const PLAN_SUBMIT_TOOL: &str = "plan.submit";
+/// Name the plan decision is audited and approved under.
+const PLAN_APPROVE_TOOL: &str = "plan.approve";
+/// How many times a review is re-issued when the answer names another
+/// revision, before giving up and treating the plan as declined.
+const MAX_STALE_PLAN_REVIEWS: usize = 3;
+/// How many rounds of "request changes" one planning turn will run before it
+/// hands the conversation back rather than re-planning indefinitely.
+const MAX_PLAN_REVISIONS: u32 = 5;
 
 /// Per-turn safety limits.
 #[derive(Debug, Clone)]
@@ -112,6 +120,86 @@ pub enum ApprovalDecision {
     Deny,
 }
 
+/// One step of a plan, as the operator reviews it.
+#[derive(Debug, Clone)]
+pub struct PlanReviewStage {
+    pub sequence: u32,
+    pub title: String,
+    pub detail: String,
+    pub files: Vec<String>,
+}
+
+/// A plan put in front of the operator for a decision.
+///
+/// Deliberately separate from [`ActionRequest`]: a plan review is an editorial
+/// judgement about proposed work, not a permission check on one action. The two
+/// carry different payloads, offer different answers, and must not be conflated
+/// — approving a plan grants no capability that policy would otherwise refuse.
+#[derive(Debug, Clone)]
+pub struct PlanReviewRequest {
+    pub plan_id: String,
+    /// Revision under review. A decision naming a different one is stale.
+    pub version: u32,
+    pub run_id: String,
+    pub session_id: String,
+    /// Display name of whichever agent authored the plan.
+    pub agent: String,
+    pub objective: String,
+    pub stages: Vec<PlanReviewStage>,
+    /// Whether the sandbox is really isolating the execution that would follow.
+    /// Shown to the operator so approval is judged against actual containment.
+    pub sandbox_active: bool,
+}
+
+/// What the operator decided about a proposed plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanDecision {
+    Approve,
+    /// Approve, and carry this instruction into the execution that follows.
+    ApproveWithNote(String),
+    /// Do not execute; re-plan against this feedback and ask again.
+    RequestChanges(String),
+    Decline,
+}
+
+impl PlanDecision {
+    pub fn approves(&self) -> bool {
+        matches!(self, Self::Approve | Self::ApproveWithNote(_))
+    }
+}
+
+/// A decision, carrying the revision it was made about.
+///
+/// The identity travels back with the answer so a decision made about an
+/// earlier plan cannot be applied to the one now on screen — the operator may
+/// still have a stale review open when a revision lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanReviewResponse {
+    pub plan_id: String,
+    pub version: u32,
+    pub decision: PlanDecision,
+}
+
+impl PlanReviewResponse {
+    /// A decision about the plan that was asked about.
+    pub fn to(request: &PlanReviewRequest, decision: PlanDecision) -> Self {
+        Self {
+            plan_id: request.plan_id.clone(),
+            version: request.version,
+            decision,
+        }
+    }
+}
+
+/// What a completed review means for the turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanOutcome {
+    Approved,
+    /// Re-plan against this feedback and ask again.
+    ChangesRequested(String),
+    Declined,
+}
+
 /// Implemented by the CLI/TUI to prompt the user. Non-interactive callers can
 /// supply an auto-deny or policy-driven handler.
 #[async_trait::async_trait]
@@ -122,6 +210,16 @@ pub trait ApprovalHandler: Send + Sync {
         false
     }
 
+    /// True when the operator authorized escalations up front (`snx run
+    /// --yes`), so every approval this run asks for is already granted.
+    ///
+    /// The prompt states the configured policy, which still reads `ask`. Left
+    /// unsaid, the model stops and asks a human who is not there to answer —
+    /// the authorization is spent on a question instead of the work.
+    fn preapproved(&self) -> bool {
+        false
+    }
+
     async fn request_approval(
         &self,
         action: &ActionRequest,
@@ -129,6 +227,55 @@ pub trait ApprovalHandler: Send + Sync {
         reason: &str,
         sandbox_active: bool,
     ) -> ApprovalDecision;
+
+    /// Put a plan in front of the operator.
+    ///
+    /// Defaulted onto the binary approval every surface already implements, so
+    /// a handler that has no plan UI keeps its current behavior: it is asked,
+    /// and an unattended one still refuses. Only a surface that can render the
+    /// plan and collect a note overrides this.
+    async fn review_plan(&self, request: &PlanReviewRequest) -> PlanReviewResponse {
+        let action = ActionRequest {
+            tool: "plan.approve".into(),
+            risk: nexus_core::RiskLevel::Write,
+            paths: Vec::new(),
+            formats: Vec::new(),
+            command: None,
+            command_analysis: None,
+            destination: None,
+            summary: format!(
+                "approve plan {} v{} ({} step(s)) from {}",
+                request.plan_id,
+                request.version,
+                request.stages.len(),
+                request.agent
+            ),
+        };
+        let arguments = serde_json::json!({
+            "plan_id": request.plan_id,
+            "version": request.version,
+            "objective": request.objective,
+            "stages": request.stages.iter().map(|stage| serde_json::json!({
+                "sequence": stage.sequence,
+                "title": stage.title,
+                "detail": stage.detail,
+                "files": stage.files,
+            })).collect::<Vec<_>>(),
+        });
+        let decision = match self
+            .request_approval(
+                &action,
+                &arguments,
+                "planned work requires approval before its first write",
+                request.sandbox_active,
+            )
+            .await
+        {
+            ApprovalDecision::Deny => PlanDecision::Decline,
+            _ => PlanDecision::Approve,
+        };
+        PlanReviewResponse::to(request, decision)
+    }
 }
 
 /// Streamed loop events for live UIs and logs.
@@ -179,6 +326,24 @@ pub enum LoopEvent {
     /// keep their own mode indicator from this.
     PlanModeEnded {
         approved: bool,
+    },
+    /// The turn's step list, as soon as it exists. Sent so a live surface can
+    /// show the plan from the first moment rather than reconstructing it from
+    /// stage transitions or re-reading the store.
+    WorkPlanned {
+        work: WorkBreakdown,
+    },
+    /// A plan is in front of the operator and the turn is parked until they
+    /// answer. Carries everything needed to render the decision.
+    PlanReviewRequested {
+        request: Box<PlanReviewRequest>,
+    },
+    /// The operator answered. `version` identifies the revision decided on, so
+    /// a consumer can ignore an answer that no longer applies.
+    PlanReviewResolved {
+        plan_id: String,
+        version: u32,
+        decision: PlanDecision,
     },
     /// History was folded into the session summary so the turn fits the
     /// model's window. The session continues; nothing is lost from the
@@ -282,6 +447,8 @@ struct InitialContextRequest<'a> {
     reserved_output_tokens: usize,
     constrained_model: bool,
     supports_system_prompt: bool,
+    /// The operator authorized escalations for this run up front.
+    preapproved: bool,
 }
 
 struct TurnTimeline {
@@ -779,6 +946,13 @@ impl TurnTimeline {
                     None,
                 )?;
             }
+            // Presentation-only: the pinned panel reads these to open and close
+            // the review. The plan itself is already recorded by `record_work`,
+            // and the decision by `PlanResolved`, so writing them again here
+            // would duplicate the plan in the transcript.
+            LoopEvent::WorkPlanned { .. }
+            | LoopEvent::PlanReviewRequested { .. }
+            | LoopEvent::PlanReviewResolved { .. } => {}
             LoopEvent::ContextCompacted {
                 before_tokens,
                 after_tokens,
@@ -1126,6 +1300,27 @@ impl TurnTimeline {
     }
 }
 
+/// How much of a turn's input the provider served from, or wrote to, its cache.
+///
+/// A subset of `LoopOutcome::input_tokens`, not an addition to it: the total is
+/// what was sent, and these say how it was billed. Zero everywhere the provider
+/// reports nothing, which is the honest answer for Ollama and llama.cpp.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct CacheTokens {
+    pub read: usize,
+    pub write: usize,
+}
+
+impl CacheTokens {
+    /// Share of the turn's input that came back from a warm cache, 0.0–1.0.
+    pub fn hit_ratio(&self, input_tokens: usize) -> f64 {
+        if input_tokens == 0 {
+            return 0.0;
+        }
+        self.read as f64 / input_tokens as f64
+    }
+}
+
 /// Result of running a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopOutcome {
@@ -1135,6 +1330,9 @@ pub struct LoopOutcome {
     pub stopped_reason: String,
     pub input_tokens: usize,
     pub output_tokens: usize,
+    /// Absent from records written by earlier versions, which reads as zero.
+    #[serde(default)]
+    pub cache: CacheTokens,
 }
 
 pub struct AgentLoop {
@@ -1171,6 +1369,20 @@ impl AgentLoop {
             .as_ref()
             .map(|definition| definition.name.as_str())
             .unwrap_or_else(|| self.role.as_str())
+    }
+
+    /// The name shown to the operator for whoever authored the plan.
+    ///
+    /// Whatever is actually running — a built-in role, a configured custom
+    /// agent — names itself. Nothing user-facing assumes one product name, and
+    /// an unnamed worker falls back to a neutral label rather than an empty gap.
+    fn review_agent_name(&self) -> String {
+        let name = self.agent_name().trim();
+        if name.is_empty() {
+            "Agent".to_string()
+        } else {
+            name.to_string()
+        }
     }
 
     fn agent_can_write(&self) -> bool {
@@ -1888,7 +2100,12 @@ impl AgentLoop {
                 Vec::new(),
             )
         } else {
-            WorkBreakdown::generate(objective, estimate)
+            let mut generated = WorkBreakdown::generate(objective, estimate);
+            // The operator did not ask to review anything. Planning here is the
+            // harness organizing its own work, so it must not manufacture a
+            // decision to stop at — only an explicit `/plan` is gated.
+            generated.ungate();
+            generated
         };
         let orchestration = OrchestrationStore::new(self.runtime.store.clone());
         orchestration.save_plan(
@@ -1903,6 +2120,9 @@ impl AgentLoop {
         )?;
         timeline.record_user(objective)?;
         timeline.record_work(&work)?;
+        // Hand the step list to the UI now, so the pinned tracker shows the
+        // plan from the first frame instead of assembling it from transitions.
+        self.emit(LoopEvent::WorkPlanned { work: work.clone() });
 
         // Record the objective BEFORE building the conversation, so the
         // initial request actually contains the user's ask.
@@ -1962,6 +2182,9 @@ impl AgentLoop {
         // Both are rebuilt if the operator approves a plan mid-turn: the
         // execution that follows needs the tools planning deliberately withheld.
         let mut plan_mode_active = self.runtime.plan_mode;
+        // Revisions the operator asked for in this turn, bounded so a review
+        // cycle that never converges still ends.
+        let mut plan_revisions = 0u32;
         let mut tools = self.select_tools(class, plan_mode_active);
         let mut tool_specs = build_tool_specs(&tools, native);
 
@@ -1990,6 +2213,7 @@ impl AgentLoop {
             reserved_output_tokens: capabilities.max_output_tokens,
             constrained_model,
             supports_system_prompt: capabilities.system_prompt,
+            preapproved: approver.preapproved(),
         })?;
 
         let mut effective_limits = self.runtime.limits.clone();
@@ -2060,6 +2284,7 @@ impl AgentLoop {
                 stopped_reason: "cost_tracking_unavailable".into(),
                 input_tokens: 0,
                 output_tokens: 0,
+                cache: CacheTokens::default(),
             });
         }
         let limits = &effective_limits;
@@ -2074,6 +2299,7 @@ impl AgentLoop {
         let mut delegated_runs = 0u32;
         let mut input_tokens = 0usize;
         let mut output_tokens = 0usize;
+        let mut cache = CacheTokens::default();
         let mut fallback_locked = false;
         let mut recent_calls: Vec<String> = Vec::new();
         let mut recent_errors: Vec<String> = Vec::new();
@@ -2102,6 +2328,7 @@ impl AgentLoop {
                     stopped_reason: "time_budget".into(),
                     input_tokens,
                     output_tokens,
+                    cache,
                 });
             }
             if let Some(max_runtime_ms) = self
@@ -2121,6 +2348,7 @@ impl AgentLoop {
                         stopped_reason: "agent_runtime_budget".into(),
                         input_tokens,
                         output_tokens,
+                        cache,
                     });
                 }
             }
@@ -2137,6 +2365,7 @@ impl AgentLoop {
                     stopped_reason: "step_limit".into(),
                     input_tokens,
                     output_tokens,
+                    cache,
                 });
             }
             steps += 1;
@@ -2156,6 +2385,7 @@ impl AgentLoop {
                     stopped_reason: "model_call_budget".into(),
                     input_tokens,
                     output_tokens,
+                    cache,
                 });
             }
             model_calls_count += 1;
@@ -2225,6 +2455,7 @@ impl AgentLoop {
                             stopped_reason: "failure_budget".into(),
                             input_tokens,
                             output_tokens,
+                            cache,
                         });
                     }
                     if retries > limits.max_retries {
@@ -2233,6 +2464,7 @@ impl AgentLoop {
                             tool_calls_count,
                             input_tokens,
                             output_tokens,
+                            cache,
                         );
                     }
                     let reason = self.safe_model_text(&e.to_string());
@@ -2389,6 +2621,7 @@ impl AgentLoop {
                             stopped_reason: "failure_budget".into(),
                             input_tokens,
                             output_tokens,
+                            cache,
                         });
                     }
                     if retries > limits.max_retries {
@@ -2397,6 +2630,7 @@ impl AgentLoop {
                             tool_calls_count,
                             input_tokens,
                             output_tokens,
+                            cache,
                         );
                     }
                     let reason = self.safe_model_text(&e.to_string());
@@ -2423,12 +2657,20 @@ impl AgentLoop {
                     return Err(e);
                 }
             };
-            if completion.usage.prompt_tokens > 0 {
-                manifest.observe_provider_input(completion.usage.prompt_tokens);
+            // `total_input()`, not `prompt_tokens`: once a cache is warm the
+            // latter is only the uncached remainder, and both readers here want
+            // the size of the prompt that was actually sent. The manifest drives
+            // the context-usage display, and the budget must keep counting
+            // exactly what it counted before caching existed.
+            let provider_input = completion.usage.total_input();
+            if provider_input > 0 {
+                manifest.observe_provider_input(provider_input);
                 timeline.store.save_manifest(&manifest)?;
             }
-            input_tokens += completion.usage.prompt_tokens;
+            input_tokens += provider_input;
             output_tokens += completion.usage.completion_tokens;
+            cache.read += completion.usage.cache_read_tokens;
+            cache.write += completion.usage.cache_write_tokens;
             harness_state.token_count = input_tokens.saturating_add(output_tokens) as u64;
             // Read from the provider that actually served this step, so a
             // fallback onto a metered model re-tightens the ceiling mid-turn.
@@ -2443,6 +2685,7 @@ impl AgentLoop {
                     stopped_reason: "token_budget".into(),
                     input_tokens,
                     output_tokens,
+                    cache,
                 });
             }
             if let Some(max_tokens) = self
@@ -2462,6 +2705,7 @@ impl AgentLoop {
                         stopped_reason: "agent_token_budget".into(),
                         input_tokens,
                         output_tokens,
+                        cache,
                     });
                 }
             }
@@ -2490,6 +2734,7 @@ impl AgentLoop {
                             stopped_reason: "malformed_action".into(),
                             input_tokens,
                             output_tokens,
+                            cache,
                         });
                     }
                     action_correction_used = true;
@@ -2535,6 +2780,7 @@ impl AgentLoop {
                         stopped_reason: "finished".into(),
                         input_tokens,
                         output_tokens,
+                        cache,
                     });
                 }
                 AgentAction::ToolCall(call) => {
@@ -2551,31 +2797,32 @@ impl AgentLoop {
                             stopped_reason: "tool_call_budget".into(),
                             input_tokens,
                             output_tokens,
+                            cache,
                         });
                     }
                     let lower_name = call.name.to_ascii_lowercase();
+                    // An exhausted memory budget refuses the write and lets the
+                    // turn finish. Memory is bookkeeping beside the work, not
+                    // the work: ending the run here would throw away a complete
+                    // answer because the agent tried to note one thing too many.
+                    // A model that keeps retrying still terminates, through the
+                    // repeated-error path every other tool failure uses.
+                    let mut memory_budget_refusal = None;
                     if lower_name.contains("memory")
                         && (lower_name.contains("write")
                             || lower_name.contains("add")
                             || lower_name.contains("save"))
                     {
                         if memory_writes >= limits.max_memory_writes {
-                            let message = format!(
-                                "stopped: memory-write budget {} exhausted",
+                            memory_budget_refusal = Some(format!(
+                                "memory-write budget {} exhausted for this run; record nothing \
+                                 further and put what matters in your answer instead",
                                 limits.max_memory_writes
-                            );
-                            self.emit(LoopEvent::Error(message.clone()));
-                            return Ok(LoopOutcome {
-                                final_message: message,
-                                steps,
-                                tool_calls: tool_calls_count,
-                                stopped_reason: "memory_write_budget".into(),
-                                input_tokens,
-                                output_tokens,
-                            });
+                            ));
+                        } else {
+                            memory_writes += 1;
+                            harness_state.memory_write_count = memory_writes;
                         }
-                        memory_writes += 1;
-                        harness_state.memory_write_count = memory_writes;
                     }
                     if lower_name.contains("subagent") || lower_name.contains("delegate") {
                         if delegated_runs >= limits.max_subagents {
@@ -2591,6 +2838,7 @@ impl AgentLoop {
                                 stopped_reason: "subagent_budget".into(),
                                 input_tokens,
                                 output_tokens,
+                                cache,
                             });
                         }
                         delegated_runs += 1;
@@ -2637,23 +2885,31 @@ impl AgentLoop {
                             stopped_reason: "loop_detected".into(),
                             input_tokens,
                             output_tokens,
+                            cache,
                         });
                     }
 
-                    let tool_result = self
-                        .execute_tool_call(
-                            &trace,
-                            session_id,
-                            &call,
-                            approver.clone(),
-                            &harness_state.run_id,
-                            WorkProgress {
-                                breakdown: &mut work,
-                                observed: &mut observed_work,
-                                observed_actions: steps,
-                            },
-                        )
-                        .await;
+                    let tool_result = match memory_budget_refusal {
+                        Some(reason) => Err(NexusError::ToolFailed {
+                            tool: call.name.clone(),
+                            message: reason,
+                        }),
+                        None => {
+                            self.execute_tool_call(
+                                &trace,
+                                session_id,
+                                &call,
+                                approver.clone(),
+                                &harness_state.run_id,
+                                WorkProgress {
+                                    breakdown: &mut work,
+                                    observed: &mut observed_work,
+                                    observed_actions: steps,
+                                },
+                            )
+                            .await
+                        }
+                    };
                     tool_calls_count += 1;
                     harness_state.tool_call_count = tool_calls_count;
 
@@ -2670,6 +2926,7 @@ impl AgentLoop {
                                 stopped_reason: "policy_stop".into(),
                                 input_tokens,
                                 output_tokens,
+                                cache,
                             });
                         }
                         Err(e @ NexusError::ToolInput { .. }) => {
@@ -2687,6 +2944,7 @@ impl AgentLoop {
                                     stopped_reason: "malformed_action".into(),
                                     input_tokens,
                                     output_tokens,
+                                    cache,
                                 });
                             }
                             tool_input_correction_used = true;
@@ -2727,6 +2985,7 @@ impl AgentLoop {
                                 stopped_reason: "no_progress".into(),
                                 input_tokens,
                                 output_tokens,
+                                cache,
                             });
                         }
                     }
@@ -2741,6 +3000,7 @@ impl AgentLoop {
                             stopped_reason: "failure_budget".into(),
                             input_tokens,
                             output_tokens,
+                            cache,
                         });
                     }
 
@@ -2773,10 +3033,18 @@ impl AgentLoop {
                                     stopped_reason: "plan_submission_invalid".into(),
                                     input_tokens,
                                     output_tokens,
+                                    cache,
                                 });
                             }
                         };
-                        work = authored;
+                        // A re-plan after "request changes" supersedes the
+                        // draft in place, so the operator sees v2 of the plan
+                        // they sent back rather than a second v1.
+                        if plan_revisions > 0 {
+                            work.supersede(authored);
+                        } else {
+                            work = authored;
+                        }
                         orchestration.save_plan(
                             session_id.as_str(),
                             &work,
@@ -2784,17 +3052,18 @@ impl AgentLoop {
                             "agent",
                         )?;
                         timeline.record_work(&work)?;
+                        self.emit(LoopEvent::WorkPlanned { work: work.clone() });
                         match self
-                            .request_plan_approval(
+                            .review_plan_until_resolved(
                                 &trace,
                                 session_id,
                                 &harness_state.run_id,
                                 &mut work,
                                 approver.clone(),
                             )
-                            .await
+                            .await?
                         {
-                            Ok(()) => {
+                            PlanOutcome::Approved => {
                                 // Approved: planning is over. Drop the scope so
                                 // the same turn can carry the plan out, and
                                 // re-offer the tools it needs to do that.
@@ -2803,31 +3072,73 @@ impl AgentLoop {
                                 tools = self.select_tools(class, false);
                                 tool_specs = build_tool_specs(&tools, native);
                                 self.emit(LoopEvent::PlanModeEnded { approved: true });
+                                let note = work.approval_note.clone();
                                 messages.push(ChatMessage::user(
                                     "The operator approved this plan. Carry out its steps in \
                                      order, using the tools now available to you.",
                                 ));
+                                // The note is the operator's instruction about
+                                // how to carry the plan out, so it goes into the
+                                // execution context rather than the record only.
+                                if let Some(note) = note.filter(|note| !note.is_empty()) {
+                                    messages.push(ChatMessage::user(format!(
+                                        "The operator attached this note to their approval. \
+                                         Treat it as part of the approved plan: {note}"
+                                    )));
+                                }
                                 continue;
                             }
-                            Err(error) if error.is_policy_stop() => {
-                                // Rejected: stay in plan mode with the draft
-                                // stored, so the next message refines it rather
-                                // than starting over.
+                            PlanOutcome::ChangesRequested(feedback) => {
+                                // Still planning: the same turn revises against
+                                // the feedback and submits again, so the version
+                                // the operator sees next is the one they asked
+                                // for rather than a fresh conversation.
+                                plan_revisions += 1;
+                                if plan_revisions > MAX_PLAN_REVISIONS {
+                                    let message = format!(
+                                        "stopped: {MAX_PLAN_REVISIONS} plan revisions without an \
+                                         approval — say what to build and I will plan again"
+                                    );
+                                    self.emit(LoopEvent::FinalAnswer(message.clone()));
+                                    return Ok(LoopOutcome {
+                                        final_message: message,
+                                        steps,
+                                        tool_calls: tool_calls_count,
+                                        stopped_reason: "plan_revision_budget".into(),
+                                        input_tokens,
+                                        output_tokens,
+                                        cache,
+                                    });
+                                }
+                                messages.push(ChatMessage::user(format!(
+                                    "The operator did not approve that plan and asked for \
+                                     changes: {feedback}\nRevise it and call `plan.submit` \
+                                     again with the corrected steps. Change only what they \
+                                     asked about; do not start implementing."
+                                )));
+                                continue;
+                            }
+                            PlanOutcome::Declined => {
+                                // Declined: nothing runs, the gate is cleared,
+                                // and the operator has the prompt back. The
+                                // draft stays stored so the next message can
+                                // refine it rather than starting over.
                                 self.emit(LoopEvent::PlanModeEnded { approved: false });
                                 let message =
-                                    "plan not approved — still planning; describe what to change"
+                                    "plan declined — nothing was executed; still in plan mode, \
+                                     so describe what to change"
                                         .to_string();
                                 self.emit(LoopEvent::FinalAnswer(message.clone()));
                                 return Ok(LoopOutcome {
                                     final_message: message,
                                     steps,
                                     tool_calls: tool_calls_count,
-                                    stopped_reason: "plan_rejected".into(),
+                                    stopped_reason: "plan_declined".into(),
                                     input_tokens,
                                     output_tokens,
+                                    cache,
                                 });
                             }
-                            Err(error) => return Err(error),
                         }
                     }
                 }
@@ -3037,14 +3348,20 @@ impl AgentLoop {
         Ok(WorkBreakdown::from_stages(objective, rationale, stages))
     }
 
-    async fn request_plan_approval(
+    /// Put the plan in front of the operator and act on what they say.
+    ///
+    /// Returns without approving on `RequestChanges` and `Decline`; the caller
+    /// decides whether that means re-planning or ending the turn. A decision
+    /// that names a different revision is discarded and the review re-issued,
+    /// so an answer to an older plan can never approve the current one.
+    async fn review_plan_until_resolved(
         &self,
         trace: &TraceId,
         session_id: &SessionId,
         run_id: &str,
         work: &mut WorkBreakdown,
         approver: Arc<dyn ApprovalHandler>,
-    ) -> Result<()> {
+    ) -> Result<PlanOutcome> {
         let diff = PlanScopeDiff {
             added_stages: work
                 .stages
@@ -3065,32 +3382,23 @@ impl AgentLoop {
             work.id, work.version
         );
         self.emit(LoopEvent::ApprovalRequested {
-            tool: "plan.approve".into(),
+            tool: PLAN_APPROVE_TOOL.into(),
             summary: summary.clone(),
         });
         self.runtime.audit.emit(
             trace,
             Some(session_id),
             AuditKind::ApprovalRequested {
-                tool: "plan.approve".into(),
+                tool: PLAN_APPROVE_TOOL.into(),
                 summary: summary.clone(),
             },
         );
-        let action = ActionRequest {
-            tool: "plan.approve".into(),
-            risk: nexus_core::RiskLevel::Write,
-            paths: Vec::new(),
-            formats: Vec::new(),
-            command: None,
-            command_analysis: None,
-            destination: None,
-            summary,
-        };
         let repository = HarnessRepository::new(self.runtime.store.clone());
         let session = self.runtime.sessions.get(session_id.as_str())?;
         let active_context =
             repository.active_context(&session.workspace, Some(session_id.as_str()))?;
-        let mut canonical_approval = ApprovalRequest::pending("plan.approve", "local_reversible")?;
+        let mut canonical_approval =
+            ApprovalRequest::pending(PLAN_APPROVE_TOOL, "local_reversible")?;
         canonical_approval.session_id = Some(session_id.as_str().to_string());
         canonical_approval.run_id = Some(run_id.to_string());
         canonical_approval.requesting_agent_id = Some(self.agent_name().to_string());
@@ -3109,55 +3417,64 @@ impl AgentLoop {
             .map(|stage| format!("stage:{}", stage.id))
             .collect();
         canonical_approval.rollback =
-            "Rejecting leaves the plan blocked and executes no write actions".into();
+            "Declining executes no write actions and returns control to the operator".into();
         canonical_approval.grant_scope = "once".into();
         repository.save_approval_request(&canonical_approval)?;
-        let arguments = serde_json::json!({
-            "plan_id": work.id.as_str(),
-            "version": work.version,
-            "objective": work.objective,
-            "stages": work.stages.iter().map(|stage| serde_json::json!({
-                "sequence": stage.sequence,
-                "title": stage.title,
-                "description": stage.description,
-                "owner": stage.owner,
-                "budget": stage.budget,
-            })).collect::<Vec<_>>(),
-        });
-        let sandbox_active = self.runtime.tool_ctx.sandbox.strong_isolation();
-        let decision = approver
-            .request_approval(
-                &action,
-                &arguments,
-                "planned work requires approval before its first write",
-                sandbox_active,
-            )
-            .await;
-        let approved = matches!(
-            &decision,
-            ApprovalDecision::Approve
-                | ApprovalDecision::ApproveForSession
-                | ApprovalDecision::ApproveForWorkspace
-        );
-        let canonical_status = if approved {
-            if matches!(
-                &decision,
-                ApprovalDecision::ApproveForSession | ApprovalDecision::ApproveForWorkspace
-            ) {
-                ApprovalStatus::ApprovedForTask
-            } else {
-                ApprovalStatus::ApprovedOnce
-            }
-        } else {
-            ApprovalStatus::Rejected
+
+        let request = PlanReviewRequest {
+            plan_id: work.id.as_str().to_string(),
+            version: work.version,
+            run_id: run_id.to_string(),
+            session_id: session_id.as_str().to_string(),
+            agent: self.review_agent_name(),
+            objective: work.objective.clone(),
+            stages: work
+                .stages
+                .iter()
+                .map(|stage| PlanReviewStage {
+                    sequence: stage.sequence,
+                    title: stage.title.clone(),
+                    detail: stage.description.clone(),
+                    files: stage.changed_files.clone(),
+                })
+                .collect(),
+            sandbox_active: self.runtime.tool_ctx.sandbox.strong_isolation(),
         };
+        self.emit(LoopEvent::PlanReviewRequested {
+            request: Box::new(request.clone()),
+        });
+
+        // A handler that answers about a different revision is answering a
+        // question we are no longer asking. Re-ask rather than act on it, but
+        // do not spin forever on a handler that cannot agree which plan it is
+        // looking at.
+        let mut decision = PlanDecision::Decline;
+        for _ in 0..MAX_STALE_PLAN_REVIEWS {
+            let response = approver.review_plan(&request).await;
+            if response.plan_id == request.plan_id && response.version == request.version {
+                decision = response.decision;
+                break;
+            }
+            tracing::warn!(
+                expected = %request.version,
+                got = %response.version,
+                "discarding a plan decision for another revision"
+            );
+        }
+
+        let approved = decision.approves();
         repository.resolve_approval_request(
             &canonical_approval.id,
-            canonical_status,
-            Some(if approved {
-                "operator approved the plan"
+            if approved {
+                ApprovalStatus::ApprovedOnce
             } else {
-                "operator rejected the plan"
+                ApprovalStatus::Rejected
+            },
+            Some(match &decision {
+                PlanDecision::Approve => "operator approved the plan",
+                PlanDecision::ApproveWithNote(_) => "operator approved the plan with a note",
+                PlanDecision::RequestChanges(_) => "operator asked for a revised plan",
+                PlanDecision::Decline => "operator declined the plan",
             }),
         )?;
         orchestration.resolve_plan_approval(&approval.id, approved, "operator")?;
@@ -3165,38 +3482,57 @@ impl AgentLoop {
             trace,
             Some(session_id),
             AuditKind::ApprovalResolved {
-                tool: "plan.approve".into(),
+                tool: PLAN_APPROVE_TOOL.into(),
                 approved,
-                edited: false,
+                edited: matches!(decision, PlanDecision::ApproveWithNote(_)),
             },
         );
-        if approved {
-            work.approve();
-            orchestration.save_plan(session_id.as_str(), work, "approved", "operator")?;
-        } else {
-            if let Some(stage) = work
-                .stages
-                .iter_mut()
-                .find(|stage| stage.title == "Plan approval")
-            {
-                stage.finish(StageStatus::Blocked);
-                stage.next_action = Some("edit or approve the plan before continuing".into());
-                work.current_stage = Some(stage.id.clone());
+        self.emit(LoopEvent::PlanReviewResolved {
+            plan_id: request.plan_id.clone(),
+            version: request.version,
+            decision: decision.clone(),
+        });
+
+        let outcome = match &decision {
+            PlanDecision::Approve | PlanDecision::ApproveWithNote(_) => {
+                if let PlanDecision::ApproveWithNote(note) = &decision {
+                    work.approval_note = Some(self.safe_model_text(note.trim()));
+                }
+                work.approve();
+                orchestration.save_plan(session_id.as_str(), work, "approved", "operator")?;
+                PlanOutcome::Approved
             }
-            work.updated_at = nexus_core::now_rfc3339();
-            orchestration.save_plan(session_id.as_str(), work, "blocked", "operator")?;
-        }
+            PlanDecision::RequestChanges(feedback) => {
+                // The plan stands as the draft being revised. Leaving the stage
+                // running rather than blocked keeps the tracker honest: work is
+                // happening, it is just planning again.
+                work.updated_at = nexus_core::now_rfc3339();
+                orchestration.save_plan(
+                    session_id.as_str(),
+                    work,
+                    "revision_requested",
+                    "operator",
+                )?;
+                PlanOutcome::ChangesRequested(self.safe_model_text(feedback.trim()))
+            }
+            PlanDecision::Decline => {
+                // Declining must not leave the plan wedged. The gate stage is
+                // dropped so nothing is left "blocked pending approval" after
+                // the operator has already given their answer.
+                work.stages.retain(|stage| stage.title != "Plan approval");
+                work.current_stage = None;
+                work.next_stage = None;
+                work.updated_at = nexus_core::now_rfc3339();
+                orchestration.save_plan(session_id.as_str(), work, "declined", "operator")?;
+                PlanOutcome::Declined
+            }
+        };
         self.emit(LoopEvent::PlanResolved {
             work: work.clone(),
             approved,
             diff,
         });
-        if !approved {
-            return Err(NexusError::PolicyDenied(
-                "the planned work was denied; no write was executed".into(),
-            ));
-        }
-        Ok(())
+        Ok(outcome)
     }
 
     /// Execute one tool call through the full policy/approval/sandbox pipeline.
@@ -3311,6 +3647,13 @@ impl AgentLoop {
         observed.background_work |= call.name.contains("task") || call.name.contains("background");
         observed.subagents |= call.name.contains("subagent") || call.name.contains("delegate");
         if let Some(promotion) = work.promote(observed.clone()) {
+            // Growing into planned work mid-turn re-derives the gated template.
+            // Outside an explicit planning session that gate is never asked
+            // about, so leaving it would park a "Plan approval" stage in the
+            // tracker that nothing will ever resolve.
+            if !self.runtime.plan_mode {
+                work.ungate();
+            }
             OrchestrationStore::new(self.runtime.store.clone()).save_plan(
                 session_id.as_str(),
                 work,
@@ -3376,12 +3719,26 @@ impl AgentLoop {
             },
         );
 
-        if work.kind == WorkBreakdownKind::Planned
+        // Only an explicit planning session gates the first write on a plan
+        // decision. An ordinary turn's breakdown is ungated at construction, so
+        // this is belt-and-braces for a plan that predates that or arrives from
+        // a resumed session.
+        if self.runtime.plan_mode
+            && work.kind == WorkBreakdownKind::Planned
             && !work.approved
             && action_req.risk >= nexus_core::RiskLevel::Write
         {
-            self.request_plan_approval(trace, session_id, run_id, work, approver.clone())
-                .await?;
+            match self
+                .review_plan_until_resolved(trace, session_id, run_id, work, approver.clone())
+                .await?
+            {
+                PlanOutcome::Approved => {}
+                PlanOutcome::Declined | PlanOutcome::ChangesRequested(_) => {
+                    return Err(NexusError::PolicyDenied(
+                        "the planned work was not approved; no write was executed".into(),
+                    ));
+                }
+            }
         }
 
         // Policy evaluation.
@@ -3935,6 +4292,7 @@ impl AgentLoop {
             reserved_output_tokens,
             constrained_model,
             supports_system_prompt,
+            preapproved,
         } = request;
 
         let safety =
@@ -3945,7 +4303,7 @@ impl AgentLoop {
              - Prefer narrow tools over shell; verify with evidence, not assertion.\n"
                 .to_string();
         let policy = &self.runtime.tool_ctx.config.policy;
-        let operating_context = format!(
+        let mut operating_context = format!(
             "Active policy and sandbox constraints (enforced outside the model):\n\
              - reads={} writes={} commands={} network={} downloads={}\n\
              - destructive={} external={}\n\
@@ -3960,6 +4318,16 @@ impl AgentLoop {
             self.runtime.tool_ctx.sandbox.backend().name(),
             self.runtime.tool_ctx.config.sandbox.network,
         );
+        if preapproved {
+            // Approval still happens — it is answered by the operator's
+            // standing authorization rather than by a prompt. Saying so stops
+            // the model from parking the work on a question nobody will read.
+            operating_context.push_str(
+                " - approvals=pre-authorized: the operator granted every escalation this run \
+                 up front. Carry out actions the objective calls for instead of asking to \
+                 confirm; each one is still policy-checked, sandboxed, and audited.\n",
+            );
+        }
         let mut provider_context = String::from(
             "Provider protocol requirements (format only; lower authority than safety):\n",
         );
@@ -4473,6 +4841,7 @@ impl AgentLoop {
         tool_calls: u32,
         input_tokens: usize,
         output_tokens: usize,
+        cache: CacheTokens,
     ) -> Result<LoopOutcome> {
         let msg = "stopped: exceeded retry budget without a valid action".to_string();
         self.emit(LoopEvent::Error(msg.clone()));
@@ -4483,6 +4852,7 @@ impl AgentLoop {
             stopped_reason: "retry_limit".into(),
             input_tokens,
             output_tokens,
+            cache,
         })
     }
 }

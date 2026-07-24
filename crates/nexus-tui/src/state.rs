@@ -25,6 +25,70 @@ pub enum Mode {
     Running,
 }
 
+/// A plan waiting on the operator, held across a dismissal of the pop-up.
+///
+/// The reply channel lives here rather than in the overlay so closing the
+/// pop-up cannot answer for the operator: the turn stays parked, the pinned
+/// panel keeps saying a decision is owed, and reopening resumes the same
+/// review. The engine is still waiting on this exact sender.
+pub struct PendingPlanReview {
+    pub request: nexus_agent::PlanReviewRequest,
+    pub reply: Option<tokio::sync::oneshot::Sender<nexus_agent::PlanReviewResponse>>,
+}
+
+/// One step in the pinned tracker.
+pub struct PinnedStep {
+    pub sequence: u32,
+    pub title: String,
+    pub status: StageStatus,
+}
+
+/// The turn's step list as the operator watches it happen.
+///
+/// Held apart from the timeline: it is a live view of one plan updated in
+/// place, not a record of what was said, so it never joins the scrollback.
+pub struct PinnedPlan {
+    pub plan_id: String,
+    pub agent: String,
+    pub objective: String,
+    pub version: u32,
+    pub steps: Vec<PinnedStep>,
+    /// A decision is owed before any of this runs.
+    pub awaiting_approval: bool,
+}
+
+impl PinnedPlan {
+    /// Completed steps and total, for the `2/5` counter.
+    pub fn progress(&self) -> (usize, usize) {
+        (
+            self.steps
+                .iter()
+                .filter(|step| matches!(step.status, StageStatus::Completed | StageStatus::Skipped))
+                .count(),
+            self.steps.len(),
+        )
+    }
+
+    /// Index of the step being worked on, else the first unfinished one.
+    pub fn active_index(&self) -> Option<usize> {
+        self.steps
+            .iter()
+            .position(|step| step.status == StageStatus::Running)
+            .or_else(|| {
+                self.steps.iter().position(|step| {
+                    matches!(step.status, StageStatus::Pending | StageStatus::Blocked)
+                })
+            })
+    }
+
+    /// Apply one stage transition in place.
+    pub fn update_step(&mut self, title: &str, status: StageStatus) {
+        if let Some(step) = self.steps.iter_mut().find(|step| step.title == title) {
+            step.status = status;
+        }
+    }
+}
+
 /// A transient notification.
 pub struct Toast {
     pub text: String,
@@ -43,6 +107,9 @@ pub struct StatusBar {
     pub git_branch: Option<String>,
     pub tokens_in: usize,
     pub tokens_out: usize,
+    /// Input the provider served from cache — a subset of `tokens_in`, not an
+    /// addition to it. Zero on providers that report nothing.
+    pub tokens_cached: usize,
     pub permission_mode: String,
     /// Plan mode is on. Shown next to the permission mode because that is what
     /// it overrides: while it is set, the turn refuses to change anything
@@ -122,8 +189,16 @@ pub struct State {
     pub overlays: Vec<Overlay>,
     pub mode: Mode,
     pub pending: Option<ApprovalRequest>,
+    /// Approvals that arrived while another was on screen. Held rather than
+    /// dropped: dropping one denies an action the operator never saw.
+    pub approval_queue: VecDeque<ApprovalRequest>,
     pub approval_selected: usize,
     pub approval_edit: Option<String>,
+    /// The plan awaiting a decision, kept while the pop-up is dismissed so the
+    /// pinned panel can say so and reopen it.
+    pub plan_review: Option<PendingPlanReview>,
+    /// The current turn's step list, shown pinned above the composer.
+    pub pinned_plan: Option<PinnedPlan>,
     pub should_quit: bool,
     pub scroll: usize,
     pub follow: bool,
@@ -221,7 +296,10 @@ impl State {
             overlays: Vec::new(),
             mode: Mode::Idle,
             pending: None,
+            approval_queue: VecDeque::new(),
             approval_selected: 0,
+            plan_review: None,
+            pinned_plan: None,
             approval_edit: None,
             should_quit: false,
             scroll: 0,
@@ -763,6 +841,7 @@ mod tests {
                 git_branch: Some("main".into()),
                 tokens_in: 0,
                 tokens_out: 0,
+                tokens_cached: 0,
                 permission_mode: "default".into(),
                 plan_mode: false,
             },

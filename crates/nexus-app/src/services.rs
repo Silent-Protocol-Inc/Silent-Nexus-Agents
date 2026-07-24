@@ -3675,8 +3675,13 @@ pub async fn run_test(app: &App, args: &[String]) -> Result<Report> {
         .field_sev(
             "exit",
             format!(
-                "{:?}{}",
-                outcome.exit_code,
+                "{}{}",
+                // No exit code means the process never returned one — it was
+                // killed by a signal. `Some(0)` is Rust talking to itself.
+                match outcome.exit_code {
+                    Some(code) => code.to_string(),
+                    None => "none (terminated by signal)".to_string(),
+                },
                 if outcome.timed_out {
                     " (timed out)"
                 } else {
@@ -4208,6 +4213,20 @@ fn set_nested(table: &mut toml::value::Table, path: &[&str], value: Option<toml:
     }
 }
 
+/// Whether this override layer actually holds `path`. `config_reset` reports
+/// what it did, so a mistyped key is not answered with "inherited".
+fn has_nested(table: &toml::value::Table, path: &[&str]) -> bool {
+    let Some(value) = table.get(path[0]) else {
+        return false;
+    };
+    match path.len() {
+        1 => true,
+        _ => value
+            .as_table()
+            .is_some_and(|child| has_nested(child, &path[1..])),
+    }
+}
+
 pub fn config_set(app: &App, workspace: bool, path: &str, raw: &str) -> Result<Report> {
     let parts = safe_config_path(path)?;
     let parsed: toml::value::Table = toml::from_str(&format!("value = {raw}"))
@@ -4243,14 +4262,28 @@ pub fn config_set(app: &App, workspace: bool, path: &str, raw: &str) -> Result<R
 
 pub fn config_reset(app: &App, workspace: bool, path: &str) -> Result<Report> {
     let parts = safe_config_path(path)?;
+    let mut dropped = false;
     nexus_core::config::Config::update_scoped_overrides(&app.paths, workspace, |root| {
+        dropped = has_nested(root, &parts);
         set_nested(root, &parts, None);
         if let Some(provenance) = limit_provenance_path(&parts) {
             set_nested(root, &provenance, None);
         }
     })?;
+    let scope = if workspace { "workspace" } else { "global" };
+    if !dropped {
+        // `set` refuses an unknown field, so answering "inherited" here would
+        // let a mistyped key read as a dropped override that is still in force.
+        return Ok(Report::new("configuration unchanged")
+            .field("scope", scope)
+            .field("path", path)
+            .warn(format!(
+                "no managed {scope} override at `{path}` — check the spelling with \
+                 `snx config show`, or the other scope"
+            )));
+    }
     Ok(Report::new("configuration inherited")
-        .field("scope", if workspace { "workspace" } else { "global" })
+        .field("scope", scope)
         .field("path", path))
 }
 
@@ -4820,6 +4853,26 @@ mod tests {
             .current_dir(dir)
             .output()
             .expect("git")
+    }
+
+    #[test]
+    fn a_reset_can_tell_a_real_override_from_a_mistyped_one() {
+        let overrides: toml::value::Table = toml::from_str(
+            "[limits]\nmax_memory_writes_per_turn = 2\n[policy]\nreads = \"allow\"\n",
+        )
+        .expect("overrides");
+
+        assert!(has_nested(
+            &overrides,
+            &["limits", "max_memory_writes_per_turn"]
+        ));
+        assert!(has_nested(&overrides, &["policy", "reads"]));
+        // The section exists; the field does not. `set` refuses this path, so
+        // `reset` must not answer "inherited" for it.
+        assert!(!has_nested(&overrides, &["limits", "max_memory_writes"]));
+        assert!(!has_nested(&overrides, &["sandbox", "backend"]));
+        // A path that runs past a leaf is not a hit either.
+        assert!(!has_nested(&overrides, &["policy", "reads", "deeper"]));
     }
 
     #[test]

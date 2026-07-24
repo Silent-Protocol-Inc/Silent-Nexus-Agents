@@ -112,6 +112,7 @@ impl MockProvider {
         let usage = Usage {
             prompt_tokens: 10,
             completion_tokens: 10,
+            ..Usage::default()
         };
         match script {
             MockScript::Text(t) => Ok(ModelResponse {

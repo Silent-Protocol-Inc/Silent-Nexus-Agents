@@ -149,7 +149,7 @@ impl CodexResponsesProvider {
         let effort = self.config.reasoning_effort.as_deref().unwrap_or("medium");
         // The backend rejects `max_output_tokens` and `temperature`; a
         // CompletionRequest asking for them is honored as best-effort only.
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "instructions": instructions,
             "input": input,
@@ -161,6 +161,13 @@ impl CodexResponsesProvider {
             "stream": true,
             "include": [],
         });
+        // Prefix caching here is automatic — the backend already reports
+        // `cached_tokens` without being asked. The key only pins the routing so
+        // successive calls in one turn keep finding the same warm copy. It is
+        // deliberately independent of `store`, which stays false.
+        if self.config.prompt_cache_enabled() {
+            body["prompt_cache_key"] = json!(request.prompt_cache_key());
+        }
         validate_serialized_request(&body, &name_map)?;
         Ok((body, name_map))
     }
@@ -394,16 +401,18 @@ fn event_to_stream(
             }
         }
         "response.completed" => {
-            let usage = Usage {
-                prompt_tokens: v
-                    .pointer("/response/usage/input_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize,
-                completion_tokens: v
-                    .pointer("/response/usage/output_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize,
-            };
+            // `cached_tokens` and `cache_write_tokens` are reported inside
+            // `input_tokens_details` as parts of `input_tokens`, not in
+            // addition to it — confirmed live: total_tokens stayed equal to
+            // input + output while cached_tokens was 1792. A missing detail
+            // object is simply an uncached call.
+            let count = |path: &str| v.pointer(path).and_then(Value::as_u64).unwrap_or(0) as usize;
+            let usage = Usage::from_inclusive_input(
+                count("/response/usage/input_tokens"),
+                count("/response/usage/input_tokens_details/cached_tokens"),
+                count("/response/usage/input_tokens_details/cache_write_tokens"),
+                count("/response/usage/output_tokens"),
+            );
             let finish = if *calls > 0 { "tool_calls" } else { "stop" };
             out.push(StreamEvent::Done {
                 usage,
@@ -664,6 +673,58 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    /// Usage off a `response.completed` event, as the stream reader sees it.
+    fn done_usage(event: &Value) -> Usage {
+        let mut calls = 0usize;
+        match event_to_stream(event, &mut calls, &BTreeMap::new()).pop() {
+            Some(StreamEvent::Done { usage, .. }) => usage,
+            other => panic!("expected a Done event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cached_tokens_are_a_subset_of_the_reported_input() {
+        // Shape captured from a live `response.completed`, cache warm.
+        let usage = done_usage(&json!({
+            "type": "response.completed",
+            "response": {"usage": {
+                "input_tokens": 2296,
+                "input_tokens_details": {"cached_tokens": 1792, "cache_write_tokens": 0},
+                "output_tokens": 80,
+                "total_tokens": 2376,
+            }}
+        }));
+        assert_eq!(usage.cache_read_tokens, 1792);
+        assert_eq!(usage.prompt_tokens, 504);
+        assert_eq!(usage.total_input(), 2296);
+    }
+
+    #[test]
+    fn a_cold_call_reports_no_cache_and_the_full_prompt() {
+        let usage = done_usage(&json!({
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 504, "output_tokens": 80}}
+        }));
+        assert_eq!(usage.cache_read_tokens, 0);
+        assert_eq!(usage.total_input(), 504);
+    }
+
+    #[test]
+    fn the_cache_key_pins_routing_without_enabling_storage() {
+        let provider = provider_for_test();
+        let request = CompletionRequest {
+            messages: vec![
+                ChatMessage::system("stable rules"),
+                ChatMessage::user("first ask"),
+            ],
+            ..Default::default()
+        };
+        let (body, _) = provider.build_body(&request).expect("body");
+        assert!(body["prompt_cache_key"].is_string());
+        // `store: false` is a privacy decision the cache key must not disturb.
+        assert_eq!(body["store"], json!(false));
     }
 
     #[test]

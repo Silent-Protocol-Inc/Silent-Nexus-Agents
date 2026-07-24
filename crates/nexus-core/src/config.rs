@@ -240,6 +240,20 @@ pub struct ModelConfig {
     /// `keep_alive`). `None` sends [`OLLAMA_DEFAULT_KEEP_ALIVE`] so the next
     /// turn does not pay another cold load. Ignored by other providers.
     pub keep_alive: Option<String>,
+    /// Ask the provider to cache the stable prefix of each request.
+    ///
+    /// `None` means on for metered providers: every turn re-sends the whole
+    /// conversation, so a turn with two or more model calls always repays the
+    /// one-time write premium. Set `false` to send exactly what earlier
+    /// versions sent. Self-hosted providers ignore this — Ollama has no knob,
+    /// and its KV reuse is governed by `keep_alive` instead.
+    pub prompt_cache: Option<bool>,
+    /// How long a cached prefix stays warm: `"5m"` (default) or `"1h"`.
+    ///
+    /// Only the Anthropic family takes a lifetime; the Responses backend
+    /// manages its own. The longer window survives gaps between turns but the
+    /// write costs more, so it needs more reuse to pay for itself.
+    pub prompt_cache_ttl: Option<String>,
     /// Verify TLS certificates for remote endpoints. Disabling this is an
     /// explicit advanced setting and never the default.
     pub tls_verify: bool,
@@ -302,6 +316,23 @@ impl ModelConfig {
             .filter(|value| !value.is_empty())
             .unwrap_or(OLLAMA_DEFAULT_KEEP_ALIVE)
     }
+
+    /// Whether to ask the provider to cache this request's stable prefix.
+    ///
+    /// Unset means on for metered providers and off for self-hosted ones,
+    /// which have no such API surface — `keep_alive` governs their KV reuse.
+    pub fn prompt_cache_enabled(&self) -> bool {
+        self.prompt_cache.unwrap_or(!self.is_self_hosted())
+    }
+
+    /// Effective cache TTL. Anything other than an explicit `"1h"` is the
+    /// provider default of five minutes, which costs the least to write.
+    pub fn prompt_cache_ttl(&self) -> &str {
+        match self.prompt_cache_ttl.as_deref().map(str::trim) {
+            Some("1h") => "1h",
+            _ => "5m",
+        }
+    }
 }
 
 impl Default for ModelConfig {
@@ -329,6 +360,8 @@ impl Default for ModelConfig {
             timeout_secs: 120,
             first_token_timeout_secs: None,
             keep_alive: None,
+            prompt_cache: None,
+            prompt_cache_ttl: None,
             tls_verify: true,
         }
     }
@@ -1680,6 +1713,49 @@ mod tests {
             value["models"]["override_only"]["context_window"].as_integer(),
             Some(8192)
         );
+    }
+
+    #[test]
+    fn prompt_caching_defaults_to_on_where_it_costs_money_and_off_where_it_cannot_work() {
+        let metered = ModelConfig {
+            provider: "anthropic".into(),
+            ..Default::default()
+        };
+        assert!(metered.prompt_cache_enabled());
+        assert_eq!(metered.prompt_cache_ttl(), "5m");
+
+        // Neither Ollama nor llama.cpp has a caching API; `keep_alive` is what
+        // governs their reuse, so defaulting them on would send a flag nothing
+        // reads and report a cache that never fills.
+        for provider in ["ollama", "llamacpp"] {
+            let local = ModelConfig {
+                provider: provider.into(),
+                ..Default::default()
+            };
+            assert!(!local.prompt_cache_enabled(), "{provider}");
+        }
+
+        let opted_out = ModelConfig {
+            provider: "anthropic".into(),
+            prompt_cache: Some(false),
+            ..Default::default()
+        };
+        assert!(!opted_out.prompt_cache_enabled());
+
+        let long = ModelConfig {
+            provider: "anthropic".into(),
+            prompt_cache_ttl: Some(" 1h ".into()),
+            ..Default::default()
+        };
+        assert_eq!(long.prompt_cache_ttl(), "1h");
+
+        // An unrecognized lifetime is not forwarded to the provider verbatim.
+        let bogus = ModelConfig {
+            provider: "anthropic".into(),
+            prompt_cache_ttl: Some("forever".into()),
+            ..Default::default()
+        };
+        assert_eq!(bogus.prompt_cache_ttl(), "5m");
     }
 
     #[test]

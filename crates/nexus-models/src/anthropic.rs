@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 pub const ANTHROPIC_DEFAULT: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_EXTENDED_CACHE_BETA: &str = "extended-cache-ttl-2025-04-11";
 
 /// Read-only model discovery used by `/connect`.
 pub async fn list_models(
@@ -168,7 +169,21 @@ impl AnthropicProvider {
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let messages = anthropic_messages(&request.messages);
+        let mut messages = anthropic_messages(&request.messages);
+        // Two breakpoints, inside the four the API allows. Anthropic renders
+        // `tools` then `system` then `messages`, so a marker on the last system
+        // block covers the tool schemas too; a marker on the last message block
+        // means this turn's write becomes the next turn's read.
+        let cache_control =
+            self.config
+                .prompt_cache_enabled()
+                .then(|| match self.config.prompt_cache_ttl() {
+                    "1h" => json!({"type": "ephemeral", "ttl": "1h"}),
+                    _ => json!({"type": "ephemeral"}),
+                });
+        if let Some(marker) = cache_control.as_ref() {
+            mark_last_block(&mut messages, marker);
+        }
         let mut body = json!({
             "model": self.model,
             "max_tokens": request.max_tokens.unwrap_or(self.config.max_output_tokens),
@@ -176,7 +191,12 @@ impl AnthropicProvider {
             "stream": stream,
         });
         if !system.is_empty() {
-            body["system"] = json!(system);
+            body["system"] = match cache_control.as_ref() {
+                Some(marker) => {
+                    json!([{"type": "text", "text": system, "cache_control": marker}])
+                }
+                None => json!(system),
+            };
         }
         if let Some(temperature) = request.temperature.or(self.config.temperature) {
             body["temperature"] = json!(temperature);
@@ -202,11 +222,17 @@ impl AnthropicProvider {
     }
 
     fn request(&self, body: &Value) -> reqwest::RequestBuilder {
-        self.client
+        let mut builder = self
+            .client
             .post(self.messages_url())
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(body)
+            .header("anthropic-version", ANTHROPIC_VERSION);
+        // The hour-long TTL was gated behind a beta flag before it went
+        // general; sending it costs nothing on accounts that no longer need it.
+        if self.config.prompt_cache_enabled() && self.config.prompt_cache_ttl() == "1h" {
+            builder = builder.header("anthropic-beta", ANTHROPIC_EXTENDED_CACHE_BETA);
+        }
+        builder.json(body)
     }
 }
 
@@ -461,6 +487,24 @@ fn anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
     output
 }
 
+/// Attach a cache breakpoint to the final content block of the conversation.
+///
+/// A no-op on an empty conversation, and on the block shapes that carry no
+/// content of their own — the API rejects `cache_control` on anything it does
+/// not bill as input.
+fn mark_last_block(messages: &mut [Value], cache_control: &Value) {
+    let Some(blocks) = messages
+        .last_mut()
+        .and_then(|message| message.get_mut("content"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    if let Some(block) = blocks.last_mut().and_then(Value::as_object_mut) {
+        block.insert("cache_control".into(), cache_control.clone());
+    }
+}
+
 fn parse_completion(value: &Value) -> Completion {
     let mut content = String::new();
     let mut tool_calls = Vec::new();
@@ -572,22 +616,31 @@ fn parse_stream_value(value: &Value, state: &mut AnthropicStreamState) -> Vec<Re
     events
 }
 
-fn parse_usage(value: Option<&Value>) -> Usage {
+pub(crate) fn parse_usage(value: Option<&Value>) -> Usage {
+    // Anthropic's `input_tokens` already excludes the cached portion, so the
+    // cache counts are kept alongside it rather than subtracted — the opposite
+    // of the OpenAI family. `Usage::total_input` re-joins them.
+    let count = |key: &str| {
+        value
+            .and_then(|usage| usage.get(key))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize
+    };
     Usage {
-        prompt_tokens: value
-            .and_then(|usage| usage.get("input_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize,
-        completion_tokens: value
-            .and_then(|usage| usage.get("output_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize,
+        prompt_tokens: count("input_tokens"),
+        completion_tokens: count("output_tokens"),
+        cache_read_tokens: count("cache_read_input_tokens"),
+        cache_write_tokens: count("cache_creation_input_tokens"),
     }
 }
 
 fn merge_usage(target: &mut Usage, update: &Usage) {
     target.prompt_tokens = target.prompt_tokens.max(update.prompt_tokens);
     target.completion_tokens = target.completion_tokens.max(update.completion_tokens);
+    // The cache counts arrive on `message_start` and are absent from the later
+    // deltas; `max` keeps them instead of letting a zero overwrite them.
+    target.cache_read_tokens = target.cache_read_tokens.max(update.cache_read_tokens);
+    target.cache_write_tokens = target.cache_write_tokens.max(update.cache_write_tokens);
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> NexusError {
@@ -664,5 +717,107 @@ mod tests {
         let provider = AnthropicProvider::new(&config).expect("provider");
         let body = provider.build_body(&CompletionRequest::default(), false);
         assert_eq!(body["output_config"]["effort"], "medium");
+    }
+
+    fn cache_config(prompt_cache: Option<bool>, ttl: Option<&str>) -> ModelConfig {
+        ModelConfig {
+            provider: "anthropic".into(),
+            base_url: ANTHROPIC_DEFAULT.into(),
+            model: "exact-model".into(),
+            resolved_api_key: Some(nexus_core::SecretString::new("test-only")),
+            prompt_cache,
+            prompt_cache_ttl: ttl.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn conversation() -> CompletionRequest {
+        CompletionRequest {
+            messages: vec![
+                ChatMessage::system("stable rules"),
+                ChatMessage::user("do the thing"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn marks_the_last_system_block_and_the_last_message_block() {
+        let provider = AnthropicProvider::new(&cache_config(None, None)).expect("provider");
+        let body = provider.build_body(&conversation(), false);
+        // The system array form is what carries a breakpoint; the string form
+        // cannot, and Anthropic renders tools before system, so this one
+        // marker covers the tool schemas too.
+        assert_eq!(body["system"][0]["text"], "stable rules");
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type":"ephemeral"})
+        );
+        let last = &body["messages"][0]["content"][0];
+        assert_eq!(last["cache_control"], json!({"type":"ephemeral"}));
+    }
+
+    #[test]
+    fn long_ttl_is_opt_in_per_model() {
+        let provider = AnthropicProvider::new(&cache_config(None, Some("1h"))).expect("provider");
+        let body = provider.build_body(&conversation(), false);
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type":"ephemeral","ttl":"1h"})
+        );
+        // Anything unrecognized falls back to the cheap default rather than
+        // being forwarded to the API verbatim.
+        let provider = AnthropicProvider::new(&cache_config(None, Some("7d"))).expect("provider");
+        let body = provider.build_body(&conversation(), false);
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type":"ephemeral"})
+        );
+    }
+
+    #[test]
+    fn disabling_the_cache_sends_the_pre_cache_body_verbatim() {
+        let off = AnthropicProvider::new(&cache_config(Some(false), None)).expect("provider");
+        let body = off.build_body(&conversation(), false);
+        assert_eq!(body["system"], json!("stable rules"));
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+    }
+
+    #[test]
+    fn cache_counts_sit_alongside_the_anthropic_input_count() {
+        let usage = parse_usage(Some(&json!({
+            "input_tokens": 12,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 900,
+            "cache_creation_input_tokens": 100,
+        })));
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.cache_read_tokens, 900);
+        assert_eq!(usage.cache_write_tokens, 100);
+        // Anthropic excludes cached tokens from `input_tokens`, so the whole
+        // prompt is the sum — the number the budget and manifest must see.
+        assert_eq!(usage.total_input(), 1012);
+    }
+
+    #[test]
+    fn usage_without_cache_fields_parses_as_zero() {
+        let usage = parse_usage(Some(&json!({"input_tokens": 40, "output_tokens": 2})));
+        assert_eq!(usage.cache_read_tokens, 0);
+        assert_eq!(usage.cache_write_tokens, 0);
+        assert_eq!(usage.total_input(), 40);
+    }
+
+    #[test]
+    fn streamed_cache_counts_survive_later_deltas() {
+        let mut total = parse_usage(Some(&json!({
+            "input_tokens": 12,
+            "cache_read_input_tokens": 900,
+        })));
+        // Anthropic restates usage on `message_delta` without the cache fields.
+        merge_usage(&mut total, &parse_usage(Some(&json!({"output_tokens": 7}))));
+        assert_eq!(total.cache_read_tokens, 900);
+        assert_eq!(total.completion_tokens, 7);
     }
 }

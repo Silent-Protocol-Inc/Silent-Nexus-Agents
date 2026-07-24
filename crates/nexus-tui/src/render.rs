@@ -9,11 +9,12 @@
 use crate::state::{Focus, Mode, State, WrapLayoutCacheEntry};
 use crate::theme::Theme;
 use crate::views::{
-    ActivityDetail, ActivityTab, AsideChat, Form, Menu, Overlay, Pager, Palette, Progress,
-    SecretInput, SummaryPreview,
+    ActivityDetail, ActivityTab, AsideChat, Form, Menu, Overlay, Pager, Palette, PlanChoice,
+    PlanReview, Progress, SecretInput, SummaryPreview,
 };
 use nexus_app::{Item, Report, Sev};
 use nexus_core::brand::{self, BrandConstraints, BrandLockup, BrandRole, BrandVariant};
+use nexus_core::orchestration::StageStatus;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -141,11 +142,16 @@ pub fn draw(f: &mut Frame, st: &mut State) {
     }
 
     let input_rows = input_box_rows(st, area.width, rl.input_max_rows);
+    // The tracker sits between the conversation and the composer, outside the
+    // transcript widget, so scrolling the timeline never moves it and it never
+    // becomes scrollback.
+    let plan_rows = plan_panel_rows(st, &rl);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(rl.header_rows),
             Constraint::Min(3),
+            Constraint::Length(plan_rows),
             Constraint::Length(input_rows),
             Constraint::Length(rl.status_rows),
         ])
@@ -164,8 +170,11 @@ pub fn draw(f: &mut Frame, st: &mut State) {
         draw_transcript(f, rows[1], st, &t, &rl);
     }
 
-    draw_input(f, rows[2], st, &t, &rl);
-    draw_footer(f, rows[3], st, &t, &rl);
+    if plan_rows > 0 {
+        draw_plan_panel(f, rows[2], st, &t);
+    }
+    draw_input(f, rows[3], st, &t, &rl);
+    draw_footer(f, rows[4], st, &t, &rl);
 
     // Overlay stack: render every overlay, topmost last.
     for overlay in &st.overlays {
@@ -1671,15 +1680,18 @@ fn draw_footer(
             true,
         ));
     }
-    segs.push(mk(
-        "TOKENS",
-        "TOK",
-        "TOK",
-        format!("{}↑ {}↓", st.bar.tokens_in, st.bar.tokens_out),
-        SegColor::Text,
-        3,
-        true,
-    ));
+    // The cache figure is appended only once there is one: on providers that
+    // report nothing a permanent `0≡` would read as a broken cache rather than
+    // as an absent one, and it would cost width the segment cannot spare.
+    let tokens = if st.bar.tokens_cached > 0 {
+        format!(
+            "{}↑ {}↓ {}≡",
+            st.bar.tokens_in, st.bar.tokens_out, st.bar.tokens_cached
+        )
+    } else {
+        format!("{}↑ {}↓", st.bar.tokens_in, st.bar.tokens_out)
+    };
+    segs.push(mk("TOKENS", "TOK", "TOK", tokens, SegColor::Text, 3, true));
     segs.push(mk(
         "VIEW",
         "VIEW",
@@ -1768,6 +1780,7 @@ fn draw_overlay(f: &mut Frame, area: Rect, overlay: &Overlay, st: &State, t: &Th
         Overlay::Summary(s) => draw_summary(f, area, s, t),
         Overlay::ActivityDetail(d) => draw_activity_detail(f, area, d, t),
         Overlay::Aside(a) => draw_aside(f, area, a, t),
+        Overlay::PlanReview(p) => draw_plan_review(f, area, p, t),
     }
 }
 
@@ -2381,6 +2394,308 @@ fn draw_secret(f: &mut Frame, area: Rect, s: &SecretInput, t: &Theme) {
     );
 }
 
+/// Status mark for one step. Paired with a word wherever there is room, so the
+/// state is readable without color and without knowing the symbols.
+fn step_mark(status: StageStatus, awaiting: bool) -> (&'static str, &'static str) {
+    if awaiting {
+        return ("?", "awaiting approval");
+    }
+    match status {
+        StageStatus::Pending => ("◇", "pending"),
+        StageStatus::Running => ("◆", "active"),
+        StageStatus::Completed => ("✓", "complete"),
+        StageStatus::Failed => ("×", "failed"),
+        StageStatus::Blocked => ("!", "blocked"),
+        StageStatus::Skipped => ("–", "skipped"),
+    }
+}
+
+/// How many rows the pinned tracker gets this frame: none when there is no
+/// live plan, otherwise the plan's own size clamped to the height budget.
+fn plan_panel_rows(st: &State, rl: &crate::layout::ResponsiveLayout) -> u16 {
+    let Some(plan) = st.pinned_plan.as_ref() else {
+        return 0;
+    };
+    if rl.plan_panel_max_rows == 0 {
+        return 0;
+    }
+    // One header row, one row per step, one row for the elision note.
+    let steps = plan.steps.len().min(u16::MAX as usize) as u16;
+    (1 + steps + 1).min(rl.plan_panel_max_rows)
+}
+
+/// The pinned execution tracker.
+///
+/// One live view of the current plan, updated in place. It shows what is
+/// happening now rather than repeating the plan into the conversation, and it
+/// stays put while the operator scrolls the timeline.
+fn draw_plan_panel(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
+    let Some(plan) = st.pinned_plan.as_ref() else {
+        return;
+    };
+    if area.height == 0 {
+        return;
+    }
+    let (done, total) = plan.progress();
+    let agent = if plan.agent.trim().is_empty() {
+        "Agent".to_string()
+    } else {
+        plan.agent.trim().to_string()
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(if plan.awaiting_approval {
+        vec![
+            Span::styled("PLAN ", t.warning().add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{done}/{total}"), t.warning()),
+            Span::styled(" · AWAITING APPROVAL · ", t.warning()),
+            Span::styled(agent.clone(), t.primary()),
+            Span::styled("  (Enter to review)", t.muted()),
+        ]
+    } else {
+        let mut header = vec![
+            Span::styled("AGENT ", t.muted()),
+            Span::styled(agent.clone(), t.primary()),
+            Span::styled(" · EXECUTION ", t.muted()),
+            Span::styled(format!("{done}/{total}"), t.secondary()),
+        ];
+        // Name what is being worked on, but only with room to spare: the
+        // counter and the step list are what the panel is for.
+        let used = agent.len() + 24;
+        if area.width as usize > used + 12 && !plan.objective.trim().is_empty() {
+            header.push(Span::styled(
+                format!(
+                    " · {}",
+                    crate::layout::truncate_display(
+                        plan.objective.trim(),
+                        area.width as usize - used
+                    )
+                ),
+                t.muted(),
+            ));
+        }
+        header
+    }));
+
+    // A long plan shows a window around the step being worked on, so the
+    // interesting part stays on screen instead of the beginning.
+    let body_rows = area.height.saturating_sub(1) as usize;
+    let active = plan.active_index().unwrap_or(0);
+    let visible = body_rows.saturating_sub(1).max(1);
+    let start = active.saturating_sub(visible / 2).min(
+        plan.steps
+            .len()
+            .saturating_sub(visible.min(plan.steps.len())),
+    );
+    let end = (start + visible).min(plan.steps.len());
+    for (index, step) in plan.steps[start..end].iter().enumerate() {
+        let index = start + index;
+        let (mark, label) = step_mark(step.status, plan.awaiting_approval);
+        let style = match step.status {
+            _ if plan.awaiting_approval => t.warning(),
+            StageStatus::Running => t.secondary().add_modifier(Modifier::BOLD),
+            StageStatus::Completed => t.success(),
+            StageStatus::Failed => t.failure(),
+            StageStatus::Blocked => t.warning(),
+            StageStatus::Skipped => t.muted(),
+            StageStatus::Pending => t.muted(),
+        };
+        let width = area.width as usize;
+        let title = if width > 24 {
+            format!("{} {}", mark, step.title)
+        } else {
+            format!("{mark} {}", step.title)
+        };
+        let mut spans = vec![Span::styled(
+            crate::layout::truncate_display(&title, width.saturating_sub(label.len() + 3)),
+            style,
+        )];
+        // The word only appears when it fits; the symbol always does.
+        if width >= 40 {
+            spans.push(Span::styled(format!("  {label}"), t.muted()));
+        }
+        let _ = index;
+        lines.push(Line::from(spans));
+    }
+    let hidden = plan.steps.len().saturating_sub(end - start);
+    if hidden > 0 && lines.len() < area.height as usize {
+        lines.push(Line::from(Span::styled(
+            format!("  +{hidden} more"),
+            t.muted(),
+        )));
+    }
+    lines.truncate(area.height as usize);
+    f.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+/// The plan-authorization pop-up.
+///
+/// Sized from the terminal like every other overlay, so a narrow or mobile
+/// window clamps rather than clipping the options: the decision list is the one
+/// thing that must always be reachable, so it is laid out last and given its
+/// rows first.
+fn draw_plan_review(f: &mut Frame, area: Rect, p: &PlanReview, t: &Theme) {
+    let rect = overlay_rect(area, 76, 24);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        // Amber: a decision is owed. Not an error, not a success.
+        .border_style(t.warning())
+        .title(Span::styled(" PLAN AUTHORIZATION ", t.brand()));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    // Options and hint are fixed; the plan gets whatever is left.
+    let editing = p.editor.is_some();
+    let decision_rows = if editing {
+        4
+    } else {
+        PlanChoice::ALL.len() as u16 + 1
+    };
+    let chrome = 1 + decision_rows + 1;
+    let steps_rows = inner.height.saturating_sub(chrome).max(1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(steps_rows),
+            Constraint::Length(decision_rows.min(inner.height.saturating_sub(1))),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    // Header: who proposed this, which revision, how big.
+    let agent = if p.request.agent.trim().is_empty() {
+        "Agent"
+    } else {
+        p.request.agent.trim()
+    };
+    // Header, narrowest-first. Who proposed it and whether the execution is
+    // contained are the facts the decision turns on, so they survive a narrow
+    // terminal; the step count is already visible in the list below.
+    let (containment, containment_style) = if p.request.sandbox_active {
+        ("sandboxed", t.success())
+    } else {
+        ("NOT sandboxed", t.failure())
+    };
+    let mut header = vec![
+        Span::styled(agent.to_string(), t.primary()),
+        Span::styled(" · ", t.muted()),
+        Span::styled(containment, containment_style),
+    ];
+    let width = rows[0].width as usize;
+    let used = |spans: &[Span]| {
+        spans
+            .iter()
+            .map(|span| brand::visible_width(&span.content))
+            .sum::<usize>()
+    };
+    let revision = format!(" · rev {}", p.request.version);
+    if used(&header) + brand::visible_width(&revision) <= width {
+        header.push(Span::styled(revision, t.muted()));
+    }
+    let steps = format!(" · {} steps", p.request.stages.len());
+    if used(&header) + brand::visible_width(&steps) <= width {
+        header.push(Span::styled(steps, t.muted()));
+    }
+    f.render_widget(Paragraph::new(Line::from(header)), rows[0]);
+
+    // The plan itself. Without this the operator is approving a title.
+    let width = rows[1].width as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for step in &p.request.stages {
+        let mut head = wrap_words(
+            &format!("{}. {}", step.sequence, step.title),
+            width.saturating_sub(1),
+        )
+        .into_iter();
+        lines.push(Line::from(Span::styled(
+            head.next().unwrap_or_default(),
+            t.text(),
+        )));
+        for rest in head {
+            lines.push(Line::from(Span::styled(format!("   {rest}"), t.text())));
+        }
+        for detail in wrap_words(&step.detail, width.saturating_sub(3)) {
+            lines.push(Line::from(Span::styled(format!("   {detail}"), t.muted())));
+        }
+        if !step.files.is_empty() {
+            for file in wrap_words(&step.files.join(", "), width.saturating_sub(3)) {
+                lines.push(Line::from(Span::styled(
+                    format!("   {file}"),
+                    t.secondary(),
+                )));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("the plan has no steps", t.muted())));
+    }
+    let max_scroll = lines.len().saturating_sub(rows[1].height as usize);
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).scroll((p.scroll.min(max_scroll) as u16, 0)),
+        rows[1],
+    );
+
+    // Decision. While writing a note the same rows hold the editor, so the
+    // pop-up never grows past the space it was given.
+    if let Some((choice, text)) = &p.editor {
+        let mut editor_lines = vec![Line::from(Span::styled(choice.prompt(), t.secondary()))];
+        let typed = wrap_words(text, rows[2].width.saturating_sub(2) as usize);
+        if typed.is_empty() {
+            editor_lines.push(Line::from(vec![Span::styled("▏", t.primary())]));
+        } else {
+            for (index, line) in typed.iter().enumerate() {
+                let mut spans = vec![Span::styled(line.clone(), t.text())];
+                if index + 1 == typed.len() {
+                    spans.push(Span::styled("▏", t.primary()));
+                }
+                editor_lines.push(Line::from(spans));
+            }
+        }
+        f.render_widget(
+            Paragraph::new(Text::from(editor_lines)).wrap(Wrap { trim: false }),
+            rows[2],
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Enter submit · Ctrl+U clear · Esc back to the options",
+                t.muted(),
+            )))
+            .wrap(Wrap { trim: false }),
+            rows[3],
+        );
+        return;
+    }
+
+    let mut option_lines = Vec::new();
+    for (index, choice) in PlanChoice::ALL.iter().enumerate() {
+        let selected = index == p.selected;
+        option_lines.push(Line::from(vec![
+            Span::styled(if selected { " › " } else { "   " }, t.primary()),
+            Span::styled(
+                choice.label(),
+                if selected {
+                    t.primary().add_modifier(Modifier::BOLD)
+                } else {
+                    t.text()
+                },
+            ),
+        ]));
+    }
+    f.render_widget(Paragraph::new(Text::from(option_lines)), rows[2]);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "↑↓ select · Enter confirm · A approve · N note · R changes · D decline · Esc later",
+            t.muted(),
+        )))
+        .wrap(Wrap { trim: false }),
+        rows[3],
+    );
+}
+
 fn draw_aside(f: &mut Frame, area: Rect, a: &AsideChat, t: &Theme) {
     let rect = overlay_rect(area, 78, 22);
     f.render_widget(Clear, rect);
@@ -2412,15 +2727,29 @@ fn draw_aside(f: &mut Frame, area: Rect, a: &AsideChat, t: &Theme) {
             t.muted(),
         )));
     }
+    // Wrap here rather than leaving it to the paragraph: the scroll offset is
+    // in rendered lines, so counting logical ones would land short of the
+    // bottom and hide the newest part of a long answer.
+    let width = rows[0].width as usize;
     for exchange in &a.exchanges {
+        let mut question = wrap_words(&exchange.question, width.saturating_sub(2)).into_iter();
         lines.push(Line::from(vec![
             Span::styled("❯ ", t.primary()),
-            Span::styled(exchange.question.clone(), t.text()),
+            Span::styled(question.next().unwrap_or_default(), t.text()),
         ]));
+        for rest in question {
+            lines.push(Line::from(Span::styled(format!("  {rest}"), t.text())));
+        }
         match &exchange.answer {
             Some(answer) => {
                 for line in answer.lines() {
-                    lines.push(Line::from(Span::styled(line.to_string(), t.muted())));
+                    if line.trim().is_empty() {
+                        lines.push(Line::from(""));
+                        continue;
+                    }
+                    for wrapped in wrap_words(line, width) {
+                        lines.push(Line::from(Span::styled(wrapped, t.muted())));
+                    }
                 }
             }
             None => lines.push(Line::from(Span::styled(
@@ -2430,13 +2759,12 @@ fn draw_aside(f: &mut Frame, area: Rect, a: &AsideChat, t: &Theme) {
         }
         lines.push(Line::from(""));
     }
-    // Pin to the newest content: approximate wrapped height by logical lines.
+    // Follow the newest content, unless the operator scrolled back.
     let body_height = rows[0].height as usize;
-    let scroll = lines.len().saturating_sub(body_height) as u16;
+    let max_back = lines.len().saturating_sub(body_height);
+    let scroll = max_back.saturating_sub(a.scroll_back().min(max_back)) as u16;
     f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
+        Paragraph::new(Text::from(lines)).scroll((scroll, 0)),
         rows[0],
     );
 
@@ -2448,7 +2776,7 @@ fn draw_aside(f: &mut Frame, area: Rect, a: &AsideChat, t: &Theme) {
             Span::styled("▏", t.primary()),
         ]),
         Line::from(Span::styled(
-            "Enter ask · Esc close — kept as side context, never added to the transcript",
+            "Enter ask · ↑↓ scroll · Esc close — kept as side context, never added to the transcript",
             t.muted(),
         )),
     ]);
@@ -3151,6 +3479,7 @@ mod tests {
                     git_branch: Some("main".into()),
                     tokens_in: 12,
                     tokens_out: 8,
+                    tokens_cached: 0,
                     permission_mode: "default".into(),
                     plan_mode: false,
                 },
@@ -3659,6 +3988,7 @@ mod tests {
                 git_branch: Some("feature/timeline".into()),
                 tokens_in: 2048,
                 tokens_out: 512,
+                tokens_cached: 0,
                 permission_mode: "default".into(),
                 plan_mode: false,
             },
@@ -3992,5 +4322,167 @@ mod tests {
         let output = render_state_text(&mut state, 100, 30);
         assert!(!output.contains("HIDDEN_PROVIDER_REASONING"));
         assert!(output.contains("VISIBLE_TOOL_OPERATION"));
+    }
+    fn pinned(awaiting: bool) -> crate::state::PinnedPlan {
+        use crate::state::{PinnedPlan, PinnedStep};
+        PinnedPlan {
+            plan_id: "plan_1".into(),
+            agent: "planner".into(),
+            objective: "repair the approval workflow".into(),
+            version: 1,
+            steps: vec![
+                PinnedStep {
+                    sequence: 1,
+                    title: "Inspect existing approval state".into(),
+                    status: StageStatus::Completed,
+                },
+                PinnedStep {
+                    sequence: 2,
+                    title: "Implement the decision popup".into(),
+                    status: StageStatus::Running,
+                },
+                PinnedStep {
+                    sequence: 3,
+                    title: "Validate resize behavior".into(),
+                    status: StageStatus::Pending,
+                },
+                PinnedStep {
+                    sequence: 4,
+                    title: "Run the gate".into(),
+                    status: StageStatus::Pending,
+                },
+            ],
+            awaiting_approval: awaiting,
+        }
+    }
+
+    #[test]
+    fn the_pinned_panel_shows_progress_and_the_active_step() {
+        let mut state = representative_state();
+        state.pinned_plan = Some(pinned(false));
+        let text = render_state_text(&mut state, 100, 30);
+        assert!(text.contains("planner"), "the panel names the active agent");
+        assert!(text.contains("1/4"), "one of four steps is done:\n{text}");
+        assert!(
+            text.contains("◆ Implement the decision popup"),
+            "the active step is marked:\n{text}"
+        );
+        assert!(
+            text.contains("✓ Inspect existing approval state"),
+            "completed steps are marked:\n{text}"
+        );
+        assert!(
+            text.contains("active") && text.contains("complete"),
+            "symbols are paired with words where there is room:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_pinned_panel_says_when_a_decision_is_owed() {
+        let mut state = representative_state();
+        state.pinned_plan = Some(pinned(true));
+        let text = render_state_text(&mut state, 100, 30);
+        assert!(
+            text.contains("AWAITING APPROVAL"),
+            "a parked plan says so:\n{text}"
+        );
+        assert!(
+            !text.contains("EXECUTION 0/4"),
+            "nothing is executing yet, so the panel must not claim it is:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_pinned_panel_updates_in_place_rather_than_repeating_itself() {
+        let mut state = representative_state();
+        state.pinned_plan = Some(pinned(false));
+        let first = render_state_text(&mut state, 100, 30);
+        if let Some(plan) = state.pinned_plan.as_mut() {
+            plan.update_step("Implement the decision popup", StageStatus::Completed);
+            plan.update_step("Validate resize behavior", StageStatus::Running);
+        }
+        let second = render_state_text(&mut state, 100, 30);
+        assert_eq!(
+            second.matches("Validate resize behavior").count(),
+            1,
+            "a step appears once, updated, not appended again:\n{second}"
+        );
+        assert!(first.contains("1/4") && second.contains("2/4"));
+    }
+
+    #[test]
+    fn the_pinned_panel_survives_narrow_and_short_terminals() {
+        for (width, height) in [(40u16, 20u16), (52, 24), (80, 24), (120, 40), (30, 16)] {
+            let mut state = representative_state();
+            state.pinned_plan = Some(pinned(false));
+            let text = render_state_text(&mut state, width, height);
+            for line in text.lines() {
+                assert!(
+                    brand::visible_width(line) <= width as usize,
+                    "{width}x{height}: a line overflowed the terminal: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_finished_turn_leaves_no_tracker_above_the_composer() {
+        let mut state = representative_state();
+        state.pinned_plan = Some(pinned(false));
+        assert!(render_state_text(&mut state, 100, 30).contains("EXECUTION 1/4"));
+        // What `apply_turn_done` does when the turn ends.
+        state.pinned_plan = None;
+        let text = render_state_text(&mut state, 100, 30);
+        assert!(
+            !text.contains("EXECUTION 1/4") && !text.contains("AWAITING APPROVAL"),
+            "stale task state must not sit above the input:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_plan_popup_keeps_its_options_reachable_at_every_size() {
+        for (width, height) in [(40u16, 20u16), (60, 24), (100, 30), (120, 40)] {
+            let mut state = representative_state();
+            state.push_overlay(Overlay::PlanReview(Box::new(PlanReview::new(
+                nexus_agent::PlanReviewRequest {
+                    plan_id: "plan_1".into(),
+                    version: 2,
+                    run_id: "run_1".into(),
+                    session_id: "sess_1".into(),
+                    agent: "planner".into(),
+                    objective: "repair the approval workflow".into(),
+                    stages: (1..=12)
+                        .map(|n| nexus_agent::PlanReviewStage {
+                            sequence: n,
+                            title: format!("Step number {n} with a fairly long title"),
+                            detail: "detail that wraps across the popup width".repeat(2),
+                            files: vec!["crates/nexus-tui/src/render.rs".into()],
+                        })
+                        .collect(),
+                    sandbox_active: false,
+                },
+            ))));
+            let text = render_state_text(&mut state, width, height);
+            assert!(
+                text.contains("PLAN AUTHORIZATION"),
+                "{width}x{height}: the popup is missing:\n{text}"
+            );
+            for option in ["Approve", "Request changes", "Decline"] {
+                assert!(
+                    text.contains(option),
+                    "{width}x{height}: `{option}` was clipped:\n{text}"
+                );
+            }
+            assert!(
+                text.contains("planner") && text.contains("NOT sandboxed"),
+                "{width}x{height}: the operator must see who proposed it and what contains it:\n{text}"
+            );
+            for line in text.lines() {
+                assert!(
+                    brand::visible_width(line) <= width as usize,
+                    "{width}x{height}: overflowed: {line:?}"
+                );
+            }
+        }
     }
 }

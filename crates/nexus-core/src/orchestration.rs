@@ -374,6 +374,11 @@ pub struct WorkBreakdown {
     pub stages: Vec<Stage>,
     pub current_stage: Option<String>,
     pub next_stage: Option<String>,
+    /// What the operator said when they approved. Kept with the plan so the
+    /// instruction that shaped the execution survives beyond the turn that
+    /// carried it. Defaulted so plans stored before this existed still load.
+    #[serde(default)]
+    pub approval_note: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -472,6 +477,7 @@ impl WorkBreakdown {
             stages,
             current_stage,
             next_stage,
+            approval_note: None,
             created_at: now.clone(),
             updated_at: now,
         }
@@ -518,6 +524,7 @@ impl WorkBreakdown {
             rationale,
             stages,
             current_stage: None,
+            approval_note: None,
             next_stage,
             created_at: now.clone(),
             updated_at: now,
@@ -609,6 +616,75 @@ impl WorkBreakdown {
         self.next_stage = next_stage_after(&self.stages, None);
         self.updated_at = crate::now_rfc3339();
         Some(changed)
+    }
+
+    /// Replace this plan's content with a re-planned version of itself,
+    /// keeping its identity and counting up.
+    ///
+    /// A plan the operator sent back for changes comes back as a new draft. It
+    /// is the same plan under review, one revision later — reading as `v1`
+    /// again would leave them unable to tell which one they are looking at, and
+    /// a fresh identity would break the check that an old decision cannot
+    /// approve the current draft.
+    pub fn supersede(&mut self, replacement: Self) {
+        self.objective = replacement.objective;
+        self.kind = replacement.kind;
+        self.approved = replacement.approved;
+        self.approval_note = None;
+        self.rationale = replacement.rationale;
+        self.stages = replacement.stages;
+        self.current_stage = replacement.current_stage;
+        self.next_stage = replacement.next_stage;
+        self.version = self.version.saturating_add(1);
+        self.updated_at = crate::now_rfc3339();
+    }
+
+    /// Drop the approval gate from a plan the operator never asked to review.
+    ///
+    /// `generate` gives large work a `Plan approval` stage with `Implementation`
+    /// blocked behind it. That is right for an explicit planning session and
+    /// wrong for an ordinary prompt, which would otherwise stop at a decision
+    /// about a plan nobody asked for. Removing the stage — rather than
+    /// approving it silently — keeps the step list honest about what is going
+    /// to happen. Individual actions are still policy-checked and approved.
+    pub fn ungate(&mut self) {
+        if self.kind != WorkBreakdownKind::Planned {
+            return;
+        }
+        self.stages.retain(|stage| stage.title != "Plan approval");
+        for (index, stage) in self.stages.iter_mut().enumerate() {
+            let sequence = index as u32 + 1;
+            stage.sequence = sequence;
+            stage.id = format!("stage_{sequence}");
+        }
+        self.approved = true;
+        self.approval_note = None;
+        if let Some(stage) = self
+            .stages
+            .iter_mut()
+            .find(|stage| stage.title == "Implementation")
+        {
+            if stage.status == StageStatus::Blocked {
+                stage.status = StageStatus::Pending;
+                stage.next_action = None;
+            }
+        }
+        let running = self
+            .stages
+            .iter()
+            .find(|stage| stage.status == StageStatus::Running)
+            .map(|stage| stage.id.clone());
+        self.current_stage = running.or_else(|| {
+            self.stages
+                .iter_mut()
+                .find(|stage| stage.status == StageStatus::Pending)
+                .map(|stage| {
+                    stage.start();
+                    stage.id.clone()
+                })
+        });
+        self.next_stage = next_stage_after(&self.stages, self.current_stage.as_deref());
+        self.updated_at = crate::now_rfc3339();
     }
 
     pub fn approve(&mut self) {

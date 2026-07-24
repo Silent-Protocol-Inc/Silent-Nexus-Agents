@@ -4,8 +4,8 @@
 //! destructive action, prompt injection, model timeout, and retry limits.
 
 use nexus_agent::{
-    AgentLoop, AgentRole, AgentRuntime, ApprovalDecision, ApprovalHandler, LoopEvent, SessionStore,
-    TurnLimits,
+    AgentLoop, AgentRole, AgentRuntime, ApprovalDecision, ApprovalHandler, LoopEvent, PlanDecision,
+    PlanReviewRequest, PlanReviewResponse, SessionStore, TurnLimits,
 };
 use nexus_core::artifacts::ArtifactStore;
 use nexus_core::config::Config;
@@ -983,4 +983,499 @@ async fn deterministic_http_400_is_not_retried() {
         .await
         .expect_err("deterministic HTTP 400 should surface immediately");
     assert!(error.to_string().contains("HTTP 400 Bad Request"));
+}
+
+#[tokio::test]
+async fn an_exhausted_memory_budget_refuses_the_write_without_losing_the_answer() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut runtime, session) = runtime_with(
+        vec![
+            MockScript::ToolCall {
+                name: "memory.add".into(),
+                arguments: json!({"content": "the parser is hand-written"}).to_string(),
+            },
+            MockScript::ToolCall {
+                name: "memory.add".into(),
+                arguments: json!({"content": "the second one is over budget"}).to_string(),
+            },
+            MockScript::Text("the parser is hand-written; I could only record the first".into()),
+        ],
+        dir.path(),
+    );
+    runtime.limits.max_memory_writes = 1;
+    let agent = AgentLoop::new(runtime, AgentRole::Reviewer);
+    let outcome = agent
+        .run(&session, "note what you find", Arc::new(AutoApprove))
+        .await
+        .expect("run");
+
+    // Memory is bookkeeping beside the work: going over budget must not throw
+    // away a finished answer the operator asked for.
+    assert_eq!(outcome.stopped_reason, "finished");
+    assert!(
+        outcome.final_message.contains("hand-written"),
+        "the answer survives the refused write: {}",
+        outcome.final_message
+    );
+}
+
+#[tokio::test]
+async fn a_read_only_reviewer_may_record_a_memory() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (runtime, session) = runtime_with(
+        vec![
+            MockScript::ToolCall {
+                name: "memory.add".into(),
+                arguments: json!({"content": "average() divides by zero on an empty list"})
+                    .to_string(),
+            },
+            MockScript::Text("recorded the finding".into()),
+        ],
+        dir.path(),
+    );
+    let agent = AgentLoop::new(runtime, AgentRole::Reviewer);
+    let outcome = agent
+        .run(
+            &session,
+            "review and note what you find",
+            Arc::new(AutoDeny),
+        )
+        .await
+        .expect("run");
+
+    // AutoDeny proves the point: recording a memory is not an escalation, so a
+    // read-only role records without an approval to lean on.
+    assert_eq!(outcome.stopped_reason, "finished");
+    assert!(outcome.final_message.contains("recorded"));
+}
+
+/// `--yes` installs an approver that grants every escalation, but the prompt
+/// still states the configured policy (`destructive=ask`). Unless the standing
+/// authorization is stated too, the model stops to ask a human who is not there
+/// — the run ends with a question instead of the work.
+#[tokio::test]
+async fn a_preauthorized_run_says_so_in_the_prompt_and_an_ordinary_one_does_not() {
+    const MARKER: &str = "approvals=pre-authorized";
+
+    struct Preapproved;
+    #[async_trait::async_trait]
+    impl ApprovalHandler for Preapproved {
+        fn preapproved(&self) -> bool {
+            true
+        }
+        async fn request_approval(
+            &self,
+            _action: &nexus_policy::ActionRequest,
+            _arguments: &serde_json::Value,
+            _reason: &str,
+            _sandbox_active: bool,
+        ) -> ApprovalDecision {
+            ApprovalDecision::Approve
+        }
+    }
+
+    let prompt_for = |approver: Arc<dyn ApprovalHandler>| async move {
+        let dir = tempfile::tempdir().expect("dir");
+        let provider = Arc::new(MockProvider::new(vec![MockScript::Text("done".into())]));
+        let (runtime, session) = runtime_with_provider(provider.clone(), dir.path());
+        AgentLoop::new(runtime, AgentRole::Implementer)
+            .run(&session, "do the thing", approver)
+            .await
+            .expect("run");
+        provider
+            .recorded_requests()
+            .into_iter()
+            .next()
+            .expect("request")
+            .messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    assert!(
+        prompt_for(Arc::new(Preapproved)).await.contains(MARKER),
+        "a pre-authorized run must tell the model its escalations are granted",
+    );
+    assert!(
+        !prompt_for(Arc::new(AutoApprove)).await.contains(MARKER),
+        "every other approver leaves the standing policy as the model reads it",
+    );
+}
+
+// ------------------------------------------------------------- plan review
+
+/// A scripted operator: answers each review from a queue, so a test can drive a
+/// whole revision cycle.
+struct ScriptedReviewer {
+    answers: std::sync::Mutex<std::collections::VecDeque<PlanDecision>>,
+    seen: std::sync::Mutex<Vec<(String, u32, String)>>,
+    /// When set, every answer names this revision instead of the one asked
+    /// about — the stale-decision case.
+    force_version: Option<u32>,
+}
+
+impl ScriptedReviewer {
+    fn new(answers: impl IntoIterator<Item = PlanDecision>) -> Arc<Self> {
+        Arc::new(Self {
+            answers: std::sync::Mutex::new(answers.into_iter().collect()),
+            seen: std::sync::Mutex::new(Vec::new()),
+            force_version: None,
+        })
+    }
+
+    fn stale(answer: PlanDecision, version: u32) -> Arc<Self> {
+        Arc::new(Self {
+            answers: std::sync::Mutex::new(std::iter::repeat_n(answer, 8).collect()),
+            seen: std::sync::Mutex::new(Vec::new()),
+            force_version: Some(version),
+        })
+    }
+
+    /// (plan_id, version, agent) for each review shown.
+    fn reviews(&self) -> Vec<(String, u32, String)> {
+        self.seen.lock().expect("seen").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ApprovalHandler for ScriptedReviewer {
+    fn interactive(&self) -> bool {
+        true
+    }
+
+    async fn request_approval(
+        &self,
+        _action: &nexus_policy::ActionRequest,
+        _arguments: &serde_json::Value,
+        _reason: &str,
+        _sandbox: bool,
+    ) -> ApprovalDecision {
+        ApprovalDecision::Approve
+    }
+
+    async fn review_plan(&self, request: &PlanReviewRequest) -> PlanReviewResponse {
+        self.seen.lock().expect("seen").push((
+            request.plan_id.clone(),
+            request.version,
+            request.agent.clone(),
+        ));
+        let decision = self
+            .answers
+            .lock()
+            .expect("answers")
+            .pop_front()
+            .unwrap_or(PlanDecision::Decline);
+        PlanReviewResponse {
+            plan_id: request.plan_id.clone(),
+            version: self.force_version.unwrap_or(request.version),
+            decision,
+        }
+    }
+}
+
+/// Plan-mode runtime with a scripted provider.
+fn plan_mode_runtime(script: Vec<MockScript>, dir: &std::path::Path) -> (AgentRuntime, SessionId) {
+    let (mut runtime, session) = runtime_with(script, dir);
+    runtime.plan_mode = true;
+    runtime.policy.push_scope(
+        nexus_policy::PLAN_MODE_SCOPE,
+        nexus_policy::PolicyScope::plan_mode(),
+    );
+    (runtime, session)
+}
+
+fn plan_submission(objective: &str, title: &str) -> String {
+    json!({
+        "objective": objective,
+        "findings": ["read the file"],
+        "steps": [{"title": title, "detail": "change the thing and check it", "files": ["victim.txt"]}],
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn a_declined_plan_executes_nothing_and_returns_control() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("victim.txt"), "data").expect("write");
+    let (runtime, session) = plan_mode_runtime(
+        vec![MockScript::ToolCall {
+            name: "plan.submit".into(),
+            arguments: plan_submission("delete victim.txt", "Delete the file"),
+        }],
+        dir.path(),
+    );
+    let reviewer = ScriptedReviewer::new([PlanDecision::Decline]);
+    let outcome = AgentLoop::new(runtime, AgentRole::Implementer)
+        .run(&session, "delete victim.txt", reviewer.clone())
+        .await
+        .expect("run");
+
+    assert_eq!(outcome.stopped_reason, "plan_declined");
+    assert!(
+        dir.path().join("victim.txt").exists(),
+        "declining must execute nothing",
+    );
+    assert_eq!(reviewer.reviews().len(), 1);
+}
+
+#[tokio::test]
+async fn approving_with_a_note_carries_it_into_execution() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("victim.txt"), "data").expect("write");
+    let provider = Arc::new(MockProvider::new(vec![
+        MockScript::ToolCall {
+            name: "plan.submit".into(),
+            arguments: plan_submission("tidy victim.txt", "Tidy the file"),
+        },
+        MockScript::Text("done, keeping the note in mind".into()),
+    ]));
+    let (mut runtime, session) = runtime_with_provider(provider.clone(), dir.path());
+    runtime.plan_mode = true;
+    runtime.policy.push_scope(
+        nexus_policy::PLAN_MODE_SCOPE,
+        nexus_policy::PolicyScope::plan_mode(),
+    );
+    let reviewer = ScriptedReviewer::new([PlanDecision::ApproveWithNote(
+        "keep the existing keyboard bindings".into(),
+    )]);
+    let outcome = AgentLoop::new(runtime, AgentRole::Implementer)
+        .run(&session, "tidy victim.txt", reviewer)
+        .await
+        .expect("run");
+
+    assert_eq!(outcome.stopped_reason, "finished");
+    let sent = provider
+        .recorded_requests()
+        .into_iter()
+        .next_back()
+        .expect("request")
+        .messages
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        sent.contains("keep the existing keyboard bindings"),
+        "the note must reach the execution context, not just the record",
+    );
+}
+
+#[tokio::test]
+async fn requesting_changes_re_plans_and_asks_again_about_the_new_revision() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("victim.txt"), "data").expect("write");
+    let (runtime, session) = plan_mode_runtime(
+        vec![
+            MockScript::ToolCall {
+                name: "plan.submit".into(),
+                arguments: plan_submission("tidy victim.txt", "First attempt"),
+            },
+            MockScript::ToolCall {
+                name: "plan.submit".into(),
+                arguments: plan_submission("tidy victim.txt", "Second attempt"),
+            },
+            MockScript::Text("carried out the revised plan".into()),
+        ],
+        dir.path(),
+    );
+    let reviewer = ScriptedReviewer::new([
+        PlanDecision::RequestChanges("name the file you are changing".into()),
+        PlanDecision::Approve,
+    ]);
+    let outcome = AgentLoop::new(runtime, AgentRole::Planner)
+        .run(&session, "tidy victim.txt", reviewer.clone())
+        .await
+        .expect("run");
+
+    assert_eq!(outcome.stopped_reason, "finished");
+    let reviews = reviewer.reviews();
+    assert_eq!(reviews.len(), 2, "the revised plan is reviewed too");
+    assert_eq!(
+        reviews[0].0, reviews[1].0,
+        "the revision is the same plan, one draft later",
+    );
+    assert_eq!(
+        (reviews[0].1, reviews[1].1),
+        (1, 2),
+        "the revision counts up, so the operator can tell the drafts apart",
+    );
+}
+
+#[tokio::test]
+async fn a_decision_about_another_revision_is_discarded() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("victim.txt"), "data").expect("write");
+    let (runtime, session) = plan_mode_runtime(
+        vec![MockScript::ToolCall {
+            name: "plan.submit".into(),
+            arguments: plan_submission("delete victim.txt", "Delete the file"),
+        }],
+        dir.path(),
+    );
+    // Always answers "approve", but about revision 99.
+    let reviewer = ScriptedReviewer::stale(PlanDecision::Approve, 99);
+    let outcome = AgentLoop::new(runtime, AgentRole::Implementer)
+        .run(&session, "delete victim.txt", reviewer.clone())
+        .await
+        .expect("run");
+
+    assert_eq!(
+        outcome.stopped_reason, "plan_declined",
+        "an approval for another revision must not approve this one",
+    );
+    assert!(dir.path().join("victim.txt").exists());
+    assert!(
+        reviewer.reviews().len() > 1,
+        "the review is re-issued rather than acted on: {:?}",
+        reviewer.reviews(),
+    );
+}
+
+#[tokio::test]
+async fn the_review_names_the_agent_that_authored_the_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (runtime, session) = plan_mode_runtime(
+        vec![MockScript::ToolCall {
+            name: "plan.submit".into(),
+            arguments: plan_submission("look at it", "Read the file"),
+        }],
+        dir.path(),
+    );
+    let reviewer = ScriptedReviewer::new([PlanDecision::Decline]);
+    AgentLoop::new(runtime, AgentRole::Reviewer)
+        .run(&session, "look at it", reviewer.clone())
+        .await
+        .expect("run");
+
+    let (_, _, agent) = reviewer.reviews().into_iter().next().expect("one review");
+    assert_eq!(
+        agent, "reviewer",
+        "the review names whoever is running, not a fixed product name",
+    );
+    assert!(!agent.is_empty(), "a nameless agent would render as a gap");
+}
+
+#[tokio::test]
+async fn an_ordinary_prompt_plans_and_executes_without_a_review() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("victim.txt"), "data").expect("write");
+    // Not plan mode: a normal prompt, large enough to be classified as planned
+    // work, that goes straight to a write.
+    let (runtime, session) = runtime_with(
+        vec![
+            MockScript::ToolCall {
+                name: "fs.delete".into(),
+                arguments: json!({"path": "victim.txt"}).to_string(),
+            },
+            MockScript::Text("deleted it".into()),
+        ],
+        dir.path(),
+    );
+    let reviewer = ScriptedReviewer::new([PlanDecision::Decline]);
+    let outcome = AgentLoop::new(runtime, AgentRole::Implementer)
+        .run(
+            &session,
+            "refactor the whole workspace, migrate the schema, and delete victim.txt",
+            reviewer.clone(),
+        )
+        .await
+        .expect("run");
+
+    assert!(
+        reviewer.reviews().is_empty(),
+        "an ordinary prompt is never gated on a plan the operator did not ask for",
+    );
+    assert_eq!(outcome.stopped_reason, "finished");
+    assert!(
+        !dir.path().join("victim.txt").exists(),
+        "execution starts automatically: {}",
+        outcome.final_message,
+    );
+}
+
+#[tokio::test]
+async fn an_ordinary_prompt_still_gets_a_step_list_to_track() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (runtime, session) = runtime_with(vec![MockScript::Text("answered".into())], dir.path());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let outcome = AgentLoop::new(runtime, AgentRole::Implementer)
+        .with_events(tx)
+        .run(&session, "explain the parser", Arc::new(AutoApprove))
+        .await
+        .expect("run");
+    assert_eq!(outcome.stopped_reason, "finished");
+
+    let mut planned = None;
+    while let Ok(event) = rx.try_recv() {
+        if let LoopEvent::WorkPlanned { work } = event {
+            planned = Some(work);
+        }
+    }
+    let work = planned.expect("the turn publishes its step list");
+    assert!(
+        !work.stages.is_empty(),
+        "a tracker needs something to track"
+    );
+    assert!(
+        !work
+            .stages
+            .iter()
+            .any(|stage| stage.title == "Plan approval"),
+        "an ungated turn must not show a decision it will never ask for: {:?}",
+        work.stages.iter().map(|s| &s.title).collect::<Vec<_>>(),
+    );
+}
+
+#[tokio::test]
+async fn a_turn_that_grows_into_planned_work_gains_no_approval_gate() {
+    let dir = tempfile::tempdir().expect("dir");
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(dir.path().join(name), "data").expect("write");
+    }
+    // Several destructive actions promote the turn to planned work mid-run.
+    let (runtime, session) = runtime_with(
+        vec![
+            MockScript::ToolCall {
+                name: "fs.delete".into(),
+                arguments: json!({"path": "a.txt"}).to_string(),
+            },
+            MockScript::ToolCall {
+                name: "fs.delete".into(),
+                arguments: json!({"path": "b.txt"}).to_string(),
+            },
+            MockScript::ToolCall {
+                name: "fs.delete".into(),
+                arguments: json!({"path": "c.txt"}).to_string(),
+            },
+            MockScript::Text("removed them".into()),
+        ],
+        dir.path(),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let reviewer = ScriptedReviewer::new([PlanDecision::Decline]);
+    let outcome = AgentLoop::new(runtime, AgentRole::Implementer)
+        .with_events(tx)
+        .run(&session, "delete a.txt, b.txt and c.txt", reviewer.clone())
+        .await
+        .expect("run");
+
+    assert_eq!(outcome.stopped_reason, "finished");
+    assert!(
+        reviewer.reviews().is_empty(),
+        "promotion must not invent a review the operator never asked for",
+    );
+    while let Ok(event) = rx.try_recv() {
+        if let LoopEvent::PlanPromoted { work, .. } = event {
+            assert!(
+                !work
+                    .stages
+                    .iter()
+                    .any(|stage| stage.title == "Plan approval"),
+                "a promoted plan must not park a gate nothing will resolve: {:?}",
+                work.stages.iter().map(|s| &s.title).collect::<Vec<_>>(),
+            );
+        }
+    }
 }

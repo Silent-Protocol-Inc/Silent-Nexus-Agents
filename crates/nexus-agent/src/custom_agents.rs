@@ -51,12 +51,20 @@ impl CustomAgentDefinition {
         })
     }
 
+    /// The categories this agent may use. A definition that narrows the base
+    /// role's list still keeps `Memory`: recording a finding is a budgeted,
+    /// approval-gated side store rather than a capability, and the same
+    /// invariant holds for every built-in role.
     pub fn effective_tool_categories(&self) -> Result<Vec<ToolCategory>> {
         let base = self.base_role()?;
-        Ok(self
+        let mut categories = self
             .tool_categories
             .clone()
-            .unwrap_or_else(|| base.tool_categories()))
+            .unwrap_or_else(|| base.tool_categories());
+        if !categories.contains(&ToolCategory::Memory) {
+            categories.push(ToolCategory::Memory);
+        }
+        Ok(categories)
     }
 
     pub fn can_write(&self) -> Result<bool> {
@@ -226,7 +234,39 @@ mod tests {
         assert_eq!(definition.description, "project");
         assert_eq!(
             definition.effective_tool_categories().expect("tools"),
-            vec![ToolCategory::Filesystem]
+            vec![ToolCategory::Filesystem, ToolCategory::Memory],
+            "narrowing the tool list keeps the memory side store every role has",
+        );
+    }
+
+    #[test]
+    fn a_narrowed_definition_can_still_record_what_it_finds() {
+        let definition = CustomAgentDefinition {
+            name: "auditor".into(),
+            base: "reviewer".into(),
+            description: "reads only".into(),
+            instructions: String::new(),
+            tool_categories: Some(vec![ToolCategory::Filesystem]),
+            allow_write: None,
+            max_risk: None,
+            max_steps: None,
+            max_tokens: None,
+            max_runtime_ms: None,
+            allow_delegation: None,
+            scope: "project".into(),
+            source: PathBuf::new(),
+        };
+        definition.validate().expect("narrowing is allowed");
+        assert!(
+            definition
+                .effective_tool_categories()
+                .expect("tools")
+                .contains(&ToolCategory::Memory),
+            "an agent told to log its findings must have somewhere to log them",
+        );
+        assert!(
+            !definition.can_write().expect("write"),
+            "memory is not a workspace write permission",
         );
     }
 

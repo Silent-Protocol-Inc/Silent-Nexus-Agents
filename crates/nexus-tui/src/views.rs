@@ -35,6 +35,13 @@ pub enum UiAction {
     InsertInput(String),
     /// A confirmation dialog approved this.
     Confirmed(ConfirmedAction),
+    /// The operator decided about the plan under review. Carries the revision
+    /// it was decided about so a decision cannot land on a newer plan.
+    ResolvePlan {
+        plan_id: String,
+        version: u32,
+        decision: nexus_agent::PlanDecision,
+    },
     /// Refresh/open a view's data.
     Load(LoadRequest),
     AttachSession(String),
@@ -794,6 +801,10 @@ pub struct AsideChat {
     pub exchanges: Vec<AsideExchange>,
     /// A sidecar call is in flight; block a second until it lands.
     pub pending: bool,
+    /// Lines scrolled back from the newest content. Zero follows the bottom,
+    /// which is where new questions and answers put it. The renderer clamps
+    /// this against the real wrapped height — only it knows the width.
+    scroll_back: usize,
 }
 
 impl AsideChat {
@@ -805,6 +816,10 @@ impl AsideChat {
         &self.input
     }
 
+    pub fn scroll_back(&self) -> usize {
+        self.scroll_back
+    }
+
     /// Record a new question awaiting an answer and mark a call in flight.
     /// Used both by the Enter key and by `/btw <note>` seeding the first ask.
     pub fn begin(&mut self, question: String) {
@@ -813,6 +828,7 @@ impl AsideChat {
             answer: None,
         });
         self.pending = true;
+        self.scroll_back = 0;
     }
 
     /// Attach the sidecar's reply to the most recent unanswered question.
@@ -821,11 +837,29 @@ impl AsideChat {
             exchange.answer = Some(answer);
         }
         self.pending = false;
+        self.scroll_back = 0;
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
         match key.code {
             KeyCode::Esc => Outcome::Close,
+            // An answer longer than the pop-up has to be readable from the top.
+            KeyCode::Up => {
+                self.scroll_back = self.scroll_back.saturating_add(1);
+                Outcome::Consumed
+            }
+            KeyCode::Down => {
+                self.scroll_back = self.scroll_back.saturating_sub(1);
+                Outcome::Consumed
+            }
+            KeyCode::PageUp => {
+                self.scroll_back = self.scroll_back.saturating_add(10);
+                Outcome::Consumed
+            }
+            KeyCode::PageDown => {
+                self.scroll_back = self.scroll_back.saturating_sub(10);
+                Outcome::Consumed
+            }
             KeyCode::Backspace => {
                 self.input.pop();
                 Outcome::Consumed
@@ -838,12 +872,192 @@ impl AsideChat {
                 }
                 self.input.clear();
                 self.begin(text.clone());
+                self.scroll_back = 0;
                 Outcome::ActionKeepOpen(UiAction::AsideAsk { text })
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.input.push(c);
                 Outcome::Consumed
             }
+            _ => Outcome::Consumed,
+        }
+    }
+}
+
+// -------------------------------------------------------------- plan review
+
+/// The four answers the operator can give a plan, in the order shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanChoice {
+    Approve,
+    ApproveWithNote,
+    RequestChanges,
+    Decline,
+}
+
+impl PlanChoice {
+    pub const ALL: [PlanChoice; 4] = [
+        PlanChoice::Approve,
+        PlanChoice::ApproveWithNote,
+        PlanChoice::RequestChanges,
+        PlanChoice::Decline,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlanChoice::Approve => "Approve",
+            PlanChoice::ApproveWithNote => "Approve with note",
+            PlanChoice::RequestChanges => "Request changes",
+            PlanChoice::Decline => "Decline",
+        }
+    }
+
+    /// Whether picking this needs the operator to write something first.
+    fn needs_text(self) -> bool {
+        matches!(
+            self,
+            PlanChoice::ApproveWithNote | PlanChoice::RequestChanges
+        )
+    }
+
+    pub fn prompt(self) -> &'static str {
+        match self {
+            PlanChoice::ApproveWithNote => "note carried into execution:",
+            PlanChoice::RequestChanges => "what should change:",
+            _ => "",
+        }
+    }
+}
+
+/// The plan-authorization pop-up.
+///
+/// A plan review is not a permission check — it is an editorial judgement about
+/// proposed work — so it is its own surface with its own answers rather than
+/// the generic tool-approval modal, which could only say yes or no to a plan it
+/// never showed.
+pub struct PlanReview {
+    pub request: nexus_agent::PlanReviewRequest,
+    pub selected: usize,
+    /// Set while the operator is writing a note or a change request.
+    pub editor: Option<(PlanChoice, String)>,
+    /// Steps scrolled back from the top of the list.
+    pub scroll: usize,
+    /// A decision has been sent. Guarantees one answer per review however many
+    /// times Enter is pressed before the overlay closes.
+    pub submitted: bool,
+}
+
+impl PlanReview {
+    pub fn new(request: nexus_agent::PlanReviewRequest) -> Self {
+        Self {
+            request,
+            selected: 0,
+            editor: None,
+            scroll: 0,
+            submitted: false,
+        }
+    }
+
+    pub fn choice(&self) -> PlanChoice {
+        PlanChoice::ALL[self.selected.min(PlanChoice::ALL.len() - 1)]
+    }
+
+    /// Build the action for a choice, or open the editor it needs first.
+    fn activate(&mut self, choice: PlanChoice) -> Outcome {
+        if self.submitted {
+            return Outcome::Consumed;
+        }
+        if choice.needs_text() {
+            self.selected = PlanChoice::ALL
+                .iter()
+                .position(|c| *c == choice)
+                .unwrap_or(0);
+            self.editor = Some((choice, String::new()));
+            return Outcome::Consumed;
+        }
+        self.submit(match choice {
+            PlanChoice::Decline => nexus_agent::PlanDecision::Decline,
+            _ => nexus_agent::PlanDecision::Approve,
+        })
+    }
+
+    fn submit(&mut self, decision: nexus_agent::PlanDecision) -> Outcome {
+        self.submitted = true;
+        Outcome::Action(UiAction::ResolvePlan {
+            plan_id: self.request.plan_id.clone(),
+            version: self.request.version,
+            decision,
+        })
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
+        // The editor owns every key while open, so nothing typed into a note
+        // reaches the option list or the composer underneath.
+        if let Some((choice, text)) = self.editor.as_mut() {
+            let choice = *choice;
+            return match key.code {
+                KeyCode::Esc => {
+                    self.editor = None;
+                    Outcome::Consumed
+                }
+                KeyCode::Backspace => {
+                    text.pop();
+                    Outcome::Consumed
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    text.clear();
+                    Outcome::Consumed
+                }
+                KeyCode::Enter => {
+                    let written = text.trim().to_string();
+                    // An empty note is not a note; a change request with no
+                    // content tells the planner nothing.
+                    if written.is_empty() {
+                        return Outcome::Consumed;
+                    }
+                    self.editor = None;
+                    self.submit(match choice {
+                        PlanChoice::ApproveWithNote => {
+                            nexus_agent::PlanDecision::ApproveWithNote(written)
+                        }
+                        _ => nexus_agent::PlanDecision::RequestChanges(written),
+                    })
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    text.push(c);
+                    Outcome::Consumed
+                }
+                _ => Outcome::Consumed,
+            };
+        }
+        match key.code {
+            // Dismissing leaves the plan pending rather than deciding it: the
+            // pinned panel keeps saying so, and the review reopens from there.
+            KeyCode::Esc => Outcome::Close,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = self.selected.saturating_sub(1);
+                Outcome::Consumed
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected = (self.selected + 1).min(PlanChoice::ALL.len() - 1);
+                Outcome::Consumed
+            }
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(5);
+                Outcome::Consumed
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_add(5);
+                Outcome::Consumed
+            }
+            KeyCode::Enter => {
+                let choice = self.choice();
+                self.activate(choice)
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => self.activate(PlanChoice::Approve),
+            KeyCode::Char('n') | KeyCode::Char('N') => self.activate(PlanChoice::ApproveWithNote),
+            KeyCode::Char('r') | KeyCode::Char('R') => self.activate(PlanChoice::RequestChanges),
+            KeyCode::Char('d') | KeyCode::Char('D') => self.activate(PlanChoice::Decline),
             _ => Outcome::Consumed,
         }
     }
@@ -1692,6 +1906,7 @@ pub enum Overlay {
     Summary(SummaryPreview),
     ActivityDetail(Box<ActivityDetail>),
     Aside(AsideChat),
+    PlanReview(Box<PlanReview>),
 }
 
 impl Overlay {
@@ -1707,6 +1922,7 @@ impl Overlay {
             Overlay::Summary(s) => s.handle_key(key),
             Overlay::ActivityDetail(d) => d.handle_key(key),
             Overlay::Aside(a) => a.handle_key(key),
+            Overlay::PlanReview(p) => p.handle_key(key),
         }
     }
 }
@@ -2225,5 +2441,181 @@ mod tests {
             discriminant_name(&aside.handle_key(key(KeyCode::Esc))),
             "Close"
         );
+    }
+
+    #[test]
+    fn aside_scrolls_back_over_a_long_answer_and_follows_new_ones() {
+        let mut aside = AsideChat::new();
+        aside.begin("what changed?".into());
+        aside.resolve("a very long answer".repeat(40));
+        assert_eq!(aside.scroll_back(), 0, "a new answer is followed");
+
+        aside.handle_key(key(KeyCode::Up));
+        aside.handle_key(key(KeyCode::Up));
+        assert_eq!(aside.scroll_back(), 2);
+        aside.handle_key(key(KeyCode::PageUp));
+        assert_eq!(aside.scroll_back(), 12);
+        aside.handle_key(key(KeyCode::Down));
+        assert_eq!(aside.scroll_back(), 11);
+        aside.handle_key(key(KeyCode::PageDown));
+        assert_eq!(aside.scroll_back(), 1);
+        // Scrolling past the newest line stops at it rather than going negative.
+        aside.handle_key(key(KeyCode::PageDown));
+        assert_eq!(aside.scroll_back(), 0);
+
+        // Asking again jumps back to the bottom, where the reply will appear.
+        aside.handle_key(key(KeyCode::Up));
+        for c in "next".chars() {
+            aside.handle_key(key(KeyCode::Char(c)));
+        }
+        aside.handle_key(key(KeyCode::Enter));
+        assert_eq!(aside.scroll_back(), 0);
+    }
+    fn review_request(version: u32) -> nexus_agent::PlanReviewRequest {
+        nexus_agent::PlanReviewRequest {
+            plan_id: "plan_1".into(),
+            version,
+            run_id: "run_1".into(),
+            session_id: "sess_1".into(),
+            agent: "planner".into(),
+            objective: "make the thing work".into(),
+            stages: vec![nexus_agent::PlanReviewStage {
+                sequence: 1,
+                title: "Implement the popup".into(),
+                detail: "add the overlay and route its keys".into(),
+                files: vec!["crates/nexus-tui/src/views.rs".into()],
+            }],
+            sandbox_active: true,
+        }
+    }
+
+    #[test]
+    fn plan_review_shortcuts_reach_every_decision() {
+        // `a` and `d` answer outright; `n` and `r` need words first.
+        let mut review = PlanReview::new(review_request(1));
+        match review.handle_key(key(KeyCode::Char('a'))) {
+            Outcome::Action(UiAction::ResolvePlan { decision, .. }) => {
+                assert_eq!(decision, nexus_agent::PlanDecision::Approve)
+            }
+            other => panic!("expected approve, got {}", discriminant_name(&other)),
+        }
+
+        let mut review = PlanReview::new(review_request(1));
+        match review.handle_key(key(KeyCode::Char('d'))) {
+            Outcome::Action(UiAction::ResolvePlan { decision, .. }) => {
+                assert_eq!(decision, nexus_agent::PlanDecision::Decline)
+            }
+            other => panic!("expected decline, got {}", discriminant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn plan_review_selection_moves_and_enter_activates_it() {
+        let mut review = PlanReview::new(review_request(1));
+        assert_eq!(review.choice(), PlanChoice::Approve);
+        review.handle_key(key(KeyCode::Down));
+        review.handle_key(key(KeyCode::Down));
+        review.handle_key(key(KeyCode::Down));
+        // Selection stops at the last option rather than wrapping past it.
+        review.handle_key(key(KeyCode::Down));
+        assert_eq!(review.choice(), PlanChoice::Decline);
+        review.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(review.choice(), PlanChoice::RequestChanges);
+        // Enter on a text option opens the editor instead of deciding.
+        assert_eq!(
+            discriminant_name(&review.handle_key(key(KeyCode::Enter))),
+            "Consumed"
+        );
+        assert!(review.editor.is_some());
+    }
+
+    #[test]
+    fn a_note_is_typed_into_the_popup_and_travels_with_the_approval() {
+        let mut review = PlanReview::new(review_request(1));
+        review.handle_key(key(KeyCode::Char('n')));
+        assert!(review.editor.is_some(), "`n` opens the note editor");
+        // An empty note submits nothing.
+        assert_eq!(
+            discriminant_name(&review.handle_key(key(KeyCode::Enter))),
+            "Consumed"
+        );
+        assert!(review.editor.is_some());
+        for c in "keep the bindings".chars() {
+            assert_eq!(
+                discriminant_name(&review.handle_key(key(KeyCode::Char(c)))),
+                "Consumed",
+                "every keystroke stays in the popup",
+            );
+        }
+        match review.handle_key(key(KeyCode::Enter)) {
+            Outcome::Action(UiAction::ResolvePlan { decision, .. }) => assert_eq!(
+                decision,
+                nexus_agent::PlanDecision::ApproveWithNote("keep the bindings".into())
+            ),
+            other => panic!(
+                "expected an annotated approval, got {}",
+                discriminant_name(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn a_change_request_carries_the_operators_words_back() {
+        let mut review = PlanReview::new(review_request(2));
+        review.handle_key(key(KeyCode::Char('r')));
+        for c in "name the files".chars() {
+            review.handle_key(key(KeyCode::Char(c)));
+        }
+        // Esc backs out of the editor without answering.
+        review.handle_key(key(KeyCode::Esc));
+        assert!(review.editor.is_none());
+        assert!(!review.submitted, "backing out is not a decision");
+
+        review.handle_key(key(KeyCode::Char('r')));
+        for c in "name the files".chars() {
+            review.handle_key(key(KeyCode::Char(c)));
+        }
+        match review.handle_key(key(KeyCode::Enter)) {
+            Outcome::Action(UiAction::ResolvePlan {
+                decision, version, ..
+            }) => {
+                assert_eq!(
+                    decision,
+                    nexus_agent::PlanDecision::RequestChanges("name the files".into())
+                );
+                assert_eq!(version, 2, "the answer names the revision it was about");
+            }
+            other => panic!(
+                "expected a change request, got {}",
+                discriminant_name(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn a_second_confirmation_cannot_decide_twice() {
+        let mut review = PlanReview::new(review_request(1));
+        assert!(matches!(
+            review.handle_key(key(KeyCode::Enter)),
+            Outcome::Action(_)
+        ));
+        // Repeated Enter must not produce a second action; execution starts once.
+        for _ in 0..3 {
+            assert_eq!(
+                discriminant_name(&review.handle_key(key(KeyCode::Enter))),
+                "Consumed",
+            );
+        }
+    }
+
+    #[test]
+    fn esc_leaves_the_plan_pending_rather_than_deciding_it() {
+        let mut review = PlanReview::new(review_request(1));
+        assert_eq!(
+            discriminant_name(&review.handle_key(key(KeyCode::Esc))),
+            "Close",
+            "dismissing closes the popup without answering",
+        );
+        assert!(!review.submitted);
     }
 }

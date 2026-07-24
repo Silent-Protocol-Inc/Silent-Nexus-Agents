@@ -10,6 +10,7 @@ description = "Typed, policy-aware tool system: filesystem, repo, terminal, web,
 
 [dependencies]
 nexus-core.workspace = true
+nexus-memory.workspace = true
 nexus-policy.workspace = true
 nexus-sandbox.workspace = true
 tokio.workspace = true

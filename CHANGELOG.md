@@ -1,5 +1,107 @@
 # Changelog
 
+## [2.10.0] — 2026-07-24
+
+### Added
+
+- **A real plan review.** `/plan` now opens a **PLAN AUTHORIZATION** pop-up
+  showing the plan itself and four answers: *Approve*, *Approve with note*,
+  *Request changes*, *Decline*. Previously the decision was routed through the
+  generic tool-permission modal, which showed `tool: plan.approve` and no plan —
+  you could only approve blind or deny, and denying left the run wedged at a
+  blocked "Plan approval" stage. Keys: `↑↓`/`j`/`k` select, `Enter` confirm, `A`
+  approve, `N` note, `R` changes, `D` decline, `PgUp`/`PgDn` scroll, `Esc` to
+  decide later. *Approve with note* carries your instruction into the execution
+  that follows; *Request changes* sends the plan back to be revised and reopens
+  the review for the new revision only.
+- **A pinned execution tracker** above the composer. While a turn runs, the
+  step list stays put — `AGENT planner · EXECUTION 2/5` with `◇` pending,
+  `◆` active, `✓` complete, `×` failed, `!` blocked, `–` skipped, `?` awaiting
+  approval, each paired with a word where there is room. It updates in place
+  rather than appending, is unaffected by scrolling the timeline, shows a window
+  around the active step for long plans, and clears when the turn ends.
+- **`memory.add`** — the tool an agent needs to actually record what it found.
+  2.9.0 granted the memory category to every role, but no tool carried that
+  category, so the grant resolved to an empty set and a reviewer told to note
+  its findings still answered "no memory tool is available in this session".
+  Recording is offered to every role, including read-only ones: it appends to a
+  separate, budgeted (`limits.max_memory_writes`), secret-refusing store rather
+  than mutating the workspace. Agent-authored entries are candidates — visible
+  in `/memory` at once, retrieved into later turns after `snx memory approve`.
+- **Prompt caching, and the numbers to see it.** Every turn re-sends the whole
+  conversation, and until now every token of that prefix was billed at full rate
+  on every call. Anthropic requests carry two `cache_control` breakpoints — one
+  after the system prompt, which covers the tool schemas rendered before it, and
+  one at the end of the conversation, so this turn's write is the next turn's
+  read. Codex and OpenAI requests carry a `prompt_cache_key` derived from the
+  conversation's opening turn, keeping repeat calls on the machine holding the
+  warm copy. Usage is now reported as three numbers rather than one — uncached
+  input, cache reads, cache writes — and `snx run` prints a `cache` line when
+  the provider reports one. A measured three-call turn on `gpt-5.6-luna` read
+  3584 of its 5881 input tokens from cache.
+  - Per-model `prompt_cache = false` sends exactly what earlier versions sent;
+    `prompt_cache_ttl = "1h"` buys a longer window at a higher write cost
+    (Anthropic only). Both default to on/5m for metered providers.
+  - Ollama and llama.cpp report nothing and are left alone: they have no caching
+    API, and `keep_alive` already governs their reuse. `claude-plan` reports
+    cache usage but cannot set it — the `claude` CLI owns its own request body.
+  - Context usage and the aggregate token budget are unchanged: both read the
+    full prompt size, cached or not. Caching changes what a turn costs, not when
+    one gets stopped.
+- The `/btw` aside pop-up scrolls (`↑`/`↓`, `PgUp`/`PgDn`). An answer longer
+  than the pop-up was unreadable: there were no scroll keys, and the
+  follow-the-bottom offset was computed from unwrapped lines, so it stopped
+  short and cut off the newest text.
+
+### Changed
+
+- **Ordinary prompts are no longer plan-gated.** A large enough request was
+  classified as "planned" work and stopped at an approval for a plan you never
+  asked to review. Only an explicit `/plan` is gated now; an ordinary turn plans
+  its steps, shows them in the tracker, and starts. Every individual action is
+  still policy-checked, sandboxed, approval-gated and audited exactly as before.
+- Plan review text names whichever agent is actually running — planner,
+  reviewer, orchestrator, a configured custom agent — and falls back to a
+  neutral "Agent" rather than assuming one product name.
+- An exhausted memory-write budget refuses the write instead of ending the run.
+  Hitting `limits.max_memory_writes_per_turn` used to stop the turn outright, so
+  an agent that tried to note one thing too many threw away a finished answer.
+  The refusal is reported to the model, which finishes and says what it could
+  not record; a model that keeps retrying still terminates through the ordinary
+  repeated-error path. (Reachable for the first time now that `memory.add`
+  exists.)
+- `snx run --yes` tells the model its escalations are pre-authorized. The flag
+  installed an auto-approving handler but left the prompt reading
+  `destructive=ask`, so the model stopped and asked a human who — in a
+  non-interactive run — was not there to answer. Every action is still
+  policy-checked, sandboxed, and audited; only the standing authorization is now
+  stated.
+
+### Fixed
+
+- `snx config reset <path>` no longer reports success for a path it did not
+  drop. A key inside a real section but misspelled (`limits.max_memory_writes`
+  for `…_per_turn`) answered "configuration inherited" while the override stayed
+  in force. It now says what it did, and names the scope it looked in.
+- `snx sandbox test` and `snx test` print the exit code, not `Some(0)`. A
+  process killed by a signal now reads as such instead of `None`.
+- `snx memory approve <id>` said "approved" without approving. It flipped only
+  the legacy row and left the canonical record a candidate, so `/memory` and
+  `snx memory list` kept reporting the memory as unapproved no matter how often
+  it was approved. It now goes through the same path as the TUI, which promotes
+  both.
+- A custom agent that narrows its `tool_categories` keeps memory. The 2.9.0
+  change covered built-in roles only, so a narrowed definition silently lost the
+  one category no role is meant to be without.
+- A `/btw` reply is delivered to the aside pop-up wherever it sits in the
+  overlay stack. A command already in flight when the pop-up opened could land a
+  report on top of it; the reply was then dropped and the pop-up wedged
+  "thinking", refusing every later question.
+- Re-selecting a configured Codex model no longer resets it when the plan cache
+  is cold or no longer lists that model. The 2.9.0 effort re-pick routed the
+  selection through the save path, which rewrote the entry with no effort and
+  default limits; an already-configured entry is now pinned as it stands.
+
 ## [2.9.0] — 2026-07-24
 
 ### Added

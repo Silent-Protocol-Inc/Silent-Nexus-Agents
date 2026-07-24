@@ -155,6 +155,20 @@ pub async fn run(app: &App, args: RunArgs, json: bool) -> Result<()> {
                     "tokens",
                     &format!("{} in / {} out", o.input_tokens, o.output_tokens),
                 );
+                // Only when the provider actually reported a cache. A line
+                // reading `0 read` on Ollama would describe a miss rather than
+                // an API that has no cache to report on.
+                if o.cache.read > 0 || o.cache.write > 0 {
+                    ui.field(
+                        "cache",
+                        &format!(
+                            "{} read / {} written ({:.0}% of input)",
+                            o.cache.read,
+                            o.cache.write,
+                            o.cache.hit_ratio(o.input_tokens) * 100.0
+                        ),
+                    );
+                }
             }
             Ok(())
         }
@@ -167,6 +181,30 @@ fn print_event(ui: &Ui, ev: &LoopEvent) {
         // Presentation-only, and the non-interactive surface has no live
         // component to gate — nothing to print.
         LoopEvent::ThinkingResolved { .. } => {}
+        // The pinned tracker's feed. A non-interactive run prints stage
+        // transitions as they happen instead, so echoing the whole list here
+        // would say the same thing twice.
+        LoopEvent::WorkPlanned { .. } => {}
+        LoopEvent::PlanReviewRequested { request } => {
+            ui.warn(&format!(
+                "{} submitted plan v{} ({} step(s)) for approval",
+                request.agent,
+                request.version,
+                request.stages.len()
+            ));
+            for stage in &request.stages {
+                println!("  {}. {}", stage.sequence, ui.safe(&stage.title));
+            }
+        }
+        LoopEvent::PlanReviewResolved { decision, .. } => {
+            let label = match decision {
+                nexus_agent::PlanDecision::Approve => "plan approved",
+                nexus_agent::PlanDecision::ApproveWithNote(_) => "plan approved with a note",
+                nexus_agent::PlanDecision::RequestChanges(_) => "changes requested",
+                nexus_agent::PlanDecision::Decline => "plan declined",
+            };
+            ui.ok(label);
+        }
         LoopEvent::ContextCompacted {
             before_tokens,
             after_tokens,
@@ -988,8 +1026,11 @@ pub async fn memory(app: &App, cmd: MemoryCmd, json: bool) -> Result<()> {
             ui.render_report(&services::memory_report(app, Some(&query))?);
         }
         MemoryCmd::Approve { id } => {
-            mem.approve(&id)?;
-            ui.ok("approved");
+            // Promote in both stores. Flipping only the legacy row leaves the
+            // canonical record a candidate, so `/memory` and `snx memory list`
+            // keep reporting the memory as unapproved however often it is
+            // approved. The harness path updates the pair.
+            ui.render_report(&services::memory_approve(app, &id)?);
         }
         MemoryCmd::Forget { id, yes } => {
             let action = nexus_app::ConfirmedAction::ForgetMemory(id);
