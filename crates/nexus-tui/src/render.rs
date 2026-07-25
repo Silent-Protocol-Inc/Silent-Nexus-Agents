@@ -2637,7 +2637,12 @@ fn draw_plan_review(f: &mut Frame, area: Rect, p: &PlanReview, t: &Theme) {
     if used(&header) + brand::visible_width(&revision) <= width {
         header.push(Span::styled(revision, t.muted()));
     }
-    let steps = format!(" · {} steps", p.request.stages.len());
+    let step_count = p.request.stages.len();
+    let steps = format!(
+        " · {} step{}",
+        step_count,
+        if step_count == 1 { "" } else { "s" }
+    );
     if used(&header) + brand::visible_width(&steps) <= width {
         header.push(Span::styled(steps, t.muted()));
     }

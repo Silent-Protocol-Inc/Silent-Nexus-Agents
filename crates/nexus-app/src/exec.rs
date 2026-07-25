@@ -748,6 +748,36 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             app.update_ui_state(|s| s.plan_mode = false)?;
             Effect::SetPlanMode(false)
         }
+        // `/plan <free-text>` is not one of the stored-plan subcommands — the
+        // operator typed the objective they want planned. Enter plan mode (the
+        // same state bare `/plan` produces; its toast tells them to describe the
+        // change) rather than falling into the session check below, which
+        // answered a typed objective with "no active session — send a message
+        // first" — an error the operator had just given the message it asked for
+        // and could not act on.
+        CommandId::Plan
+            if ctx.interactive
+                && matches!(
+                    args.as_slice(),
+                    [first, ..]
+                        if !matches!(
+                            *first,
+                            "create"
+                                | "edit"
+                                | "replan"
+                                | "approve"
+                                | "run"
+                                | "pause"
+                                | "resume"
+                                | "verify"
+                                | "history"
+                                | "export"
+                        )
+                ) =>
+        {
+            app.update_ui_state(|s| s.plan_mode = true)?;
+            Effect::SetPlanMode(true)
+        }
         CommandId::Plan => {
             let session_id = ctx.session_id.as_deref().ok_or_else(|| {
                 NexusError::NotFound("no active session — send a message first".into())

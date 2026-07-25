@@ -670,10 +670,12 @@ fn apply_turn_done(
                 ""
             };
             st.activity(format!(
-                "{}{progress}{resumable} · {} steps · {} tool calls",
+                "{}{progress}{resumable} · {} step{} · {} tool call{}",
                 run.label(),
                 outcome.steps,
-                outcome.tool_calls
+                if outcome.steps == 1 { "" } else { "s" },
+                outcome.tool_calls,
+                if outcome.tool_calls == 1 { "" } else { "s" },
             ));
         }
         Err(error) => {

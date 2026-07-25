@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.10.1] — 2026-07-25
+
+### Fixed
+
+- **`/plan <objective>` no longer answers with a session error.** Typing
+  `/plan build a login form` before sending anything replied
+  *"no active session — send a message first"* — the operator had just given the
+  objective the error told them to give. Free text after `/plan` (anything that
+  is not a stored-plan subcommand) now enters plan mode, exactly as bare `/plan`
+  does, and its toast explains the next step. The `create`, `edit`, `approve`,
+  `run`, `pause`, `resume`, `verify`, `history`, and `export` subcommands still
+  act on a session's stored plan and still require one.
+- **`snx config budgets` shows the weighted-spend guard.** The 2.10.0
+  `limits.local_runaway_guard`, `limits.context_compaction`, and `limits.retry`
+  settings were readable only in `config show`, though the budgets view is where
+  an operator looks to tune spend — and its own footer points at
+  `/config set limits.<field>`. They now appear under a *runaway guard &
+  compaction* heading.
+- **`snx config set tui.<field>` works.** The settable-path allowlist omitted
+  `tui`, so `snx config set tui.activity.tool_icons "emoji"` was refused as an
+  unsafe path even though the key is documented and its `limits.*` siblings are
+  CLI-settable. `tui` holds only display preferences and no secrets; invalid
+  values are still rejected by validation (`tool_icons` must be
+  `geometric|emoji|ascii`).
+- **"1 step", not "1 steps".** The plan panel header and the turn-completion
+  line pluralized unconditionally.
+
 ## [2.10.0] — 2026-07-24
 
 ### Added

@@ -3040,6 +3040,56 @@ pub fn limits_report(app: &App) -> Report {
         )
         .field("subagents per run", limits.max_subagents_per_run.to_string())
         .field("recursion depth", limits.max_recursion_depth.to_string())
+        .header("runaway guard & compaction")
+        .field(
+            "runaway guard",
+            if limits.local_runaway_guard.enabled {
+                "on"
+            } else {
+                "off"
+            },
+        )
+        .field(
+            "weighted-spend ceiling",
+            match limits.local_runaway_guard.max_weighted_tokens {
+                Some(ceiling) => ceiling.to_string(),
+                None => format!("inherits tokens per turn ({})", limits.max_tokens_per_turn),
+            },
+        )
+        .field(
+            "no-progress cycles",
+            limits
+                .local_runaway_guard
+                .max_no_progress_cycles
+                .to_string(),
+        )
+        .field(
+            "identical-call repeats",
+            limits
+                .local_runaway_guard
+                .max_identical_tool_repeats
+                .to_string(),
+        )
+        .field(
+            "context compaction",
+            if limits.context_compaction.enabled {
+                "on"
+            } else {
+                "off"
+            },
+        )
+        .field(
+            "compaction trigger",
+            format!(
+                "{:.0}% of window",
+                limits.context_compaction.trigger_ratio * 100.0
+            ),
+        )
+        .field("retry attempts", limits.retry.max_attempts.to_string())
+        .field(
+            "retry max wait (s)",
+            limits.retry.max_wait_seconds.to_string(),
+        )
         .header("goals")
         .field("goal steps", limits.goal_step_budget.to_string())
         .field(
@@ -4151,6 +4201,7 @@ fn safe_config_path(path: &str) -> Result<Vec<&str>> {
     let parts: Vec<_> = path.split('.').filter(|part| !part.is_empty()).collect();
     let allowed = [
         "general", "routing", "models", "policy", "sandbox", "web", "memory", "limits", "mcp",
+        "tui",
     ];
     if parts.len() < 2 || !allowed.contains(&parts[0]) {
         return Err(NexusError::Config(
