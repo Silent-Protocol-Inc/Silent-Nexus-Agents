@@ -998,42 +998,45 @@ fn handle_key(
     }
 
     if st.focus == Focus::Timeline {
+        // A left click (or scroll) moves focus onto the timeline, so a plain
+        // key press here is almost always the operator starting to type. The
+        // old vi-style shortcuts consumed `j`/`k`/`d`/`n`/`N`/`y` while every
+        // other letter fell through and typed into the composer — so a word
+        // like "plan" quietly lost its "n" and the composer looked broken.
+        // Any printable key now returns focus to the composer and inserts the
+        // character; arrows, Enter, and Esc still drive the timeline.
+        let searching = st.search_query.is_some();
         match key.code {
-            KeyCode::Char('k') | KeyCode::Up => {
+            // `n`/`N` stay live as "jump to next/previous match" while a search
+            // is active — a modal context where the operator is navigating
+            // results, not composing — and are ordinary characters otherwise.
+            KeyCode::Char('n') if searching => {
+                select_search_match(st, false, app, session.as_ref());
+                return;
+            }
+            KeyCode::Char('N') if searching => {
+                select_search_match(st, true, app, session.as_ref());
+                return;
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                st.focus = Focus::Input;
+                st.input.insert(c);
+                return;
+            }
+            KeyCode::Up => {
                 select_previous_event(st);
                 return;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 select_next_event(st);
                 return;
             }
             KeyCode::Enter => {
                 activate_selected_event(st, app);
-                return;
-            }
-            // `d` cycles verbosity without leaving the timeline. Safe here
-            // because typing happens in Focus::Input, not Focus::Timeline.
-            KeyCode::Char('d') => {
-                run_command(st, "view cycle", app, session, ui_tx);
-                return;
-            }
-            KeyCode::Char('n') => {
-                select_search_match(st, false, app, session.as_ref());
-                return;
-            }
-            KeyCode::Char('N') => {
-                select_search_match(st, true, app, session.as_ref());
-                return;
-            }
-            KeyCode::Char('y') => {
-                if let Some(event) = st.selected_timeline_event() {
-                    let text = serde_json::to_string_pretty(event)
-                        .unwrap_or_else(|_| event.summary.clone());
-                    match nexus_app::clipboard::copy(&text) {
-                        Ok(method) => st.toast(format!("event copied via {method}"), Sev::Ok),
-                        Err(error) => st.toast(format!("copy failed: {error}"), Sev::Err),
-                    }
-                }
                 return;
             }
             KeyCode::Esc => {

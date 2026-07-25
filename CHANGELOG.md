@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.10.2] — 2026-07-25
+
+### Fixed
+
+- **Typing on the timeline no longer eats letters.** A left click (or scroll)
+  moves keyboard focus onto the timeline, where `j`/`k`/`d`/`n`/`N`/`y` were
+  vi-style shortcuts — while every *other* letter fell through and typed into
+  the composer. So after an accidental click, a word like "plan" silently lost
+  its "n" and the input looked broken for one specific key. Any printable key
+  pressed on the timeline now returns focus to the composer and inserts the
+  character; the timeline is driven with the arrow keys, `Enter`, and `Esc`.
+  `n`/`N` still jump between search matches while a search is active — a modal
+  context where you are navigating results, not composing.
+
 ## [2.10.1] — 2026-07-25
 
 ### Fixed
