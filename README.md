@@ -90,6 +90,13 @@ malicious model still cannot escape the boundary.
   connectors, and proposed skills can shape behavior, but immutable safety,
   project policy, sandbox restrictions, and provider-required instructions always
   take precedence.
+- **Flagship agent: `nexus`, a Recursive Self-Improvement (RSI) generalist.** The
+  default agent on a fresh install plans, implements, verifies, and delegates, and
+  it improves over time: finished turns are mined for reusable workflows, repeated
+  failures, and stated preferences, each recorded as an *approval-gated* proposal
+  you review with `snx profile`. Nothing is ever applied without your approval.
+  Tune or disable the analysis under `[self_improvement]`
+  (`enabled = false` turns it off); `snx status` shows any pending proposals.
 - **Web content is data, never instructions.** Fetched pages are wrapped as
   untrusted input; SSRF, private-range, cloud-metadata, and DNS-rebinding
   protections are enforced in the harness.

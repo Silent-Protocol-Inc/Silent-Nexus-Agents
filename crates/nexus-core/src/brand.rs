@@ -13,6 +13,11 @@ pub const MARK: &str = "NEXUS";
 pub const COMPACT_MARK: &str = "NEXUS";
 pub const CLI: &str = "snx";
 pub const ATTRIBUTION: &str = "by Silent Protocol";
+/// The default flagship agent shipped with NEXUS and its defining behavior.
+/// The product name stays `NEXUS`; this names the agent a fresh install runs.
+pub const FLAGSHIP_AGENT: &str = "nexus";
+pub const FLAGSHIP_MODE: &str = "Recursive Self-Improvement";
+pub const FLAGSHIP_MODE_SHORT: &str = "RSI";
 pub const WORDMARK: &str = "N  E  X  U  S";
 pub const TAGLINE: &str = "LOCAL INTELLIGENCE. CONTROLLED EXECUTION.";
 pub const TAGLINE_FIRST: &str = "LOCAL INTELLIGENCE.";

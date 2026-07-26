@@ -41,6 +41,35 @@ pub struct Config {
     pub tui: TuiConfig,
     /// Deliberation behavior (`[thinking]`).
     pub thinking: ThinkingConfig,
+    /// Recursive Self-Improvement behavior (`[self_improvement]`): the flagship
+    /// `nexus` agent's post-turn analysis that records approval-gated proposals.
+    pub self_improvement: SelfImprovementConfig,
+}
+
+/// Recursive Self-Improvement (RSI) — the flagship `nexus` agent's ability to
+/// learn from finished turns. After a turn completes, the harness mines it for
+/// reusable workflows, repeated tool failures, and stated preferences and
+/// records them as *approval-gated* proposals (reviewed with `snx profile`).
+/// Nothing is ever applied without explicit operator approval; disabling this
+/// only stops the analysis, it changes no safety guarantee.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct SelfImprovementConfig {
+    /// Analyze finished turns and record improvement proposals. On by default;
+    /// set `false` to disable post-turn analysis entirely.
+    pub enabled: bool,
+    /// Surface the pending-proposal count in `snx status` and TUI startup so the
+    /// operator knows there is a review queue waiting.
+    pub surface_pending: bool,
+}
+
+impl Default for SelfImprovementConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            surface_pending: true,
+        }
+    }
 }
 
 /// How much *optional* deliberation the harness performs, and whether the live

@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.11.0] — 2026-07-26
+
+### Added
+
+- **`nexus` is now a real flagship agent — the default Recursive
+  Self-Improvement (RSI) agent.** A fresh install already selected `nexus` as
+  its default agent, but the role was a hollow shell: same capabilities as the
+  orchestrator, yet no behavioral contract, so it told the model nothing about
+  how to work. `nexus` now carries a proper charter — a generalist that plans,
+  implements, verifies, and delegates, and that improves over time by letting
+  the harness record *approval-gated* self-improvement proposals. The charter
+  sits strictly below the immutable safety rules and cannot relax workspace
+  confinement, approval, or evidence requirements.
+- **Recursive Self-Improvement is a first-class, visible default.** The
+  post-turn analysis that mines finished turns for reusable workflows, repeated
+  failures, and stated preferences (recording each as an approval-gated proposal
+  reviewed with `snx profile`) has been running for releases, but silently and
+  with no way to turn it off. It now lives under a `[self_improvement]` config
+  block (`enabled`, `surface_pending`, both on by default), and `snx status` and
+  the TUI startup surface the pending-proposal count so the review queue is no
+  longer invisible.
+- **Flagship identity in branding.** `snx about` and `snx status` now show the
+  flagship agent line — `nexus · Recursive Self-Improvement (RSI)`. The product
+  name stays **NEXUS by Silent Protocol**; this names the agent, not a rebrand.
+
 ## [2.10.2] — 2026-07-25
 
 ### Fixed

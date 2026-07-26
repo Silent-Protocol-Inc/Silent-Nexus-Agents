@@ -785,6 +785,23 @@
       },
       "type": "object"
     },
+    "SelfImprovementConfig": {
+      "additionalProperties": false,
+      "description": "Recursive Self-Improvement (RSI) — the flagship `nexus` agent's ability to learn from finished turns. After a turn completes, the harness mines it for reusable workflows, repeated tool failures, and stated preferences and records them as *approval-gated* proposals (reviewed with `snx profile`). Nothing is ever applied without explicit operator approval; disabling this only stops the analysis, it changes no safety guarantee.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Analyze finished turns and record improvement proposals. On by default; set `false` to disable post-turn analysis entirely.",
+          "type": "boolean"
+        },
+        "surface_pending": {
+          "default": true,
+          "description": "Surface the pending-proposal count in `snx status` and TUI startup so the operator knows there is a review queue waiting.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "ThinkingConfig": {
       "additionalProperties": false,
       "description": "How much *optional* deliberation the harness performs, and whether the live activity component renders.\n\nThis block owns behavior only. Presentation of the activity component — preview line count, expand shortcut, animation, reduced motion — lives in [`ActivityConfig`] (`[tui.activity]`) and is deliberately not duplicated here, so there is exactly one source of truth per knob.\n\nNote that `[thinking].mode` and `[tui.activity].mode` are **different axes** and take different values. `[thinking].mode` is `off|on|auto` and controls deliberation; `[tui.activity].mode` is `default|detailed|debug` and controls timeline verbosity (`/view`). Changing one never changes the other.",
@@ -1073,6 +1090,18 @@
         "network": "off",
         "timeout_secs": 120
       }
+    },
+    "self_improvement": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SelfImprovementConfig"
+        }
+      ],
+      "default": {
+        "enabled": true,
+        "surface_pending": true
+      },
+      "description": "Recursive Self-Improvement behavior (`[self_improvement]`): the flagship `nexus` agent's post-turn analysis that records approval-gated proposals."
     },
     "thinking": {
       "allOf": [

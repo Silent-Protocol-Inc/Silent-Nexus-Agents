@@ -304,6 +304,18 @@ async fn event_loop(
     st.reduced_motion = st.reduced_motion || activity.reduced_motion;
     glyphs::configure(&activity.tool_icons);
     st.active_work = nexus_app::services::active_work_snapshot(&app, None, "idle");
+    // Surface any waiting self-improvement proposals once at startup so the
+    // operator knows the flagship RSI review queue is non-empty.
+    if app.config.self_improvement.surface_pending {
+        if let Ok(pending) = app.rsi().list(false) {
+            if !pending.is_empty() {
+                st.system(format!(
+                    "self-improvement :: {} pending proposal(s) — review with `snx profile`",
+                    pending.len()
+                ));
+            }
+        }
+    }
 
     // Channels.
     let (turn_tx, mut turn_rx) = mpsc::unbounded_channel::<TurnMessage>();

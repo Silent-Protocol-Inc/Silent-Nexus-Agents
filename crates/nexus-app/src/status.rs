@@ -22,6 +22,12 @@ pub struct StatusSnapshot {
     pub session: Option<SessionFacts>,
     pub goal: Option<GoalFacts>,
     pub agent: String,
+    /// The flagship agent identity (`nexus · Recursive Self-Improvement (RSI)`),
+    /// a fixed product fact independent of which agent is currently active.
+    pub flagship: String,
+    /// Pending self-improvement proposals awaiting review, or `None` when
+    /// surfacing is disabled (`[self_improvement].surface_pending = false`).
+    pub self_improvement_pending: Option<usize>,
     pub model: Option<ModelFacts>,
     pub sandbox_backend: String,
     pub sandbox_level: String,
@@ -146,6 +152,17 @@ pub async fn snapshot(app: &App, active: &ActiveContext, probe_health: bool) -> 
         session,
         goal,
         agent: app.active_agent(),
+        flagship: format!(
+            "{} · {} ({})",
+            nexus_core::brand::FLAGSHIP_AGENT,
+            nexus_core::brand::FLAGSHIP_MODE,
+            nexus_core::brand::FLAGSHIP_MODE_SHORT,
+        ),
+        self_improvement_pending: if app.config.self_improvement.surface_pending {
+            app.rsi().list(false).map(|p| p.len()).ok()
+        } else {
+            None
+        },
         model,
         sandbox_backend: isolation.backend.clone(),
         sandbox_level: isolation.level.clone(),
@@ -284,6 +301,15 @@ pub fn to_report(s: &StatusSnapshot) -> Report {
         None => r = r.field_sev("goal", "none", Sev::Dim),
     }
     r = r.field("agent", &s.agent);
+    r = r.field("flagship", &s.flagship);
+    if let Some(pending) = s.self_improvement_pending {
+        if pending > 0 {
+            r = r.field(
+                "self-improvement",
+                format!("{pending} pending proposal(s) — review with 'snx profile'"),
+            );
+        }
+    }
     match &s.model {
         Some(m) => {
             let pin = if m.pinned { " (pinned)" } else { "" };

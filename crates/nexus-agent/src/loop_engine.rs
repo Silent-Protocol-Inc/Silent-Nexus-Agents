@@ -2238,7 +2238,9 @@ impl AgentLoop {
                     self.emit(LoopEvent::Error(format!("goal budget: {e}")));
                 }
             }
-            if outcome.stopped_reason == "finished" {
+            if outcome.stopped_reason == "finished"
+                && self.runtime.tool_ctx.config.self_improvement.enabled
+            {
                 if let Err(error) =
                     nexus_memory::RsiStore::new(self.runtime.store.clone(), &session.workspace)
                         .after_completed_turn(session_id.as_str(), objective)
@@ -4987,6 +4989,19 @@ impl AgentLoop {
                 AuthorityLayer::ActivePersona,
                 label,
                 instructions,
+            ));
+        }
+
+        // The flagship agent's identity brief. It sits below core safety and
+        // policy (which are pinned above) and shapes conduct without granting
+        // authority; empty for every non-flagship role, so this is inert for
+        // them.
+        let charter = self.role.charter();
+        if !charter.is_empty() {
+            sections.push(ContextSection::pinned(
+                AuthorityLayer::SelectedAgent,
+                "flagship agent charter",
+                charter.to_string(),
             ));
         }
 
