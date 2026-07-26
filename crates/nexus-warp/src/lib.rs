@@ -11,14 +11,24 @@
 //! build/test/lint/schema gate). Replay, adversarial suites, independent
 //! evaluators, risk/promotion, shadow, canary, and rollback build on top.
 
+pub mod adversarial;
 pub mod deterministic;
 pub mod isolation;
+pub mod replay;
 pub mod requirements;
 
+pub use adversarial::{
+    builtin_catalog, AdversarialCategory, AdversarialReport, AdversarialScenario, AdversarialSuite,
+    Expectation, ScenarioOutcome, ScenarioRunner,
+};
 pub use deterministic::{
     Check, CheckKind, CheckOutcome, CheckRunner, DeterministicValidator, ProcessCheckRunner,
 };
 pub use isolation::{Isolate, IsolationProvider, OverlayIsolation, WorktreeIsolation};
+pub use replay::{
+    load_fixtures, MetricDelta, ReplayEngine, ReplayOutcome, ReplayReport, ReplayRunner,
+    TaskFixture,
+};
 pub use requirements::{CompiledRequirement, RequirementCompiler, RequirementSet};
 
 use serde::{Deserialize, Serialize};
