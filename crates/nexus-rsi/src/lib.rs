@@ -12,6 +12,7 @@
 pub mod events;
 pub mod memory;
 pub mod outcome;
+pub mod planner;
 
 pub use events::{event_type, severity};
 pub use memory::{MemoryCurator, VerificationState};
@@ -19,6 +20,7 @@ pub use outcome::{
     Dimension, EvidenceLink, EvidenceTier, OutcomeEvaluator, OutcomeRecord, OutcomeStore,
     QualityDimensions,
 };
+pub use planner::ImprovementPlanner;
 
 /// Stable, prefixed id for RSI records (mirrors the harness `stable_id` scheme).
 pub(crate) fn prefixed_id(prefix: &str) -> String {
