@@ -1889,10 +1889,12 @@ name = "nexus-rsi"
 version = "2.11.0"
 dependencies = [
  "nexus-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

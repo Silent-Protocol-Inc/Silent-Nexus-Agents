@@ -10,8 +10,20 @@
 //! observation is gated so a disabled or degraded RSI never affects normal use.
 
 pub mod events;
+pub mod memory;
+pub mod outcome;
 
 pub use events::{event_type, severity};
+pub use memory::{MemoryCurator, VerificationState};
+pub use outcome::{
+    Dimension, EvidenceLink, EvidenceTier, OutcomeEvaluator, OutcomeRecord, OutcomeStore,
+    QualityDimensions,
+};
+
+/// Stable, prefixed id for RSI records (mirrors the harness `stable_id` scheme).
+pub(crate) fn prefixed_id(prefix: &str) -> String {
+    format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
+}
 
 use nexus_core::harness::{HarnessEvent, HarnessRepository};
 use nexus_core::redact::Redactor;

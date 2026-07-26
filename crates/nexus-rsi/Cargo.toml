@@ -10,9 +10,11 @@ description = "Nexus RSI — governed self-improvement engine: observation, eval
 
 [dependencies]
 nexus-core.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
