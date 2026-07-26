@@ -13,6 +13,7 @@
 
 pub mod adversarial;
 pub mod deterministic;
+pub mod evaluators;
 pub mod isolation;
 pub mod replay;
 pub mod requirements;
@@ -23,6 +24,10 @@ pub use adversarial::{
 };
 pub use deterministic::{
     Check, CheckKind, CheckOutcome, CheckRunner, DeterministicValidator, ProcessCheckRunner,
+};
+pub use evaluators::{
+    Evaluator, EvaluatorInput, EvaluatorPool, EvaluatorRecommendation, EvaluatorRole,
+    EvaluatorVerdict,
 };
 pub use isolation::{Isolate, IsolationProvider, OverlayIsolation, WorktreeIsolation};
 pub use replay::{
