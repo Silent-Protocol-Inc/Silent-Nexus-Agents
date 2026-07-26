@@ -1652,6 +1652,7 @@ dependencies = [
  "nexus-models",
  "nexus-observability",
  "nexus-policy",
+ "nexus-rsi",
  "nexus-sandbox",
  "nexus-tools",
  "pretty_assertions",
@@ -1880,6 +1881,17 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-words",
+ "tracing",
+]
+
+[[package]]
+name = "nexus-rsi"
+version = "2.11.0"
+dependencies = [
+ "nexus-core",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tracing",
 ]
 

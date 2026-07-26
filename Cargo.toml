@@ -17,6 +17,7 @@ members = [
     "crates/nexus-index",
     "crates/nexus-policy",
     "crates/nexus-observability",
+    "crates/nexus-rsi",
 ]
 
 [workspace.package]
@@ -43,6 +44,7 @@ nexus-skills = { path = "crates/nexus-skills" }
 nexus-index = { path = "crates/nexus-index" }
 nexus-policy = { path = "crates/nexus-policy" }
 nexus-observability = { path = "crates/nexus-observability" }
+nexus-rsi = { path = "crates/nexus-rsi" }
 nexus-app = { path = "crates/nexus-app" }
 nexus-tui = { path = "crates/nexus-tui" }
 

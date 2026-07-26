@@ -1,0 +1,21 @@
+[package]
+name = "nexus-rsi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Nexus RSI — governed self-improvement engine: observation, evaluation, and improvement candidates"
+
+[dependencies]
+nexus-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

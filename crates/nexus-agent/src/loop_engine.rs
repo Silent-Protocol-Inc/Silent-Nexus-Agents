@@ -2238,6 +2238,35 @@ impl AgentLoop {
                     self.emit(LoopEvent::Error(format!("goal budget: {e}")));
                 }
             }
+            if self.runtime.tool_ctx.config.self_improvement.enabled {
+                // Level-0 observability: record the turn outcome as structured,
+                // redacted evidence. Observation must never break a turn, so any
+                // storage error is logged and swallowed.
+                let collector = nexus_rsi::ObservationCollector::new(
+                    HarnessRepository::new(self.runtime.store.clone()),
+                    self.runtime.redactor.clone(),
+                    true,
+                );
+                let ctx = nexus_rsi::ObservationContext {
+                    session_id: Some(session_id.as_str().to_string()),
+                    goal_id: session.current_goal.clone(),
+                    model: Some(session.model.clone()),
+                    ..Default::default()
+                };
+                let observation = if outcome.stopped_reason == "finished" {
+                    collector.task_completed(
+                        &ctx,
+                        objective,
+                        outcome.steps as u64,
+                        outcome.input_tokens.saturating_add(outcome.output_tokens) as u64,
+                    )
+                } else {
+                    collector.task_failed(&ctx, objective, &outcome.stopped_reason)
+                };
+                if let Err(error) = observation {
+                    tracing::warn!(%error, "post-turn RSI observation skipped");
+                }
+            }
             if outcome.stopped_reason == "finished"
                 && self.runtime.tool_ctx.config.self_improvement.enabled
             {

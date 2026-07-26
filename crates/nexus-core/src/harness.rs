@@ -14,7 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-pub const HARNESS_SCHEMA_VERSION: u32 = 1;
+pub const HARNESS_SCHEMA_VERSION: u32 = 2;
 
 fn stable_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
@@ -1605,28 +1605,160 @@ impl ImprovementCategory {
     }
 }
 
+/// The typed subject of an improvement. `plane()` separates **data-plane**
+/// targets (config/data the running harness can self-apply after WARP) from the
+/// **code-plane** `HarnessComponent` (Rust source — validated in a worktree but
+/// shipped only through a human-approved release, never a live hot-swap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImprovementTarget {
+    Memory,
+    Skill,
+    Prompt,
+    ContextRouter,
+    RetrievalPolicy,
+    ToolRouter,
+    PlannerPolicy,
+    AgentRole,
+    RetryPolicy,
+    ErrorRecovery,
+    TimelinePresentation,
+    TokenBudgetPolicy,
+    EvaluationPolicy,
+    /// Rust harness source. Conservative default for un-annotated legacy rows.
+    #[default]
+    HarnessComponent,
+}
+
+/// Whether an improvement changes data the running process can apply, or Rust
+/// source that requires a rebuild + human-approved release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImprovementPlane {
+    Data,
+    Code,
+}
+
+impl ImprovementTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Skill => "skill",
+            Self::Prompt => "prompt",
+            Self::ContextRouter => "context_router",
+            Self::RetrievalPolicy => "retrieval_policy",
+            Self::ToolRouter => "tool_router",
+            Self::PlannerPolicy => "planner_policy",
+            Self::AgentRole => "agent_role",
+            Self::RetryPolicy => "retry_policy",
+            Self::ErrorRecovery => "error_recovery",
+            Self::TimelinePresentation => "timeline_presentation",
+            Self::TokenBudgetPolicy => "token_budget_policy",
+            Self::EvaluationPolicy => "evaluation_policy",
+            Self::HarnessComponent => "harness_component",
+        }
+    }
+
+    /// Code-plane iff the target is Rust harness source; everything else is data.
+    pub fn plane(self) -> ImprovementPlane {
+        match self {
+            Self::HarnessComponent => ImprovementPlane::Code,
+            _ => ImprovementPlane::Data,
+        }
+    }
+}
+
+/// Governed risk tier. Higher tiers demand stricter gates; `Prohibited` is
+/// auto-rejected by WARP. Defaults to `High` so an un-annotated candidate is
+/// treated conservatively (human approval) rather than auto-promotable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskTier {
+    /// Tier 0 — observation only (telemetry, lessons, reports).
+    Observation,
+    /// Tier 1 — low risk; auto-promote only after all WARP gates pass.
+    Low,
+    /// Tier 2 — moderate; shadow required before promotion.
+    Moderate,
+    /// Tier 3 — high; explicit human approval required.
+    #[default]
+    High,
+    /// Tier 4 — prohibited autonomous change; WARP auto-rejects.
+    Prohibited,
+}
+
+impl RiskTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observation => "observation",
+            Self::Low => "low",
+            Self::Moderate => "moderate",
+            Self::High => "high",
+            Self::Prohibited => "prohibited",
+        }
+    }
+
+    /// Numeric tier 0–4.
+    pub fn level(self) -> u8 {
+        match self {
+            Self::Observation => 0,
+            Self::Low => 1,
+            Self::Moderate => 2,
+            Self::High => 3,
+            Self::Prohibited => 4,
+        }
+    }
+}
+
+/// A machine-checkable success criterion for a candidate. `hard_constraint`
+/// criteria are vetoes: WARP cannot average them away against soft gains.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SuccessMetric {
+    pub id: String,
+    pub description: String,
+    /// Measured baseline value, when known.
+    pub baseline: Option<f64>,
+    /// Target the candidate must reach (direction is described in `description`).
+    pub target: Option<f64>,
+    /// When true, a miss is a hard failure regardless of other gains.
+    pub hard_constraint: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImprovementStatus {
+    Observed,
     Draft,
     Proposed,
     Approved,
+    NeedsRevision,
     Rejected,
     Testing,
+    Validated,
+    Shadow,
+    Canary,
     Applied,
+    Promoted,
     RolledBack,
+    Deprecated,
 }
 
 impl ImprovementStatus {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Observed => "observed",
             Self::Draft => "draft",
             Self::Proposed => "proposed",
             Self::Approved => "approved",
+            Self::NeedsRevision => "needs_revision",
             Self::Rejected => "rejected",
             Self::Testing => "testing",
+            Self::Validated => "validated",
+            Self::Shadow => "shadow",
+            Self::Canary => "canary",
             Self::Applied => "applied",
+            Self::Promoted => "promoted",
             Self::RolledBack => "rolled_back",
+            Self::Deprecated => "deprecated",
         }
     }
 }
@@ -1646,6 +1778,29 @@ pub struct ImprovementProposal {
     pub status: ImprovementStatus,
     pub approval_required: bool,
     pub measurements: BTreeMap<String, Value>,
+    /// Typed subject of the change. Defaults conservatively (`HarnessComponent`)
+    /// for rows written before schema v2.
+    #[serde(default)]
+    pub target: ImprovementTarget,
+    /// Where the change applies (workspace/project/session/…).
+    #[serde(default)]
+    pub scope: MemoryScope,
+    /// Governed risk tier. Defaults to `High` (human approval) when absent.
+    #[serde(default)]
+    pub risk_tier: RiskTier,
+    #[serde(default)]
+    pub root_cause_hypothesis: String,
+    #[serde(default)]
+    pub success_metrics: Vec<SuccessMetric>,
+    #[serde(default)]
+    pub affected_components: Vec<String>,
+    #[serde(default)]
+    pub baseline_version: String,
+    #[serde(default)]
+    pub candidate_version: String,
+    /// Role/agent that authored the candidate (never the promoting authority).
+    #[serde(default)]
+    pub created_by: String,
     pub schema_version: u32,
     pub created_at: String,
     pub updated_at: String,
@@ -1680,6 +1835,15 @@ impl ImprovementProposal {
             status: ImprovementStatus::Draft,
             approval_required: true,
             measurements: BTreeMap::new(),
+            target: ImprovementTarget::default(),
+            scope: MemoryScope::default(),
+            risk_tier: RiskTier::default(),
+            root_cause_hypothesis: String::new(),
+            success_metrics: Vec::new(),
+            affected_components: Vec::new(),
+            baseline_version: String::new(),
+            candidate_version: String::new(),
+            created_by: String::new(),
             schema_version: HARNESS_SCHEMA_VERSION,
             created_at: now.clone(),
             updated_at: now,
@@ -1905,10 +2069,25 @@ pub struct HarnessEvent {
     pub agent_id: Option<String>,
     pub subagent_id: Option<String>,
     pub run_id: Option<String>,
+    /// Severity for RSI triage: `info` | `notice` | `warning` | `error`.
+    #[serde(default = "default_event_severity")]
+    pub severity: String,
+    /// Provider/model in effect when the event was observed, when known.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Improvement candidate this event is evidence for, when applicable.
+    #[serde(default)]
+    pub candidate_id: Option<String>,
     pub summary: String,
     pub metadata: BTreeMap<String, Value>,
     pub sensitivity: String,
     pub schema_version: u32,
+}
+
+fn default_event_severity() -> String {
+    "info".to_string()
 }
 
 impl HarnessEvent {
@@ -1925,6 +2104,10 @@ impl HarnessEvent {
             agent_id: None,
             subagent_id: None,
             run_id: None,
+            severity: default_event_severity(),
+            provider: None,
+            model: None,
+            candidate_id: None,
             summary: summary.into(),
             metadata: BTreeMap::new(),
             sensitivity: "normal".into(),
@@ -3544,15 +3727,46 @@ impl HarnessRepository {
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let result = (|| -> Result<()> {
                 let mut proposal = Self::improvement_conn(conn, proposal_id)?;
+                use ImprovementStatus::*;
                 let allowed = matches!(
                     (proposal.status, next),
-                    (ImprovementStatus::Draft, ImprovementStatus::Proposed)
-                        | (ImprovementStatus::Proposed, ImprovementStatus::Approved)
-                        | (ImprovementStatus::Proposed, ImprovementStatus::Rejected)
-                        | (ImprovementStatus::Approved, ImprovementStatus::Testing)
-                        | (ImprovementStatus::Testing, ImprovementStatus::Applied)
-                        | (ImprovementStatus::Testing, ImprovementStatus::Rejected)
-                        | (ImprovementStatus::Applied, ImprovementStatus::RolledBack)
+                    // Discovery → drafting.
+                    (Observed, Draft)
+                        // Drafting → review.
+                        | (Draft, Proposed)
+                        | (Proposed, Approved)
+                        | (Proposed, Rejected)
+                        | (Proposed, NeedsRevision)
+                        // Revision loop.
+                        | (NeedsRevision, Draft)
+                        | (NeedsRevision, Proposed)
+                        | (NeedsRevision, Rejected)
+                        // Experiment / WARP validation.
+                        | (Approved, Testing)
+                        | (Approved, Rejected)
+                        | (Testing, Validated)
+                        | (Testing, Rejected)
+                        | (Testing, NeedsRevision)
+                        // Validated → promote directly (low tier) or via shadow/canary.
+                        | (Validated, Shadow)
+                        | (Validated, Promoted)
+                        | (Validated, Rejected)
+                        | (Shadow, Canary)
+                        | (Shadow, Promoted)
+                        | (Shadow, Rejected)
+                        | (Shadow, NeedsRevision)
+                        | (Canary, Promoted)
+                        | (Canary, RolledBack)
+                        | (Canary, Rejected)
+                        // Post-promotion.
+                        | (Promoted, RolledBack)
+                        | (Promoted, Deprecated)
+                        | (RolledBack, Deprecated)
+                        // Legacy compatibility (pre-v2 flow).
+                        | (Approved, Applied)
+                        | (Testing, Applied)
+                        | (Applied, RolledBack)
+                        | (Applied, Deprecated)
                 );
                 if !allowed {
                     return Err(NexusError::PolicyDenied(format!(
@@ -4748,6 +4962,58 @@ mod tests {
                 .status,
             ImprovementStatus::RolledBack
         );
+    }
+
+    #[test]
+    fn governed_candidate_walks_the_full_rsi_state_machine() {
+        let repository = repository();
+        let mut proposal = ImprovementProposal::new(
+            ImprovementCategory::Context,
+            "Duplicate repository retrieval during planning",
+            "Add a cache-invalidation policy to the context router",
+        )
+        .expect("proposal");
+        // Typed RSI fields default conservatively for un-annotated candidates.
+        assert_eq!(proposal.target, ImprovementTarget::HarnessComponent);
+        assert_eq!(proposal.risk_tier, RiskTier::High);
+        proposal.target = ImprovementTarget::ContextRouter;
+        proposal.risk_tier = RiskTier::Moderate;
+        proposal.created_by = "improvement_planner".into();
+        proposal.status = ImprovementStatus::Observed;
+        repository.save_improvement(&proposal).expect("save");
+
+        // The moderate-tier path must pass through shadow before promotion.
+        for status in [
+            ImprovementStatus::Draft,
+            ImprovementStatus::Proposed,
+            ImprovementStatus::Approved,
+            ImprovementStatus::Testing,
+            ImprovementStatus::Validated,
+            ImprovementStatus::Shadow,
+            ImprovementStatus::Canary,
+            ImprovementStatus::Promoted,
+        ] {
+            repository
+                .transition_improvement(&proposal.id, status)
+                .expect("valid transition");
+        }
+        // Validated cannot leap straight to Canary (must shadow first, already past).
+        assert!(repository
+            .transition_improvement(&proposal.id, ImprovementStatus::Validated)
+            .is_err());
+
+        // Typed fields survive the JSON payload round-trip.
+        let loaded = repository.improvement(&proposal.id).expect("load");
+        assert_eq!(loaded.status, ImprovementStatus::Promoted);
+        assert_eq!(loaded.target, ImprovementTarget::ContextRouter);
+        assert_eq!(loaded.target.plane(), ImprovementPlane::Data);
+        assert_eq!(loaded.risk_tier, RiskTier::Moderate);
+        assert_eq!(loaded.created_by, "improvement_planner");
+        assert_eq!(
+            ImprovementTarget::HarnessComponent.plane(),
+            ImprovementPlane::Code
+        );
+        assert!(RiskTier::Prohibited > RiskTier::High);
     }
 
     #[test]
