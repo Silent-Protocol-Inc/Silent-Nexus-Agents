@@ -1981,6 +1981,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-warp"
+version = "2.11.0"
+dependencies = [
+ "nexus-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "nix"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
