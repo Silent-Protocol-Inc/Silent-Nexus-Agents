@@ -201,6 +201,22 @@ fn print_event(ui: &Ui, ev: &LoopEvent) {
         // transitions as they happen instead, so echoing the whole list here
         // would say the same thing twice.
         LoopEvent::WorkPlanned { .. } => {}
+        // What the turn intends to do, before it does anything. Printed once,
+        // as an intention — no step is ever ticked off here.
+        LoopEvent::IntentPlanned { steps, .. } => {
+            let skin = nexus_core::brand::Skin::nexus();
+            println!(
+                "{}",
+                ui.dim(&format!(
+                    "{} intent · {} steps",
+                    skin.icon(nexus_core::brand::ActionState::ShapingApproach),
+                    steps.len()
+                ))
+            );
+            for (index, step) in steps.iter().enumerate() {
+                println!("{}", ui.dim(&format!("    {}. {step}", index + 1)));
+            }
+        }
         LoopEvent::AgentActivity {
             role,
             step,

@@ -321,6 +321,17 @@ pub enum LoopEvent {
         show: bool,
         reason: &'static str,
     },
+    /// The 2–5 step plan the agent intends to follow, stated before it acts.
+    ///
+    /// An intention, never a record: no step is ever marked done from this
+    /// event, and its presence says nothing about what happened. `refined`
+    /// reports whether a model was allowed to improve the wording, so a
+    /// degraded turn reads as degraded instead of as authored.
+    IntentPlanned {
+        steps: Vec<String>,
+        class: String,
+        refined: bool,
+    },
     /// Provider-supplied reasoning summary accompanying a real tool plan.
     /// Hidden chain-of-thought is never requested or surfaced.
     ReasoningSummary(String),
@@ -1036,6 +1047,23 @@ impl TurnTimeline {
                     )?;
                 }
             }
+            LoopEvent::IntentPlanned {
+                steps,
+                class,
+                refined,
+            } => {
+                self.append(
+                    LifecyclePhase::Proposed,
+                    TimelineStatus::Running,
+                    format!("intent · {} step(s)", steps.len()),
+                    TimelineKind::Intent {
+                        steps: steps.clone(),
+                        class: class.clone(),
+                        refined: *refined,
+                    },
+                    None,
+                )?;
+            }
             LoopEvent::AgentActivity {
                 role,
                 step,
@@ -1607,16 +1635,23 @@ pub struct AgentLoop {
     custom_agent: Option<CustomAgentDefinition>,
     events: Option<mpsc::UnboundedSender<LoopEvent>>,
     active_timeline: Arc<Mutex<Option<Arc<TurnTimeline>>>>,
+    /// Resolved once per turn, where the task class and work estimate are
+    /// known, and read by every narration site after that. Deriving it again
+    /// at each call site would let two places disagree about whether this turn
+    /// narrates.
+    narration: Arc<Mutex<crate::narration::NarrationPolicy>>,
 }
 
 impl AgentLoop {
     pub fn new(runtime: AgentRuntime, role: AgentRole) -> Self {
+        let narration = crate::narration::NarrationPolicy::silent(runtime.narration);
         Self {
             runtime,
             role,
             custom_agent: None,
             events: None,
             active_timeline: Arc::new(Mutex::new(None)),
+            narration: Arc::new(Mutex::new(narration)),
         }
     }
 
@@ -1675,6 +1710,39 @@ impl AgentLoop {
             phase,
             text: self.safe_model_text(text),
         });
+    }
+
+    /// The narration policy resolved for this turn.
+    fn narration_policy(&self) -> crate::narration::NarrationPolicy {
+        self.narration
+            .lock()
+            .map(|policy| *policy)
+            .unwrap_or_else(|_| crate::narration::NarrationPolicy::silent(self.runtime.narration))
+    }
+
+    /// Narrate one completed fact, if the current mode surfaces it.
+    ///
+    /// The only path from a runtime result to the timeline. Translation strips
+    /// the machine detail; the policy decides whether this mode says anything
+    /// at all. A routine success in `compact` produces silence rather than a
+    /// line nobody needed.
+    fn narrate_fact(&self, work: &WorkBreakdown, fact: &crate::narration::RuntimeFact) {
+        let policy = self.narration_policy();
+        let presented = crate::narration::present(fact);
+        if !policy.shows(&presented) {
+            return;
+        }
+        let phase = match presented.state {
+            nexus_core::brand::ActionState::Done | nexus_core::brand::ActionState::Failed => {
+                ActivityPhase::Validation
+            }
+            nexus_core::brand::ActionState::WaitingOnYou
+            | nexus_core::brand::ActionState::WaitingOnProvider
+            | nexus_core::brand::ActionState::NeedsApproval => ActivityPhase::Waiting,
+            nexus_core::brand::ActionState::Scanning => ActivityPhase::Analysis,
+            _ => ActivityPhase::Execution,
+        };
+        self.narrate(work, phase, presented.line());
     }
 
     fn agent_can_write(&self) -> bool {
@@ -2478,6 +2546,33 @@ impl AgentLoop {
             model: model_name.clone(),
             agent: self.agent_name().into(),
         });
+
+        // What this turn intends to do, said before it does anything.
+        //
+        // Deterministic and free: it comes from the same class and work
+        // estimate the breakdown above used, so the two can never disagree, and
+        // a constrained local model gets the same plan as a frontier one. The
+        // policy keeps it off greetings and lookups — a plan for "hi" is noise.
+        let narration = crate::narration::NarrationPolicy::for_turn(
+            self.runtime.narration,
+            class,
+            &observed_work,
+        );
+        if let Ok(mut stored) = self.narration.lock() {
+            *stored = narration;
+        }
+        let intent = if narration.emits_intent() {
+            crate::narration::skeleton(class, &observed_work, self.runtime.narration_max_steps)
+        } else {
+            None
+        };
+        if let Some(plan) = &intent {
+            self.emit(LoopEvent::IntentPlanned {
+                steps: plan.texts(),
+                class: class.as_str().into(),
+                refined: plan.refined,
+            });
+        }
 
         // Resolve the deliberation decision once, here, so the UI never has to
         // recompute it and every surface agrees on what this turn is doing.
@@ -3342,16 +3437,16 @@ impl AgentLoop {
                     // placeholder "[structured tool action omitted]" here,
                     // which told the operator only that there was nothing to
                     // tell them.
+                    //
+                    // Nothing is narrated here for a call that has not run yet.
+                    // A line about an action the harness is *about* to take is a
+                    // claim about the future, and the timeline is a record of the
+                    // past; the live status line is what answers "what is it doing
+                    // right now". The provider's own public summary is a different
+                    // claim — the provider made it — so that one still passes
+                    // through.
                     let reasoning = tool_reasoning_summary(&completion.content, native);
-                    if reasoning.is_empty() {
-                        let arguments =
-                            serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
-                        self.narrate(
-                            &work,
-                            ActivityPhase::Execution,
-                            derived_activity(&call.name, &arguments),
-                        );
-                    } else {
+                    if !reasoning.is_empty() {
                         self.narrate(&work, ActivityPhase::Analysis, &reasoning);
                         // Still recorded as a provider summary: the two are
                         // different claims, and only this one came from the
@@ -4680,19 +4775,26 @@ impl AgentLoop {
         // where the execution direction changes. Success stays silent here —
         // the tool row already says it worked, and a line per successful call
         // is the flood this feature exists to avoid.
-        let observation = observation_activity(&call.name, ok, &output);
-        if !observation.is_empty() {
-            self.narrate(work, ActivityPhase::Observation, observation);
-        } else if validation_action {
-            // A passing check is the exception worth a line of its own: it is
-            // the evidence a turn is judged on, and silence would leave the
-            // operator unable to tell "tests ran" from "tests passed".
-            self.narrate(
-                work,
-                ActivityPhase::Validation,
-                format!("{} passed.", call.name),
-            );
-        }
+        // What happened, in the operator's words. Both branches go through the
+        // translation layer, which is what keeps the tool's name out of the
+        // timeline: the previous versions of these two lines read
+        // "{tool} failed: …" and "{tool} passed." — the only places a raw
+        // function name reached a product surface.
+        let fact = if validation_action {
+            crate::narration::RuntimeFact::ValidationCompleted {
+                label: validation_label(&call.name, action_req.command.as_deref()),
+                passed: ok,
+                elapsed_ms: None,
+            }
+        } else {
+            crate::narration::RuntimeFact::ToolCompleted {
+                name: call.name.clone(),
+                arguments: serde_json::from_str(&call.arguments).unwrap_or(Value::Null),
+                ok,
+                output: output.clone(),
+            }
+        };
+        self.narrate_fact(work, &fact);
         let changed_paths = if action_req.risk >= nexus_core::RiskLevel::Write {
             action_req.paths.clone()
         } else {
@@ -5834,100 +5936,24 @@ fn tool_reasoning_summary(content: &str, native_tool_calls: bool) -> String {
     before_object.to_string()
 }
 
-/// The most identifying argument of a call, for narration only.
-///
-/// Never the whole argument object: that is where secrets and long payloads
-/// live, and the segment is a one-line summary, not a record of the request.
-fn narration_subject(arguments: &Value) -> Option<String> {
-    const KEYS: [&str; 8] = [
-        "path",
-        "file",
-        "pattern",
-        "query",
-        "command",
-        "cmd",
-        "objective",
-        "name",
-    ];
-    let subject = KEYS.iter().find_map(|key| {
-        arguments
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    })?;
-    Some(summarize(subject, 60))
-}
-
-/// A factual line describing a call, for when the model offered no prose.
-///
-/// Every branch describes something the harness is about to do, in the
-/// operator's terms. Nothing here infers intent the runtime did not observe —
-/// the phrasing says what is happening, never why the model wanted it.
-fn derived_activity(tool: &str, arguments: &Value) -> String {
-    let subject = narration_subject(arguments);
-    let lower = tool.to_ascii_lowercase();
-    let with = |verb: &str, fallback: &str| match &subject {
-        Some(subject) => format!("{verb} {subject}."),
-        None => fallback.to_string(),
-    };
-    if lower.contains("list") || lower.contains("dir") {
-        return with("Listing", "Listing the working directory.");
+/// An operator-facing name for what was checked, derived from the command when
+/// there is one. Never the tool's function name, and never the full command
+/// line — "tests" and "clippy", not `terminal.exec` or `cargo test -j2 …`.
+fn validation_label(tool: &str, command: Option<&str>) -> String {
+    let haystack = format!("{tool} {}", command.unwrap_or_default()).to_ascii_lowercase();
+    for (needle, label) in [
+        ("clippy", "clippy"),
+        ("lint", "the lint"),
+        ("fmt", "the formatter"),
+        ("test", "tests"),
+        ("check", "the check"),
+        ("build", "the build"),
+    ] {
+        if haystack.contains(needle) {
+            return label.to_string();
+        }
     }
-    if lower.contains("structure") || lower.contains("tree") {
-        return "Mapping the repository structure.".into();
-    }
-    if lower.contains("git") {
-        return "Checking the working tree.".into();
-    }
-    if lower.contains("search") || lower.contains("grep") || lower.contains("find") {
-        return with("Searching for", "Searching the workspace.");
-    }
-    if lower.contains("read") || lower.contains("open") || lower.contains("cat") {
-        return with("Reading", "Reading a file.");
-    }
-    if lower.contains("write") || lower.contains("edit") || lower.contains("patch") {
-        return with("Editing", "Editing a file.");
-    }
-    if lower.contains("delete") || lower.contains("remove") {
-        return with("Removing", "Removing a file.");
-    }
-    if lower.contains("memory") {
-        return "Recording a finding.".into();
-    }
-    if lower.contains("plan") {
-        return "Revising the plan.".into();
-    }
-    if lower.contains("agent") || lower.contains("delegate") {
-        return with("Delegating", "Delegating to another agent.");
-    }
-    if lower.contains("shell")
-        || lower.contains("exec")
-        || lower.contains("run")
-        || lower.contains("command")
-    {
-        return with("Running", "Running a command.");
-    }
-    with(&format!("Running {tool} on"), &format!("Running {tool}."))
-}
-
-/// What a finished call actually showed, and what follows from it.
-///
-/// Reports the outcome and nothing beyond it. A failure says what failed and
-/// that the agent is continuing; it does not claim to know the cause.
-fn observation_activity(tool: &str, ok: bool, detail: &str) -> String {
-    let detail = detail.trim();
-    if ok {
-        return String::new();
-    }
-    if detail.is_empty() {
-        format!("{tool} failed. Adjusting before continuing.")
-    } else {
-        format!(
-            "{tool} failed: {}. Adjusting before continuing.",
-            summarize(detail, 120).trim_end_matches('.')
-        )
-    }
+    "the check".to_string()
 }
 
 fn is_validation_action(tool: &str, command: Option<&str>) -> bool {

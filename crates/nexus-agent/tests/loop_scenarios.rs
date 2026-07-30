@@ -159,6 +159,11 @@ fn runtime_with_manager(
         thinking: nexus_core::thinking::ThinkingMode::Auto,
         deep_planning: true,
         plan_mode: false,
+        // Narration is presentation: these scenarios assert loop behavior, so
+        // they run on the shipped default and must be unaffected by it.
+        narration: nexus_core::timeline::NarrationMode::default(),
+        narration_max_steps: 5,
+        narration_refine: false,
     };
     (runtime, session_id)
 }

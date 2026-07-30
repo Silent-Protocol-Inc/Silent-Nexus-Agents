@@ -288,6 +288,9 @@ async fn event_loop(
     )
     .or_else(|| nexus_core::timeline::ActivityMode::parse(&app.config.tui.activity.mode))
     .unwrap_or_default();
+    // The third axis: how much the agent says about its own work. An explicit
+    // `/narrate` choice outranks config, exactly as `/view` does for its own.
+    st.narration_mode = app.narration_mode();
     // Behavioral half of the deliberation settings. The presentation half
     // (preview lines, animation, reduced motion) stays in `[tui.activity]`.
     st.thinking_min_duration =
@@ -3628,6 +3631,22 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
                     class,
                     model,
                     agent,
+                },
+            );
+        }
+        LoopEvent::IntentPlanned {
+            steps,
+            class,
+            refined,
+        } => {
+            st.push_local_event_for_turn(
+                turn_id.clone(),
+                TimelineStatus::Running,
+                format!("intent · {} step(s)", steps.len()),
+                TimelineKind::Intent {
+                    steps,
+                    class,
+                    refined,
                 },
             );
         }

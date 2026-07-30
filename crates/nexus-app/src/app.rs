@@ -339,6 +339,12 @@ impl App {
             thinking: self.read_ui_state(|state| state.thinking()),
             deep_planning: self.config.thinking.deep_planning,
             plan_mode,
+            // Same precedence for narration: an explicit `/narrate` choice
+            // outranks the config default. A different axis from `thinking` —
+            // this one changes what is said, not what is done.
+            narration: self.narration_mode(),
+            narration_max_steps: self.config.narration.max_steps(),
+            narration_refine: self.config.narration.refine_wording,
         })
     }
 
@@ -484,6 +490,13 @@ impl App {
     pub fn theme_name(&self) -> String {
         self.read_ui_state(|s| s.theme.clone())
             .unwrap_or_else(|| self.config.general.theme.clone())
+    }
+
+    /// Narration mode: an explicit `/narrate` choice outranks the config
+    /// default, exactly as `/thinking` and `/view` do for their own axes.
+    pub fn narration_mode(&self) -> nexus_core::timeline::NarrationMode {
+        self.read_ui_state(|s| s.narration())
+            .unwrap_or_else(|| self.config.narration.mode())
     }
 }
 

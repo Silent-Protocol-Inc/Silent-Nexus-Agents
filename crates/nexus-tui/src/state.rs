@@ -251,6 +251,9 @@ pub struct State {
     pub summarize_provider_reasoning: bool,
     /// Timeline verbosity: Default (concise) hides reasoning/diagnostics.
     pub activity_mode: ActivityMode,
+    /// How much the agent narrates. A different axis from `activity_mode`, and
+    /// they compose in one direction: **narration folds, `/view` reveals.**
+    pub narration_mode: nexus_core::timeline::NarrationMode,
     /// When the active turn started, for the live elapsed counter.
     pub turn_started: Option<Instant>,
     /// Cap on the NEXUS activity preview (`[tui.activity].reasoning_preview_lines`).
@@ -338,6 +341,7 @@ impl State {
             thinking_reason: None,
             summarize_provider_reasoning: true,
             activity_mode: ActivityMode::default(),
+            narration_mode: nexus_core::timeline::NarrationMode::default(),
             turn_started: None,
             preview_lines: 3,
             animation: "nexus".into(),
@@ -350,10 +354,38 @@ impl State {
     }
 
     /// Whether an event appears in the main timeline: it must pass the
-    /// content-type filter and the verbosity mode. Default mode shows only
-    /// Essential events; reasoning/diagnostics live in the Ctrl+E detail.
+    /// content-type filter, the verbosity mode, and the narration fold.
+    /// Default mode shows only Essential events; reasoning/diagnostics live in
+    /// the Ctrl+E detail.
     pub fn event_visible(&self, event: &TimelineEvent) -> bool {
-        self.transcript_filter.matches(event) && self.activity_mode.shows(event.kind.visibility())
+        self.transcript_filter.matches(event)
+            && self.activity_mode.shows(event.kind.visibility())
+            && !self.folded_by_narration(event)
+    }
+
+    /// Whether the debug layer is showing: `/view detailed` or `/view debug`.
+    /// The one switch that reveals machine detail — tool names, argument
+    /// payloads, plan provenance — on any surface.
+    pub fn reveals_machine_detail(&self) -> bool {
+        self.activity_mode != ActivityMode::Default
+    }
+
+    /// Whether narration folds this row away.
+    ///
+    /// A raw tool row is the same fact as the milestone above it, in worse
+    /// words — while the agent is narrating, showing both is the noise this
+    /// layer exists to remove. The fold is deliberately one-directional:
+    /// `/view detailed` or `/view debug` brings the rows back whatever the
+    /// narration mode says, so the machine detail is never more than one
+    /// keystroke away, and narration `off` folds nothing at all.
+    fn folded_by_narration(&self, event: &TimelineEvent) -> bool {
+        if !self.narration_mode.folds_tool_rows() || self.activity_mode != ActivityMode::Default {
+            return false;
+        }
+        matches!(
+            event.kind,
+            TimelineKind::ToolExecution { .. } | TimelineKind::ToolProgress { .. }
+        )
     }
 
     /// The current thinking phase, derived from structured runtime state
@@ -1067,5 +1099,99 @@ mod tests {
         assert_eq!(Focus::Timeline.next(), Focus::Context);
         assert_eq!(Focus::Context.next(), Focus::Drawer);
         assert_eq!(Focus::Drawer.next(), Focus::Input);
+    }
+    /// The composition rule, asserted: **narration folds, `/view` reveals.**
+    /// Every combination of the two axes has to stay meaningful, and neither
+    /// may quietly change the other.
+    #[test]
+    fn narration_folds_tool_rows_and_view_reveals_them() {
+        use nexus_core::timeline::NarrationMode;
+
+        let mut state = state();
+        state.timeline.clear();
+        state.push_local_event(
+            TimelineStatus::Completed,
+            "ran a tool".into(),
+            TimelineKind::ToolExecution {
+                tool: "fs.read_file".into(),
+                arguments: serde_json::json!({}),
+                output_preview: String::new(),
+                exit_status: Some("ok".into()),
+                affected_paths: Vec::new(),
+            },
+        );
+        let tool = state.timeline.last().expect("event").clone();
+
+        // Narrating: the raw row is folded into the segment above it.
+        state.narration_mode = NarrationMode::Auto;
+        state.activity_mode = ActivityMode::Default;
+        assert!(!state.event_visible(&tool));
+
+        // `/view` reveals it again, whatever narration says.
+        for mode in [ActivityMode::Detailed, ActivityMode::Debug] {
+            state.activity_mode = mode;
+            assert!(state.event_visible(&tool), "{mode:?} must reveal tool rows");
+        }
+
+        // Narration off restores the pre-narration timeline exactly.
+        state.activity_mode = ActivityMode::Default;
+        state.narration_mode = NarrationMode::Off;
+        assert!(state.event_visible(&tool));
+    }
+
+    #[test]
+    fn folding_never_touches_results_the_operator_needs() {
+        use nexus_core::timeline::NarrationMode;
+        let mut state = state();
+        state.narration_mode = NarrationMode::Auto;
+        state.activity_mode = ActivityMode::Default;
+
+        // Diffs, mutations, and errors are results, not raw tool logs.
+        for kind in [
+            TimelineKind::Diff {
+                path: Some("a.rs".into()),
+                insertions: 1,
+                deletions: 0,
+                preview: "+x".into(),
+            },
+            TimelineKind::FileMutation {
+                path: "a.rs".into(),
+                operation: "write".into(),
+                bytes: Some(3),
+            },
+            TimelineKind::Error {
+                class: "tool".into(),
+                message: "boom".into(),
+                retryable: false,
+            },
+        ] {
+            state.timeline.clear();
+            state.push_local_event(TimelineStatus::Completed, "result".into(), kind);
+            let event = state.timeline.last().expect("event");
+            assert!(
+                state.event_visible(event),
+                "folded a result: {:?}",
+                event.kind
+            );
+        }
+    }
+
+    #[test]
+    fn an_intent_is_essential_and_survives_the_concise_view() {
+        let mut state = state();
+        state.timeline.clear();
+        state.push_local_event(
+            TimelineStatus::Running,
+            "intent · 2 step(s)".into(),
+            TimelineKind::Intent {
+                steps: vec!["Read the module".into(), "Report".into()],
+                class: "coding".into(),
+                refined: false,
+            },
+        );
+        state.narration_mode = nexus_core::timeline::NarrationMode::Auto;
+        state.activity_mode = ActivityMode::Default;
+        let event = state.timeline.last().expect("event");
+        assert!(state.event_visible(event));
     }
 }

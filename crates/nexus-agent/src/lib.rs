@@ -65,4 +65,12 @@ pub struct AgentRuntime {
     /// Plan mode. The turn runs under a scope that refuses to change anything
     /// and the agent's job is to author a plan for approval, not to act.
     pub plan_mode: bool,
+    /// How much the agent says about its own work. A presentation preference:
+    /// it changes what is *said*, never what is done, checked, or approved.
+    pub narration: nexus_core::timeline::NarrationMode,
+    /// Upper bound on intent steps, already clamped to 2..=5 by config.
+    pub narration_max_steps: usize,
+    /// Whether one bounded model pass may improve the intent wording. The
+    /// deterministic skeleton stays the source of truth either way.
+    pub narration_refine: bool,
 }

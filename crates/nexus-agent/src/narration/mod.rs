@@ -6,16 +6,18 @@
 //!   Nothing above it can see a tool name, an argument blob, or raw output.
 //! * [`NarrationPolicy`] — whether this turn narrates at all, and which
 //!   statements survive the current mode.
-//! * `intent` (next layer) — the deterministic 2–5 step plan shown before work
-//!   starts.
+//! * [`intent`] — the deterministic 2–5 step plan shown before work starts,
+//!   which a model may reword but not redirect.
 //!
 //! The policy exists because "say something useful" and "say everything" are
 //! different products. A greeting gets silence; a two-file refactor gets an
 //! intent and a handful of milestones; `verbose` gets every observed action.
 //! What none of them get is a line for something that has not happened.
 
+pub mod intent;
 pub mod translate;
 
+pub use intent::{accept_rewording, skeleton, IntentPlan, IntentStep, StepKind};
 pub use translate::{present, Presented, RuntimeFact, Significance};
 
 use nexus_core::orchestration::WorkEstimate;
@@ -43,6 +45,16 @@ impl NarrationPolicy {
         Self {
             mode,
             task_shaped: task_shaped(class, estimate),
+        }
+    }
+
+    /// A policy that says nothing. The state a loop is in before a turn has
+    /// been classified: silence is the safe default, because a narration line
+    /// emitted before the turn is understood would describe nothing real.
+    pub fn silent(mode: NarrationMode) -> Self {
+        Self {
+            mode,
+            task_shaped: false,
         }
     }
 

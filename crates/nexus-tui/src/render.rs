@@ -625,8 +625,16 @@ fn draw_transcript(
                 cached.rows
             }
             _ => {
-                let rows =
-                    event_lines(event, st.detail_level, expanded, selected, inner_width, t).len();
+                let rows = event_lines(
+                    event,
+                    st.detail_level,
+                    expanded,
+                    selected,
+                    inner_width,
+                    t,
+                    st.reveals_machine_detail(),
+                )
+                .len();
                 st.wrap_layout_cache.insert(
                     event.id.clone(),
                     WrapLayoutCacheEntry {
@@ -700,7 +708,15 @@ fn draw_transcript(
         }
         let event = &st.timeline[index];
         let selected = st.selected_event == Some(index) && st.focus == Focus::Timeline;
-        let rendered = event_lines(event, st.detail_level, expanded, selected, inner_width, t);
+        let rendered = event_lines(
+            event,
+            st.detail_level,
+            expanded,
+            selected,
+            inner_width,
+            t,
+            st.reveals_machine_detail(),
+        );
         let from = scroll.saturating_sub(offset).min(rendered.len());
         let to = visible_end
             .saturating_sub(offset)
@@ -795,6 +811,9 @@ fn component_header(
         // pair reads as one thing settling rather than two different events.
         TimelineKind::AgentActivity { .. } if running => "◢",
         TimelineKind::AgentActivity { .. } => "◆",
+        TimelineKind::Intent { .. } => {
+            nexus_core::brand::Skin::nexus().icon(nexus_core::brand::ActionState::ShapingApproach)
+        }
         _ => mark,
     };
 
@@ -922,6 +941,9 @@ fn event_lines(
     selected: bool,
     width: usize,
     t: &Theme,
+    // `/view detailed|debug`. Tool names are machine detail and belong to the
+    // debug layer; the product layers describe what happened instead.
+    reveal_machine_detail: bool,
 ) -> Vec<Line<'static>> {
     use nexus_core::timeline::{TimelineKind, TimelineStatus};
 
@@ -976,6 +998,8 @@ fn event_lines(
         | TimelineKind::ReasoningSummary { text }
         | TimelineKind::AgentActivity { text, .. }
         | TimelineKind::Notice { text, .. } => !text.trim().is_empty(),
+        // The step list below is the body; the summary would repeat the count.
+        TimelineKind::Intent { steps, .. } => !steps.is_empty(),
         TimelineKind::Error { message, .. }
         | TimelineKind::Retry {
             reason: message, ..
@@ -999,11 +1023,15 @@ fn event_lines(
         }
         TimelineKind::AgentActivity { text, tools, .. } => {
             push_wrapped(&mut lines, text, width, t.text());
-            // The tools that ran under this segment, listed once here instead
-            // of narrated one by one above. Bounded: a segment that ran forty
-            // reads should not push the rest of the turn off the screen.
+            // The tools that ran under this segment — machine detail, so only
+            // under `/view detailed|debug`. In the product view the segment
+            // text already says what happened, and a list of function names
+            // beside it is the noise the narration layer exists to remove.
+            // Bounded even when revealed: forty reads should not push the rest
+            // of the turn off the screen.
             const MAX_TOOL_ROWS: usize = 6;
             let tier = crate::glyphs::tier();
+            let tools: &[String] = if reveal_machine_detail { tools } else { &[] };
             for tool in tools.iter().take(MAX_TOOL_ROWS) {
                 push_wrapped(
                     &mut lines,
@@ -1014,6 +1042,31 @@ fn event_lines(
             }
             if let Some(extra) = tools.len().checked_sub(MAX_TOOL_ROWS).filter(|n| *n > 0) {
                 push_wrapped(&mut lines, &format!("  +{extra} more"), width, t.muted());
+            }
+        }
+        TimelineKind::Intent { steps, refined, .. } => {
+            // Numbered, and never ticked off: this is what the agent said it
+            // would do, not a record of what it did. Progress lives in the
+            // milestones below it, each tied to something that happened.
+            for (index, step) in steps.iter().enumerate() {
+                push_wrapped(
+                    &mut lines,
+                    &format!("  {}. {step}", index + 1),
+                    width,
+                    t.text(),
+                );
+            }
+            // Only under `/view detailed|debug`: whether a model was allowed to
+            // reword the plan is provenance, not product copy. It is recorded
+            // rather than implied so a degraded turn can be told apart from an
+            // authored one.
+            if reveal_machine_detail {
+                let provenance = if *refined {
+                    "wording refined by the model; steps are the harness's"
+                } else {
+                    "harness wording (no refinement)"
+                };
+                push_wrapped(&mut lines, &format!("  {provenance}"), width, t.muted());
             }
         }
         TimelineKind::Notice { text, severity } => {
@@ -3395,11 +3448,19 @@ mod tests {
                 },
             ),
         ] {
-            let text = event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = event_lines(
+                &event,
+                TranscriptDetail::Compact,
+                false,
+                false,
+                80,
+                &theme,
+                false,
+            )
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
             assert_eq!(text.matches(&event.summary).count(), 1, "{text}");
         }
     }
@@ -3421,7 +3482,21 @@ mod tests {
         )
     }
 
+    /// The product view: what an operator sees at `/view default`.
     fn rendered(event: &nexus_core::timeline::TimelineEvent, width: usize) -> String {
+        rendered_with_detail(event, width, false)
+    }
+
+    /// The debug view: `/view detailed|debug`, where machine detail is revealed.
+    fn rendered_debug(event: &nexus_core::timeline::TimelineEvent, width: usize) -> String {
+        rendered_with_detail(event, width, true)
+    }
+
+    fn rendered_with_detail(
+        event: &nexus_core::timeline::TimelineEvent,
+        width: usize,
+        reveal: bool,
+    ) -> String {
         let theme = Theme::new("nexus-dark", ColorSupport::None);
         event_lines(
             event,
@@ -3430,6 +3505,7 @@ mod tests {
             false,
             width,
             &theme,
+            reveal,
         )
         .iter()
         .map(line_text)
@@ -3457,14 +3533,64 @@ mod tests {
     }
 
     #[test]
-    fn grouped_tools_are_listed_once_and_bounded() {
+    fn grouped_tools_are_listed_once_and_bounded_under_debug() {
         let many: Vec<String> = (0..12).map(|i| format!("fs.read_file_{i}")).collect();
         let refs: Vec<&str> = many.iter().map(String::as_str).collect();
-        let text = rendered(&activity_event("reviewer", None, &refs), 80);
+        let text = rendered_debug(&activity_event("reviewer", None, &refs), 80);
         assert!(text.contains("fs.read_file_0"), "{text}");
         // A segment with forty reads must not push the turn off the screen.
         assert!(!text.contains("fs.read_file_11"), "{text}");
         assert!(text.contains("+6 more"), "{text}");
+    }
+
+    /// The layer boundary: a function name is machine detail. In the product
+    /// view the segment says what happened; the names live one keystroke away
+    /// under `/view detailed|debug`.
+    #[test]
+    fn the_product_view_never_shows_a_tool_name() {
+        let event = activity_event("reviewer", None, &["fs.read_file", "terminal.exec"]);
+        let product = rendered(&event, 80);
+        assert!(!product.contains("fs.read_file"), "{product}");
+        assert!(!product.contains("terminal.exec"), "{product}");
+        // The narration itself still renders — folding a row is not silence.
+        assert!(product.contains("choosing the review path"), "{product}");
+        // And the same event under the debug view does show them.
+        let debug = rendered_debug(&event, 80);
+        assert!(debug.contains("fs.read_file"), "{debug}");
+    }
+
+    #[test]
+    fn an_intent_renders_numbered_steps_and_never_ticks_one_off() {
+        let event = message_event(
+            "intent · 3 step(s)",
+            TimelineKind::Intent {
+                steps: vec![
+                    "Read the failing test".into(),
+                    "Apply the fix".into(),
+                    "Run the suite".into(),
+                ],
+                class: "coding".into(),
+                refined: false,
+            },
+        );
+        let text = rendered(&event, 80);
+        assert!(text.contains("1. Read the failing test"), "{text}");
+        assert!(text.contains("3. Run the suite"), "{text}");
+        // An intention, not a record: no *step* is marked done. (The card's own
+        // status glyph is a different thing and is allowed to be there.)
+        for line in text
+            .lines()
+            .filter(|line| line.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+        {
+            assert!(!line.contains('✓'), "a step was ticked off: {line}");
+            assert!(!line.contains('✕'), "a step was marked failed: {line}");
+        }
+        // Provenance is machine detail, not product copy.
+        assert!(!text.contains("no refinement"), "{text}");
+        assert!(
+            rendered_debug(&event, 80).contains("no refinement"),
+            "provenance must be available under debug"
+        );
     }
 
     #[test]
@@ -3496,11 +3622,19 @@ mod tests {
                 },
             ),
         ] {
-            let text = event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = event_lines(
+                &event,
+                TranscriptDetail::Compact,
+                false,
+                false,
+                80,
+                &theme,
+                false,
+            )
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
             assert_eq!(text.matches(&event.summary).count(), 1, "{text}");
             assert!(text.contains("second line"), "{text}");
         }
@@ -3518,7 +3652,15 @@ mod tests {
                 preview: "-old line\n+new line\n+another".into(),
             },
         );
-        let lines = event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme);
+        let lines = event_lines(
+            &event,
+            TranscriptDetail::Compact,
+            false,
+            false,
+            80,
+            &theme,
+            false,
+        );
         let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         // Path header with counts is present.
         assert!(text.contains("page.html"), "{text}");
@@ -3962,13 +4104,21 @@ mod tests {
         let mut event = message_event(summary, kind);
         event.status = status;
         event.duration_ms = duration_ms;
-        event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim_end()
-            .to_string()
+        event_lines(
+            &event,
+            TranscriptDetail::Compact,
+            false,
+            false,
+            80,
+            &theme,
+            false,
+        )
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
     }
 
     fn tool(status: TimelineStatus, exit: Option<&str>) -> TimelineKind {
@@ -4277,14 +4427,14 @@ mod tests {
         .map(|(width, height)| (width, height, fnv1a64(&rendered_text(width, height))))
         .collect();
         let expected = [
-            (36, 20, 13_812_581_967_948_532_461),
-            (45, 20, 10_867_498_953_966_715_543),
-            (60, 18, 14_614_356_305_927_070_958),
-            (60, 20, 13_128_974_092_938_649_675),
-            (80, 24, 10_889_260_809_988_049_922),
-            (100, 30, 10_178_337_125_861_219_773),
-            (120, 40, 6_403_931_847_013_668_550),
-            (160, 50, 913_345_411_169_358_918),
+            (36, 20, 11_766_818_029_794_855_185),
+            (45, 20, 7_910_790_173_208_817_578),
+            (60, 18, 9_095_461_032_627_646_233),
+            (60, 20, 9_337_677_496_412_248_921),
+            (80, 24, 2_725_233_974_787_231_666),
+            (100, 30, 11_592_235_585_405_408_384),
+            (120, 40, 11_104_480_043_258_248_985),
+            (160, 50, 1_534_860_802_263_708_233),
         ];
         assert_eq!(actual, expected);
     }
@@ -4421,6 +4571,9 @@ mod tests {
         let mut state = representative_state();
         state.timeline.clear();
         state.thinking_mode = nexus_core::ThinkingMode::Off;
+        // Isolate the axis under test: narration also folds raw tool rows, and
+        // this test is about `/thinking` not hiding operational events.
+        state.narration_mode = nexus_core::timeline::NarrationMode::Off;
         state.push_local_event(
             TimelineStatus::Completed,
             "reasoning".into(),

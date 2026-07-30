@@ -60,6 +60,13 @@ pub struct UiState {
     /// Default keeps the timeline to essential activity; diagnostics stay one
     /// keystroke away rather than flooding the transcript.
     pub activity_mode: String,
+    /// How much the agent narrates its own work, chosen via `/narrate`:
+    /// `off`, `compact`, `auto`, or `verbose`. Empty until the operator
+    /// chooses, so `[narration].mode` in config keeps applying. A different axis from
+    /// `activity_mode` — that one decides which stored events render, this one
+    /// decides whether the agent says what it is doing. There is deliberately
+    /// no `debug` value here; raw-payload visibility belongs to `/view`.
+    pub narration_mode: String,
     /// Plan mode, entered with `/plan`. While it is on, every turn runs under a
     /// scope that refuses to change anything, and the agent's job is to author
     /// a plan for approval rather than to act. Approving it clears this.
@@ -103,6 +110,10 @@ impl Default for UiState {
             thinking_enabled: None,
             first_run_completed: false,
             activity_mode: "default".into(),
+            // Empty means "the operator has not chosen", which is what lets
+            // `[narration].mode` in config still apply. A filled-in default
+            // here would silently outrank the config file forever.
+            narration_mode: String::new(),
             plan_mode: false,
             selected_persona: None,
             profile_name: "default".into(),
@@ -161,11 +172,16 @@ impl UiState {
             // refuse the operator's next edit.
             self.plan_mode = false;
         }
+        // `narration_mode` deliberately has no migration step: it is a new
+        // axis, so no prior operator choice exists to preserve, and leaving it
+        // empty is what keeps `[narration].mode` in config authoritative until
+        // someone actually runs `/narrate`.
         // Never re-emit the legacy key, whatever version we loaded.
         self.thinking_enabled = None;
         if self.thinking_mode.trim().is_empty() {
             self.thinking_mode = nexus_core::ThinkingMode::default().as_str().into();
         }
+
         self.version = UI_STATE_VERSION;
     }
 
@@ -173,6 +189,14 @@ impl UiState {
     /// stored string is unrecognized rather than failing the whole load.
     pub fn thinking(&self) -> nexus_core::ThinkingMode {
         self.thinking_mode.parse().unwrap_or_default()
+    }
+
+    /// The operator's explicit narration choice, or `None` when they have not
+    /// made one and config still decides. An unrecognized stored value reads as
+    /// no choice rather than failing the load — an unreadable presentation
+    /// preference must never stop the agent.
+    pub fn narration(&self) -> Option<nexus_core::timeline::NarrationMode> {
+        nexus_core::timeline::NarrationMode::parse(&self.narration_mode)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {

@@ -214,6 +214,9 @@ impl TranscriptFilter {
                 TimelineKind::WorkBreakdown { .. }
                     | TimelineKind::PlanRevision { .. }
                     | TimelineKind::StageChanged { .. }
+                    // The stated intention is a plan too, even though it is
+                    // never approval-gated.
+                    | TimelineKind::Intent { .. }
             ),
             Self::Tools => matches!(
                 event.kind,
@@ -342,6 +345,23 @@ pub enum TimelineKind {
         text: String,
         /// Tools executed under this segment, newest last.
         tools: Vec<String>,
+    },
+    /// What the agent intends to do, stated before it acts.
+    ///
+    /// An **intention**, not a record: no step here is ever marked done, and
+    /// nothing may be inferred from its presence about what happened. The steps
+    /// come from a deterministic skeleton; `refined` says whether a model was
+    /// allowed to improve the wording, so a degraded turn reads as degraded
+    /// rather than as authored.
+    ///
+    /// Distinct from [`Self::WorkBreakdown`], which is the approval-gated plan
+    /// with stage state. This one is a glance, costs no approval, and never
+    /// gates execution.
+    Intent {
+        steps: Vec<String>,
+        /// The deterministic task class the plan was built from.
+        class: String,
+        refined: bool,
     },
     WorkBreakdown {
         breakdown: WorkBreakdown,
@@ -681,6 +701,10 @@ impl TimelineKind {
             // tool calls. Filed as detail, it would be dropped by the default
             // view and the timeline would be tool calls again.
             | Self::AgentActivity { .. }
+            // The first thing said about a turn. If this were detail, the
+            // concise view would show work starting with no statement of what
+            // the work is — the exact gap the narration layer exists to close.
+            | Self::Intent { .. }
             | Self::ToolExecution { .. }
             | Self::ToolProgress { .. }
             | Self::FileMutation { .. }
@@ -746,6 +770,7 @@ impl TimelineKind {
             Self::ProviderActivity { .. } => "provider_activity",
             Self::ReasoningSummary { .. } => "reasoning_summary",
             Self::AgentActivity { .. } => "agent_activity",
+            Self::Intent { .. } => "intent",
             Self::WorkBreakdown { .. } => "work_breakdown",
             Self::PlanRevision { .. } => "plan_revision",
             Self::StageChanged { .. } => "stage_changed",
