@@ -8,9 +8,9 @@
 //! commands for the live pipeline.
 
 use crate::{ValidationReport, Verdict};
+use nexus_sandbox::SandboxBackend;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
 use std::time::Instant;
 
 /// The kind of objective check. All kinds are hard gates; the label drives
@@ -66,27 +66,77 @@ pub trait CheckRunner {
     fn run(&self, check: &Check, cwd: &Path) -> CheckOutcome;
 }
 
-/// Runs checks as real subprocesses in the isolate. Cargo checks are pinned to
-/// this host's OOM-safe concurrency (the workspace test suite kills the box
-/// otherwise), matching the release gate's environment.
-pub struct ProcessCheckRunner;
+/// Runs checks through the strong container sandbox. A missing container is a
+/// hard failure; WARP never silently downgrades to a host subprocess.
+pub struct ProcessCheckRunner {
+    pub container_image: String,
+}
+
+impl Default for ProcessCheckRunner {
+    fn default() -> Self {
+        Self {
+            container_image: nexus_core::config::SandboxConfig::default().container_image,
+        }
+    }
+}
 
 impl CheckRunner for ProcessCheckRunner {
     fn run(&self, check: &Check, cwd: &Path) -> CheckOutcome {
         let started = Instant::now();
-        let output = Command::new(&check.program)
-            .args(&check.args)
-            .current_dir(cwd)
-            .env("CARGO_BUILD_JOBS", "2")
-            .env("RUST_TEST_THREADS", "2")
-            .output();
+        let check = check.clone();
+        let program = check.program.clone();
+        let cwd = cwd.to_path_buf();
+        let image = self.container_image.clone();
+        let output = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("sandbox runtime: {error}"))?;
+            runtime.block_on(async move {
+                let backend = nexus_sandbox::container::ContainerBackend::detect(&image)
+                    .await
+                    .map_err(|error| format!("strong WARP sandbox unavailable: {error}"))?;
+                let spec = nexus_sandbox::ExecSpec {
+                    program: check.program,
+                    args: check.args,
+                    shell: false,
+                    cwd,
+                    env: std::collections::BTreeMap::from([
+                        ("CARGO_BUILD_JOBS".into(), "2".into()),
+                        ("RUST_TEST_THREADS".into(), "2".into()),
+                    ]),
+                    env_allowlist: Vec::new(),
+                    network: nexus_sandbox::NetworkMode::Off,
+                    approved_network: nexus_sandbox::NetworkMode::Off,
+                    filesystem_access: nexus_sandbox::FilesystemAccess::WorkspaceWrite,
+                    sensitive_path_masks: Vec::new(),
+                    unsafe_host_approved: true,
+                    timeout_secs: 120,
+                    cpu_limit_secs: 120,
+                    memory_limit_mb: 1024,
+                    output_hard_cap: 200_000,
+                    stdin: None,
+                };
+                backend
+                    .execute(spec, None)
+                    .await
+                    .map_err(|error| format!("sandbox execution: {error}"))
+            })
+        })
+        .join()
+        .unwrap_or_else(|_| Err("WARP sandbox worker panicked".into()));
         let duration_ms = started.elapsed().as_millis() as u64;
         match output {
             Ok(out) => {
-                let passed = out.status.success();
-                // Keep a bounded tail of stderr for diagnostics; never the whole log.
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let detail = tail(stderr.trim(), 400);
+                let passed = out.exit_code == Some(0) && !out.timed_out && !out.output_capped;
+                let detail = tail(
+                    if out.stderr.trim().is_empty() {
+                        out.stdout.trim()
+                    } else {
+                        out.stderr.trim()
+                    },
+                    400,
+                );
                 CheckOutcome {
                     name: check.name.clone(),
                     kind: check.kind,
@@ -95,11 +145,11 @@ impl CheckRunner for ProcessCheckRunner {
                     duration_ms,
                 }
             }
-            Err(e) => CheckOutcome {
+            Err(error) => CheckOutcome {
                 name: check.name.clone(),
                 kind: check.kind,
                 passed: false,
-                detail: format!("failed to launch `{}`: {e}", check.program),
+                detail: format!("{}: `{}`", error, program),
                 duration_ms,
             },
         }
@@ -110,7 +160,10 @@ fn tail(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
-    let start = text.len() - max;
+    let mut start = text.len() - max;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
     format!("…{}", &text[start..])
 }
 
@@ -222,13 +275,22 @@ mod tests {
 
     #[test]
     fn process_runner_executes_real_commands() {
-        let runner = ProcessCheckRunner;
+        let runner = ProcessCheckRunner::default();
         let validator = DeterministicValidator::new(runner);
         let pass = Check::new("true", CheckKind::Custom, "true", Vec::<String>::new());
         let fail = Check::new("false", CheckKind::Custom, "false", Vec::<String>::new());
         let report = validator.validate("cnd-1", Path::new("."), &[pass, fail]);
         assert_eq!(report.verdict, Verdict::Rejected);
-        assert_eq!(report.checks.iter().filter(|c| c.passed).count(), 1);
-        assert_eq!(report.checks.iter().filter(|c| !c.passed).count(), 1);
+        assert_eq!(report.checks.iter().filter(|c| c.passed).count(), 0);
+        assert_eq!(report.checks.iter().filter(|c| !c.passed).count(), 2);
+        assert!(report.checks[0]
+            .detail
+            .contains("strong WARP sandbox unavailable"));
+    }
+
+    #[test]
+    fn diagnostic_tail_never_splits_utf8() {
+        let value = tail("αβγδε", 4);
+        assert_eq!(value, "…δε");
     }
 }

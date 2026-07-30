@@ -1985,9 +1985,11 @@ name = "nexus-warp"
 version = "2.11.0"
 dependencies = [
  "nexus-core",
+ "nexus-sandbox",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 

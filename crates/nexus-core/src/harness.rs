@@ -3774,6 +3774,27 @@ impl HarnessRepository {
                         proposal.status
                     )));
                 }
+                if next == ImprovementStatus::Promoted {
+                    if proposal.risk_tier == RiskTier::Prohibited {
+                        return Err(NexusError::PolicyDenied(
+                            "prohibited improvements can never be promoted".into(),
+                        ));
+                    }
+                    if proposal.risk_tier >= RiskTier::Moderate
+                        && !matches!(proposal.status, Shadow | Canary)
+                    {
+                        return Err(NexusError::PolicyDenied(format!(
+                            "{:?} improvements require shadow/canary validation before promotion",
+                            proposal.risk_tier
+                        )));
+                    }
+                    if proposal.risk_tier >= RiskTier::High && proposal.reviewed_at.is_none() {
+                        return Err(NexusError::PolicyDenied(
+                            "high-risk improvements require explicit review before promotion"
+                                .into(),
+                        ));
+                    }
+                }
                 let now = crate::now_rfc3339();
                 proposal.status = next;
                 proposal.updated_at = now.clone();

@@ -5021,19 +5021,6 @@ impl AgentLoop {
             ));
         }
 
-        // The flagship agent's identity brief. It sits below core safety and
-        // policy (which are pinned above) and shapes conduct without granting
-        // authority; empty for every non-flagship role, so this is inert for
-        // them.
-        let charter = self.role.charter();
-        if !charter.is_empty() {
-            sections.push(ContextSection::pinned(
-                AuthorityLayer::SelectedAgent,
-                "flagship agent charter",
-                charter.to_string(),
-            ));
-        }
-
         let mut agent_contract = format!(
             "role={}\nbase={}\noutput_contract={}\nallowed_categories={}\nmax_risk={}\nwrite={}\ndelegation={}",
             self.agent_name(),

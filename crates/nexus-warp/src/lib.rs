@@ -15,8 +15,10 @@ pub mod adversarial;
 pub mod deterministic;
 pub mod evaluators;
 pub mod isolation;
+pub mod promotion;
 pub mod replay;
 pub mod requirements;
+pub mod risk;
 
 pub use adversarial::{
     builtin_catalog, AdversarialCategory, AdversarialReport, AdversarialScenario, AdversarialSuite,
@@ -30,11 +32,16 @@ pub use evaluators::{
     EvaluatorVerdict,
 };
 pub use isolation::{Isolate, IsolationProvider, OverlayIsolation, WorktreeIsolation};
+pub use promotion::{
+    HumanApproval, PromotionDecision, PromotionGate, PromotionOutcome, PromotionPolicy,
+    PromotionRequest, Veto, VetoKind, REQUIRED_STAGES,
+};
 pub use replay::{
-    load_fixtures, MetricDelta, ReplayEngine, ReplayOutcome, ReplayReport, ReplayRunner,
-    TaskFixture,
+    load_fixtures, load_fixtures_strict, MetricDelta, ReplayEngine, ReplayOutcome, ReplayReport,
+    ReplayRunner, TaskFixture,
 };
 pub use requirements::{CompiledRequirement, RequirementCompiler, RequirementSet};
+pub use risk::{RiskAssessment, RiskClassifier};
 
 use serde::{Deserialize, Serialize};
 

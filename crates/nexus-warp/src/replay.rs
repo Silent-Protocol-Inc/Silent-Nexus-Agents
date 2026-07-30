@@ -102,6 +102,21 @@ impl ReplayEngine {
         let mut cand_metric: BTreeMap<String, (f64, usize)> = BTreeMap::new();
         let total_runs = (fixtures.len() * self.samples).max(1) as f64;
 
+        // Replay is a safety gate, so “nothing was replayed” is never a pass.
+        // This prevents a missing fixture directory or an accidentally empty
+        // fixture export from weakening promotion.
+        if fixtures.is_empty() {
+            return ReplayReport {
+                fixtures: 0,
+                samples: self.samples,
+                baseline_success_rate: 0.0,
+                candidate_success_rate: 0.0,
+                regressions: vec!["no replay fixtures available".into()],
+                metric_deltas: Vec::new(),
+                verdict: Verdict::Rejected,
+            };
+        }
+
         for fixture in fixtures {
             let (mut fb, mut fc) = (0usize, 0usize);
             for _ in 0..self.samples {
@@ -181,7 +196,9 @@ fn accumulate(acc: &mut BTreeMap<String, (f64, usize)>, metrics: &BTreeMap<Strin
 fn mean(entry: Option<&(f64, usize)>) -> f64 {
     match entry {
         Some((sum, count)) if *count > 0 => sum / *count as f64,
-        _ => 0.0,
+        // Missing telemetry is not zero cost. Treating it as zero lets a
+        // candidate omit an expensive metric and appear improved.
+        _ => f64::INFINITY,
     }
 }
 
@@ -204,6 +221,32 @@ pub fn load_fixtures(dir: &Path) -> Vec<TaskFixture> {
     }
     fixtures.sort_by(|a, b| a.id.cmp(&b.id));
     fixtures
+}
+
+/// Strict fixture loading for release/promotion paths. Missing directories,
+/// unreadable files, malformed JSON, and empty sets are all errors rather than
+/// silently shrinking the validation corpus.
+pub fn load_fixtures_strict(dir: &Path) -> Result<Vec<TaskFixture>, String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| format!("cannot read replay fixture directory: {error}"))?;
+    let mut fixtures = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot enumerate replay fixtures: {error}"))?;
+        if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let path = entry.path();
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read replay fixture {}: {error}", path.display()))?;
+        let fixture = serde_json::from_str::<TaskFixture>(&text)
+            .map_err(|error| format!("invalid replay fixture {}: {error}", path.display()))?;
+        fixtures.push(fixture);
+    }
+    if fixtures.is_empty() {
+        return Err("replay fixture directory contains no JSON fixtures".into());
+    }
+    fixtures.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(fixtures)
 }
 
 #[cfg(test)]
@@ -263,6 +306,13 @@ mod tests {
             .expect("tokens delta");
         assert!(tokens.improved);
         assert!(tokens.candidate_mean < tokens.baseline_mean);
+    }
+
+    #[test]
+    fn an_empty_fixture_set_is_a_hard_rejection() {
+        let report = ReplayEngine::new(2).compare(&ImprovingRunner, &[]);
+        assert_eq!(report.verdict, Verdict::Rejected);
+        assert_eq!(report.regressions, vec!["no replay fixtures available"]);
     }
 
     #[test]
