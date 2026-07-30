@@ -3564,6 +3564,11 @@ fn submit_objective(
     };
 
     st.mode = Mode::Running;
+    // Per-turn status facts belong to the turn that produced them: a stale
+    // effort or step count carried into the next turn would be an invention.
+    st.provider_effort = None;
+    st.intent_steps = 0;
+    st.reset_status_display();
     st.turn_started = Some(std::time::Instant::now());
     // A previous turn's decision must never leak into this one.
     st.reset_thinking_resolution();
@@ -3639,6 +3644,7 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
             class,
             refined,
         } => {
+            st.intent_steps = steps.len();
             st.push_local_event_for_turn(
                 turn_id.clone(),
                 TimelineStatus::Running,
@@ -3677,6 +3683,12 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
             running,
             failed,
         } => {
+            // The status line shows effort only when the provider reported one;
+            // storing it here is what keeps that field truthful rather than
+            // defaulted.
+            st.provider_effort = reasoning_enabled
+                .then(|| effort.trim().to_string())
+                .filter(|effort| !effort.is_empty());
             let label = if reasoning_enabled {
                 format!("Thinking… · {effort}")
             } else {

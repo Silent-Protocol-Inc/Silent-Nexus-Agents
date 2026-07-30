@@ -254,6 +254,17 @@ pub struct State {
     /// How much the agent narrates. A different axis from `activity_mode`, and
     /// they compose in one direction: **narration folds, `/view` reveals.**
     pub narration_mode: nexus_core::timeline::NarrationMode,
+    /// Reasoning effort the provider last reported, e.g. `high`. `None` when
+    /// the provider reported none — the status line then omits the field
+    /// rather than guessing a value.
+    pub provider_effort: Option<String>,
+    /// Steps in the intent plan for this turn, for the `verbose` step counter.
+    pub intent_steps: usize,
+    /// The status verb currently on screen and when it was committed. Held in
+    /// a `Cell` so the dwell window works from `&State` at render time; the
+    /// alternative was threading `&mut` through every render helper for a
+    /// presentation detail.
+    status_display: std::cell::Cell<Option<(nexus_core::brand::ActionState, Instant)>>,
     /// When the active turn started, for the live elapsed counter.
     pub turn_started: Option<Instant>,
     /// Cap on the NEXUS activity preview (`[tui.activity].reasoning_preview_lines`).
@@ -342,6 +353,9 @@ impl State {
             summarize_provider_reasoning: true,
             activity_mode: ActivityMode::default(),
             narration_mode: nexus_core::timeline::NarrationMode::default(),
+            provider_effort: None,
+            intent_steps: 0,
+            status_display: std::cell::Cell::new(None),
             turn_started: None,
             preview_lines: 3,
             animation: "nexus".into(),
@@ -361,6 +375,41 @@ impl State {
         self.transcript_filter.matches(event)
             && self.activity_mode.shows(event.kind.visibility())
             && !self.folded_by_narration(event)
+    }
+
+    /// The action state the status line shows right now.
+    ///
+    /// Not simply the current phase: a label that changed on every frame would
+    /// strobe through four words in a second on a fast tool sequence, so a new
+    /// state has to survive the design language's dwell window before it is
+    /// committed to screen. The underlying state is still whatever it is —
+    /// only the display waits.
+    pub fn status_action(&self, skin: &nexus_core::brand::Skin) -> nexus_core::brand::ActionState {
+        let waiting_on_operator = !self.active_work.waiting_approvals.is_empty();
+        let actual = self.thinking_state().action_state(waiting_on_operator);
+        let now = Instant::now();
+        match self.status_display.get() {
+            Some((shown, since)) if shown != actual => {
+                let held_ms = now.duration_since(since).as_millis() as u64;
+                if skin.motion.may_change(held_ms) {
+                    self.status_display.set(Some((actual, now)));
+                    actual
+                } else {
+                    shown
+                }
+            }
+            Some((shown, _)) => shown,
+            None => {
+                self.status_display.set(Some((actual, now)));
+                actual
+            }
+        }
+    }
+
+    /// Forget the displayed status. Called when a turn ends so the next one
+    /// starts from its real first phase instead of inheriting a stale verb.
+    pub fn reset_status_display(&self) {
+        self.status_display.set(None);
     }
 
     /// Whether the debug layer is showing: `/view detailed` or `/view debug`.
@@ -467,17 +516,6 @@ impl State {
     /// Set the timeline verbosity. Touches nothing else, for the same reason.
     pub fn set_activity_mode(&mut self, mode: ActivityMode) {
         self.activity_mode = mode;
-    }
-
-    /// True when the active turn carries a real provider reasoning channel.
-    /// Only then may the component claim to show reasoning — a summary the
-    /// harness derived from its own state is labelled ACTIVITY instead.
-    pub fn has_provider_reasoning(&self) -> bool {
-        let turn = self.active_turn_id.as_ref();
-        self.timeline.iter().rev().take(64).any(|event| {
-            matches!(event.kind, TimelineKind::ReasoningSummary { .. })
-                && turn.is_none_or(|id| &event.turn_id == id)
-        })
     }
 
     /// Text for the activity preview, most informative first. Returns the
@@ -957,7 +995,7 @@ mod tests {
         let before = state.timeline.len();
         for _ in 0..25 {
             let _ = state.thinking_state();
-            let _ = state.thinking_state().title();
+            let _ = state.status_action(&nexus_core::brand::Skin::nexus());
         }
         assert_eq!(
             state.timeline.len(),

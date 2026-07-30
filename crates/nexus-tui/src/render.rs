@@ -467,13 +467,17 @@ fn activity_track(st: &State) -> Vec<Span<'static>> {
     spans
 }
 
-fn format_elapsed(elapsed: std::time::Duration) -> String {
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    }
+/// 1-based position of the active stage in the turn's plan, when there is one.
+///
+/// `None` rather than a guess: a counter that is not bound to a real stage is
+/// exactly the invented progress the status line must never show.
+fn plan_position(st: &State) -> Option<usize> {
+    let work = st.active_work.work.as_ref()?;
+    let current = work.current_stage.as_deref()?;
+    work.stages
+        .iter()
+        .position(|stage| stage.id == current)
+        .map(|index| index + 1)
 }
 
 /// The live activity component: one status row, up to
@@ -490,58 +494,81 @@ fn processing_lines(st: &State, t: &Theme, width: usize) -> Vec<Line<'static>> {
         return Vec::new();
     }
 
+    let skin = nexus_core::brand::Skin::nexus().for_terminal(
+        crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+        st.reduced_motion || st.animation == "off",
+    );
     let phase = st.thinking_state();
-    let state_label = phase.title();
-    let elapsed = st.turn_started.map(|s| format_elapsed(s.elapsed()));
+    let action = st.status_action(&skin);
+    let icon = skin.icon(action);
+    let verb = action.verb();
 
-    // Mobile: one row, no preview, no track. Elapsed only when the row has
-    // width to spare — portrait stays as quiet as possible.
+    // Elapsed is withheld below the dwell floor so a sub-second turn does not
+    // flash a counter, and it is the long form only where the row can carry it.
+    let elapsed_secs = st.turn_started.map(|start| start.elapsed());
+    let elapsed = elapsed_secs
+        .filter(|e| e.as_millis() as u64 >= skin.motion.dwell_ms)
+        .map(|e| {
+            let style = if width >= 72 {
+                nexus_core::brand::ElapsedStyle::Long
+            } else {
+                nexus_core::brand::ElapsedStyle::Short
+            };
+            style.format(e.as_secs())
+        });
+
+    // Mobile: verb only. Portrait stays as quiet as possible.
     if width < 40 {
-        let mut text = format!("◢ {state_label}");
-        if let Some(elapsed) = &elapsed {
-            if width >= 28 {
-                text.push_str(" · ");
-                text.push_str(elapsed);
-            }
+        let mut text = format!("{icon} {verb}");
+        if let (Some(elapsed), true) = (&elapsed, width >= 28) {
+            text.push_str(skin.separators.field);
+            text.push_str(elapsed);
         }
         return vec![Line::from(Span::styled(text, t.primary()))];
     }
 
-    // "PROCESSING" claims a provider reasoning channel; without one this is
-    // the harness reporting its own activity, and it says so.
-    let heading = if st.has_provider_reasoning() {
-        format!("NEXUS {state_label}")
-    } else {
-        "NEXUS ACTIVITY".to_string()
-    };
-    let marker = if st.reduced_motion || st.animation == "off" {
-        "▪"
-    } else {
-        "◢"
-    };
+    // Effort is shown only when the provider actually reported one. An absent
+    // value is omitted rather than defaulted — "medium effort" that nobody
+    // reported would be an invention.
+    let effort = st
+        .provider_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(|effort| format!("{effort} effort"));
+    // The step counter is bound to a real intent plan, and only `verbose` asks
+    // for it. Without a plan there is no counter, rather than a made-up one.
+    let step = (st.narration_mode == nexus_core::timeline::NarrationMode::Verbose
+        && st.intent_steps > 0)
+        .then(|| plan_position(st))
+        .flatten()
+        .map(|index| format!("step {index}/{}", st.intent_steps));
 
-    let track = activity_track(st);
-    // Waiting is the one phase blocked on the operator, so it is the one phase
-    // whose heading asks for attention.
-    let heading_style = if phase.is_blocked() {
+    // Waiting on the operator is the one state that asks for attention, so it
+    // is the one state that colors its verb differently.
+    let verb_style = if action.is_blocked_on_operator() {
         t.warning()
     } else {
         t.primary()
     };
+    let track = activity_track(st);
     let mut head = vec![
-        Span::styled(format!("  {marker} "), t.secondary()),
+        Span::styled(format!("  {icon} "), t.secondary()),
         Span::styled(
             if track.is_empty() {
-                heading.clone()
+                verb.to_string()
             } else {
-                format!("{heading} ")
+                format!("{verb} ")
             },
-            heading_style,
+            verb_style,
         ),
     ];
     head.extend(track);
-    if let Some(elapsed) = elapsed {
-        head.push(Span::styled(format!("  {elapsed}"), t.muted()));
+    for field in [elapsed, effort, step].into_iter().flatten() {
+        head.push(Span::styled(
+            format!("{}{field}", skin.separators.field),
+            t.muted(),
+        ));
     }
     let mut lines = vec![Line::from(head)];
 
@@ -3821,7 +3848,8 @@ mod tests {
         let lines = processing_lines(&state, &state.theme.clone(), 120);
         assert_eq!(lines.len(), 1, "the indicator row must survive `off`");
         let text = line_text(&lines[0]);
-        assert!(text.contains("NEXUS"), "{text}");
+        let skin = nexus_core::brand::Skin::nexus();
+        assert!(text.contains(state.status_action(&skin).verb()), "{text}");
         assert!(
             !text.contains("Ctrl+E"),
             "no preview means no detail pointer: {text}"
@@ -3983,8 +4011,13 @@ mod tests {
         let lines = processing_lines(&state, &state.theme.clone(), 36);
         assert_eq!(lines.len(), 1);
         let text = line_text(&lines[0]);
-        assert!(text.starts_with("◢ "), "{text}");
-        assert!(text.contains("PROCESSING") || text.contains('·'), "{text}");
+        let skin = nexus_core::brand::Skin::nexus();
+        let action = state.status_action(&skin);
+        assert!(text.starts_with(skin.icon(action)), "{text}");
+        assert!(text.contains(action.verb()), "{text}");
+        // A tool name would be machine detail on the most cramped surface there
+        // is; the status line never carries one.
+        assert!(!text.contains("fs."), "{text}");
     }
 
     #[test]
@@ -3994,7 +4027,11 @@ mod tests {
             .timeline
             .retain(|event| !matches!(event.kind, TimelineKind::ReasoningSummary { .. }));
         let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
-        assert!(text.contains("NEXUS ACTIVITY"), "{text}");
+        // The row no longer announces the product at all — it says what the
+        // agent is doing, which is the only thing an operator needs from it.
+        assert!(!text.contains("NEXUS"), "{text}");
+        let skin = nexus_core::brand::Skin::nexus();
+        assert!(text.contains(state.status_action(&skin).verb()), "{text}");
 
         state.active_turn_id = None;
         state.push_local_event(
@@ -4005,11 +4042,9 @@ mod tests {
             },
         );
         let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
-        assert!(
-            !text.contains("NEXUS ACTIVITY"),
-            "a real reasoning channel earns the live state label: {text}",
-        );
-        assert!(text.contains(state.thinking_state().title()), "{text}");
+        assert!(!text.contains("NEXUS"), "{text}");
+        let skin = nexus_core::brand::Skin::nexus();
+        assert!(text.contains(state.status_action(&skin).verb()), "{text}");
     }
 
     #[test]
@@ -4018,8 +4053,140 @@ mod tests {
         state.reduced_motion = true;
         assert!(activity_track(&state).is_empty());
         let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
-        assert!(text.contains('▪'), "{text}");
+        // Reduced motion stops the movement; it does not swap in a different
+        // design, so the state's own icon is still what leads the row.
+        let skin = nexus_core::brand::Skin::nexus();
+        assert!(
+            text.starts_with(&format!("  {}", skin.icon(state.status_action(&skin)))),
+            "{text}"
+        );
         assert!(!text.contains('▰'), "{text}");
+    }
+
+    #[test]
+    fn the_status_line_is_absent_when_idle() {
+        let mut state = activity_state();
+        state.mode = Mode::Idle;
+        assert!(processing_lines(&state, &state.theme.clone(), 120).is_empty());
+    }
+
+    /// Effort is the provider's claim, not the harness's. With nothing
+    /// reported the field is omitted — a defaulted "medium effort" would be an
+    /// invention on the most-read row in the product.
+    #[test]
+    fn effort_is_shown_only_when_the_provider_reported_one() {
+        let mut state = activity_state();
+        state.provider_effort = None;
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(!text.contains("effort"), "{text}");
+
+        state.provider_effort = Some("high".into());
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(text.contains("high effort"), "{text}");
+    }
+
+    /// The step counter is bound to a real plan. Without one there is no
+    /// counter rather than a made-up denominator.
+    #[test]
+    fn the_step_counter_needs_both_verbose_and_a_real_plan() {
+        let mut state = activity_state();
+        state.narration_mode = nexus_core::timeline::NarrationMode::Verbose;
+        state.intent_steps = 0;
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(!text.contains("step "), "{text}");
+
+        state.intent_steps = 3;
+        state.narration_mode = nexus_core::timeline::NarrationMode::Auto;
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(
+            !text.contains("step "),
+            "auto must not show a counter: {text}"
+        );
+    }
+
+    /// A sub-second turn must not flash a counter that is instantly stale.
+    #[test]
+    fn elapsed_is_withheld_below_the_dwell_floor() {
+        let mut state = activity_state();
+        state.turn_started = Some(std::time::Instant::now());
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(!text.contains("second"), "{text}");
+
+        state.turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(24));
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(text.contains("24 seconds"), "{text}");
+    }
+
+    /// Narrow rows keep the verb and drop the prose form of the elapsed time.
+    #[test]
+    fn elapsed_switches_to_the_short_form_on_a_narrow_row() {
+        let mut state = activity_state();
+        state.turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(24));
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 60)[0]);
+        assert!(text.contains("24s"), "{text}");
+        assert!(!text.contains("24 seconds"), "{text}");
+    }
+
+    /// Rendering the status line is a pure projection: it must never append to
+    /// the record it sits above.
+    #[test]
+    fn the_status_line_never_writes_a_timeline_event() {
+        let state = activity_state();
+        let before = state.timeline.len();
+        for _ in 0..50 {
+            let _ = processing_lines(&state, &state.theme.clone(), 120);
+        }
+        assert_eq!(state.timeline.len(), before);
+    }
+
+    /// The 2.4.1 regression guard, extended to the narration axis: liveness
+    /// feedback is not verbosity, so every mode still shows the row.
+    #[test]
+    fn the_status_line_renders_in_every_narration_mode() {
+        use nexus_core::timeline::NarrationMode;
+        for mode in [
+            NarrationMode::Off,
+            NarrationMode::Compact,
+            NarrationMode::Auto,
+            NarrationMode::Verbose,
+        ] {
+            let mut state = activity_state();
+            state.narration_mode = mode;
+            assert!(
+                !processing_lines(&state, &state.theme.clone(), 120).is_empty(),
+                "{mode:?} lost the status line"
+            );
+        }
+    }
+
+    /// A fast tool sequence must not strobe the verb.
+    #[test]
+    fn the_verb_holds_for_the_dwell_window() {
+        let skin = nexus_core::brand::Skin::nexus();
+        let mut state = activity_state();
+        state.active_work.active_foreground_tool = None;
+        let first = state.status_action(&skin);
+
+        // The underlying phase changes immediately…
+        state.active_work.active_foreground_tool = Some("fs.write_file".into());
+        assert_eq!(
+            state.status_action(&skin),
+            first,
+            "the displayed verb changed inside the dwell window"
+        );
+
+        // …and the display catches up once the window has passed.
+        let past = nexus_core::brand::Skin {
+            motion: nexus_core::brand::Motion {
+                dwell_ms: 0,
+                ..skin.motion
+            },
+            ..skin
+        };
+        assert_eq!(
+            state.status_action(&past),
+            nexus_core::brand::ActionState::Applying
+        );
     }
 
     #[test]
