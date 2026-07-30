@@ -11,6 +11,7 @@
 //! ```
 
 pub mod app;
+pub mod boot;
 pub mod claude;
 pub mod clipboard;
 pub mod codex;

@@ -287,7 +287,7 @@ impl State {
         thinking_mode: nexus_core::ThinkingMode,
     ) -> Self {
         let active_work = ActiveWorkSnapshot::empty(bar.workspace.clone());
-        let mut s = Self {
+        let s = Self {
             theme: Theme::new(&theme_name, color_support),
             theme_name,
             color_support,
@@ -362,9 +362,26 @@ impl State {
             animation_rate: 2,
             active_work,
         };
-        s.system(format!("{} ONLINE :: {}", brand::MARK, brand::TAGLINE));
-        s.system("Type a message, `/` for commands, Ctrl+K for the palette, /help for keys.");
+        // No startup text here. The wake flow owns every line the operator
+        // sees on launch, in one ordered place — this used to push two rows
+        // while `event_loop` pushed a third, so nothing could guarantee their
+        // order or keep them consistent.
         s
+    }
+
+    /// Render the curated wake flow into the timeline.
+    ///
+    /// A stage with nothing real to say was already dropped by
+    /// `nexus_app::boot::wake_flow`; this only draws what survived.
+    pub fn boot(&mut self, lines: &[nexus_app::boot::BootLine], skin: &brand::Skin) {
+        for line in lines {
+            let detail = if line.detail.trim().is_empty() {
+                line.label.clone()
+            } else {
+                format!("{} · {}", line.label, line.detail)
+            };
+            self.system_sev(format!("{} {detail}", skin.icon(line.state)), Sev::Dim);
+        }
     }
 
     /// Whether an event appears in the main timeline: it must pass the

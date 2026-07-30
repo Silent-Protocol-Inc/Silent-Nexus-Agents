@@ -307,18 +307,20 @@ async fn event_loop(
     st.reduced_motion = st.reduced_motion || activity.reduced_motion;
     glyphs::configure(&activity.tool_icons);
     st.active_work = nexus_app::services::active_work_snapshot(&app, None, "idle");
-    // Surface any waiting self-improvement proposals once at startup so the
-    // operator knows the flagship RSI review queue is non-empty.
-    if app.config.self_improvement.surface_pending {
-        if let Ok(pending) = app.rsi().list(false) {
-            if !pending.is_empty() {
-                st.system(format!(
-                    "self-improvement :: {} pending proposal(s) — review with `snx profile`",
-                    pending.len()
-                ));
-            }
-        }
-    }
+    // The wake flow: identity (already revealed by `intro`), then session
+    // restore, memory link, what's new, and where to go next — each omitted
+    // when there is nothing real to say. This replaces three `st.system(…)`
+    // calls that lived in two files, one of which still pointed at the
+    // superseded `snx profile` for the RSI review queue.
+    let skin = nexus_core::brand::Skin::nexus().for_terminal(
+        glyphs::tier() != glyphs::GlyphTier::Ascii,
+        st.reduced_motion,
+    );
+    st.boot(&nexus_app::boot::wake_flow(&app), &skin);
+    // "What's new" has now been shown for this version.
+    let _ = app.update_ui_state(|state| {
+        state.last_seen_version = nexus_core::brand::VERSION.to_string();
+    });
 
     // Channels.
     let (turn_tx, mut turn_rx) = mpsc::unbounded_channel::<TurnMessage>();

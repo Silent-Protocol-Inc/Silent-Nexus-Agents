@@ -56,6 +56,9 @@ pub struct UiState {
     /// True once the harness has completed a first interactive launch, so the
     /// onboarding banner shows exactly once.
     pub first_run_completed: bool,
+    /// Version whose changelog headline the operator has already been shown, so
+    /// "what's new" appears once per upgrade rather than on every launch.
+    pub last_seen_version: String,
     /// Timeline verbosity chosen via `/view`: `default`, `detailed`, or `debug`.
     /// Default keeps the timeline to essential activity; diagnostics stay one
     /// keystroke away rather than flooding the transcript.
@@ -110,6 +113,7 @@ impl Default for UiState {
             thinking_enabled: None,
             first_run_completed: false,
             activity_mode: "default".into(),
+            last_seen_version: String::new(),
             // Empty means "the operator has not chosen", which is what lets
             // `[narration].mode` in config still apply. A filled-in default
             // here would silently outrank the config file forever.
