@@ -23,7 +23,13 @@ use nexus_core::harness::{ImprovementPlane, RiskTier};
 use serde::{Deserialize, Serialize};
 
 /// Stages that must all be present and `Passed` before promotion is considered.
-pub const REQUIRED_STAGES: &[&str] = &["deterministic", "replay", "adversarial", "evaluators"];
+pub const REQUIRED_STAGES: &[&str] = &[
+    "deterministic",
+    "replay",
+    "adversarial",
+    "integrity",
+    "evaluators",
+];
 
 /// Why a candidate was refused. Each variant is a veto: it cannot be outweighed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

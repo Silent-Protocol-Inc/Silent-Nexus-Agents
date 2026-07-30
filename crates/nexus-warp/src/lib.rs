@@ -15,6 +15,7 @@ pub mod adversarial;
 pub mod canary;
 pub mod deterministic;
 pub mod evaluators;
+pub mod integrity;
 pub mod isolation;
 pub mod promotion;
 pub mod replay;
@@ -37,6 +38,9 @@ pub use deterministic::{
 pub use evaluators::{
     Evaluator, EvaluatorInput, EvaluatorPool, EvaluatorRecommendation, EvaluatorRole,
     EvaluatorVerdict,
+};
+pub use integrity::{
+    mcp_proposal_requirements, IntegrityFinding, IntegrityIssue, RewardHackingDetector,
 };
 pub use isolation::{Isolate, IsolationProvider, OverlayIsolation, WorktreeIsolation};
 pub use promotion::{

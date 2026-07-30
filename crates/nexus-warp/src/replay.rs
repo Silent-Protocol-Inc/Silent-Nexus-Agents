@@ -24,6 +24,11 @@ pub struct TaskFixture {
     /// Permissions and tools the replay must match so the comparison is fair.
     pub permissions: Vec<String>,
     pub tools: Vec<String>,
+    /// Held out of the corpus a candidate is allowed to see or tune against.
+    /// Holdouts are still replayed — that is the point — but a candidate that
+    /// modifies one is caught by the integrity stage.
+    #[serde(default)]
+    pub holdout: bool,
 }
 
 impl TaskFixture {
@@ -42,7 +47,14 @@ impl TaskFixture {
             model,
             permissions: Vec::new(),
             tools: Vec::new(),
+            holdout: false,
         }
+    }
+
+    /// Mark this fixture as a holdout.
+    pub fn holdout(mut self) -> Self {
+        self.holdout = true;
+        self
     }
 }
 
@@ -77,6 +89,9 @@ pub struct ReplayReport {
     pub samples: usize,
     pub baseline_success_rate: f64,
     pub candidate_success_rate: f64,
+    /// How many of the replayed fixtures were holdouts.
+    #[serde(default)]
+    pub holdout_fixtures: usize,
     /// Fixtures where the candidate's success rate fell below baseline — hard.
     pub regressions: Vec<String>,
     pub metric_deltas: Vec<MetricDelta>,
@@ -108,6 +123,7 @@ impl ReplayEngine {
         if fixtures.is_empty() {
             return ReplayReport {
                 fixtures: 0,
+                holdout_fixtures: 0,
                 samples: self.samples,
                 baseline_success_rate: 0.0,
                 candidate_success_rate: 0.0,
@@ -167,6 +183,7 @@ impl ReplayEngine {
 
         ReplayReport {
             fixtures: fixtures.len(),
+            holdout_fixtures: fixtures.iter().filter(|f| f.holdout).count(),
             samples: self.samples,
             baseline_success_rate: base_success / total_runs,
             candidate_success_rate: cand_success / total_runs,
@@ -181,6 +198,13 @@ impl ReplayEngine {
         let mut validation = ValidationReport::new(candidate_id, "replay");
         validation.verdict = report.verdict;
         validation.hard_failures = report.regressions.clone();
+        // A corpus the candidate could have tuned against proves less. Say so
+        // rather than letting a clean run imply more than it shows.
+        if report.holdout_fixtures == 0 && report.fixtures > 0 {
+            validation
+                .soft_failures
+                .push("no holdout fixtures in this replay — the corpus is fully visible".into());
+        }
         validation
     }
 }
@@ -326,5 +350,39 @@ mod tests {
             None,
         );
         assert!(!fixture.objective.contains(secret));
+    }
+
+    #[test]
+    fn a_fully_visible_corpus_is_flagged_and_a_holdout_clears_it() {
+        struct Same;
+        impl ReplayRunner for Same {
+            fn run(&self, _f: &TaskFixture, _v: &str) -> ReplayOutcome {
+                ReplayOutcome {
+                    succeeded: true,
+                    metrics: BTreeMap::new(),
+                }
+            }
+        }
+        let redactor = Redactor::new();
+        let visible = vec![TaskFixture::sanitized(
+            &redactor,
+            "f1",
+            "do a thing",
+            None,
+            None,
+        )];
+        let report = ReplayEngine::new(2).compare(&Same, &visible);
+        assert_eq!(report.holdout_fixtures, 0);
+        let validation = ReplayEngine::to_validation("cnd-1", &report);
+        assert_eq!(validation.verdict, Verdict::Passed);
+        assert!(validation.soft_failures[0].contains("no holdout fixtures"));
+
+        let mut with_holdout = visible.clone();
+        with_holdout.push(TaskFixture::sanitized(&redactor, "f2", "another", None, None).holdout());
+        let report = ReplayEngine::new(2).compare(&Same, &with_holdout);
+        assert_eq!(report.holdout_fixtures, 1);
+        assert!(ReplayEngine::to_validation("cnd-1", &report)
+            .soft_failures
+            .is_empty());
     }
 }
