@@ -2118,6 +2118,7 @@ fn handle_effect(
                 nexus_app::View::Profile => LoadRequest::Profile,
                 nexus_app::View::Tools => LoadRequest::Tools,
                 nexus_app::View::Memory => LoadRequest::Memory,
+                nexus_app::View::Rsi => LoadRequest::Rsi,
                 nexus_app::View::Skills => LoadRequest::Skills,
                 nexus_app::View::Mcp => LoadRequest::Mcp,
                 nexus_app::View::Theme => LoadRequest::Theme,
@@ -3118,6 +3119,10 @@ fn start_load(
             Ok(menu) => replace_or_push_menu(st, app, menu),
             Err(error) => st.system_sev(format!("memory: {error}"), Sev::Err),
         },
+        LoadRequest::Rsi => {
+            let mode = nexus_app::services::permission_mode(&app.config.policy);
+            replace_or_push_menu(st, app, menus::rsi_menu(mode));
+        }
         LoadRequest::CommandMenu(name) => match nexus_app::registry::find(&name) {
             Some(definition) => push_menu(st, app, menus::command_menu(definition)),
             None => st.system_sev(format!("unknown command /{name}"), Sev::Err),

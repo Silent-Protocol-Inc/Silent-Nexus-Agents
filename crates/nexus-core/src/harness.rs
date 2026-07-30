@@ -1743,7 +1743,7 @@ pub enum ImprovementStatus {
 }
 
 impl ImprovementStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Observed => "observed",
             Self::Draft => "draft",

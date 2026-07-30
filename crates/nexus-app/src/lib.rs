@@ -23,6 +23,7 @@ pub mod parse;
 pub mod providers;
 pub mod registry;
 pub mod report;
+pub mod rsi;
 pub mod services;
 pub mod status;
 pub mod uistate;

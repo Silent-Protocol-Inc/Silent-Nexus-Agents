@@ -1018,6 +1018,26 @@ pub async fn profile(app: &App, cmd: ProfileCmd, json: bool) -> Result<()> {
     Ok(())
 }
 
+// ----------------------------------------------------------------------- rsi
+
+/// Read-only views of the governed self-improvement loop. State changes go
+/// through the WARP pipeline and the promotion gate, never through this command.
+pub async fn rsi(app: &App, cmd: RsiCmd) -> Result<()> {
+    let ui = ui(app);
+    let report = match cmd {
+        RsiCmd::Status => nexus_app::rsi::status_report(app)?,
+        RsiCmd::Candidates => nexus_app::rsi::candidates_report(app)?,
+        RsiCmd::Show { id } => nexus_app::rsi::candidate_show_report(app, &id)?,
+        RsiCmd::Observations => nexus_app::rsi::observations_report(app)?,
+        RsiCmd::Outcomes => nexus_app::rsi::outcomes_report(app)?,
+        RsiCmd::Promotions => nexus_app::rsi::promotions_report(app)?,
+        RsiCmd::Rollbacks => nexus_app::rsi::rollbacks_report(app)?,
+        RsiCmd::Governance => nexus_app::rsi::governance_report(),
+    };
+    ui.render_report(&report);
+    Ok(())
+}
+
 // -------------------------------------------------------------------- memory
 
 pub async fn memory(app: &App, cmd: MemoryCmd, json: bool) -> Result<()> {

@@ -21,6 +21,8 @@ nexus-mcp = { workspace = true }
 nexus-skills = { workspace = true }
 nexus-index = { workspace = true }
 nexus-policy = { workspace = true }
+nexus-rsi = { workspace = true }
+nexus-warp = { workspace = true }
 nexus-observability = { workspace = true }
 
 tokio = { workspace = true }

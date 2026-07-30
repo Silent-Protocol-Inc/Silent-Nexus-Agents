@@ -1405,6 +1405,82 @@ pub fn subagents_menu(runs: &[nexus_core::orchestration::AgentRun], has_session:
 
 /// `/permissions` — approval presets, most restrictive first. Full access is
 /// explicit about what it stops asking for; destructive actions always ask.
+/// The `/rsi` workspace: what the self-improvement loop has observed, what it
+/// proposes, and what governs it.
+///
+/// Write actions are filtered by permission mode — in `read-only` the review
+/// entries are not offered at all. The hint says the part that matters and is
+/// easy to assume otherwise: `full-access` removes prompts, not governance. A
+/// tier-3 candidate still waits for a human whatever this menu shows.
+pub fn rsi_menu(active_mode: &str) -> Menu {
+    let read_only = active_mode == "read-only";
+    let mut items = vec![
+        MenuItem::new("Status", UiAction::RunCommand("rsi status".into()))
+            .category("overview")
+            .detail("observation state, candidate queue, and the last promotion"),
+        MenuItem::new("Candidates", UiAction::RunCommand("rsi candidates".into()))
+            .category("overview")
+            .detail("every candidate with its declared and classified risk tier"),
+        MenuItem::new(
+            "Candidate detail…",
+            UiAction::InsertInput("/rsi show ".into()),
+        )
+        .category("overview")
+        .detail("one candidate: evidence, success metrics, WARP classification"),
+        MenuItem::new(
+            "Observations",
+            UiAction::RunCommand("rsi observations".into()),
+        )
+        .category("evidence")
+        .detail("redacted harness events the candidates are built from"),
+        MenuItem::new(
+            "Outcome history",
+            UiAction::RunCommand("rsi outcomes".into()),
+        )
+        .category("evidence")
+        .detail("multi-dimensional scoring; agent self-assessment ranks lowest"),
+        MenuItem::new("Promotions", UiAction::RunCommand("rsi promotions".into()))
+            .category("promotion")
+            .detail("what was promoted, by whom, and the recorded way back"),
+        MenuItem::new("Rollbacks", UiAction::RunCommand("rsi rollbacks".into()))
+            .category("promotion")
+            .detail("triggers and restored versions"),
+        MenuItem::new("Governance", UiAction::RunCommand("rsi governance".into()))
+            .category("governance")
+            .badge("compile-time")
+            .detail("the rules, and the components no candidate may modify"),
+        MenuItem::new("Memory health", UiAction::Load(LoadRequest::Memory))
+            .category("related")
+            .detail("memory candidates start unverified until evidence supports them"),
+        MenuItem::new("Skills", UiAction::Load(LoadRequest::Skills))
+            .category("related")
+            .detail("proposed skills are stored disabled until reviewed"),
+    ];
+    if !read_only {
+        items.push(
+            MenuItem::new("Review queue…", UiAction::InsertInput("/improve ".into()))
+                .category("actions")
+                .detail("approve or reject a proposal — governance still applies on top"),
+        );
+        items.push(
+            MenuItem::new(
+                "Observation setting…",
+                UiAction::InsertInput("/config set workspace self_improvement.enabled true".into()),
+            )
+            .category("actions")
+            .detail("turn post-turn analysis on or off"),
+        );
+    }
+    Menu::new("rsi — governed self-improvement", items)
+        .route("/rsi")
+        .branded(BrandVariant::Compact)
+        .hint(if read_only {
+            "read-only permissions: review actions hidden · full-access would not bypass tier 3"
+        } else {
+            "Enter opens a report · promotion needs WARP evidence; full-access does not bypass tier 3"
+        })
+}
+
 pub fn permissions_menu(active_mode: &str) -> Menu {
     let mut items: Vec<MenuItem> = nexus_app::services::PERMISSION_MODES
         .iter()
@@ -1839,4 +1915,48 @@ pub fn branches_menu(branches: &[nexus_app::gitx::BranchInfo]) -> Menu {
         .route("/branch")
         .searchable()
         .hint("Push/pull/PR operations stay in connector workflows")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(menu: &Menu) -> Vec<String> {
+        menu.items.iter().map(|i| i.label.clone()).collect()
+    }
+
+    #[test]
+    fn the_rsi_menu_routes_and_offers_the_read_only_views() {
+        let menu = rsi_menu("default");
+        assert_eq!(menu.route, "/rsi");
+        for expected in ["Status", "Candidates", "Observations", "Governance"] {
+            assert!(
+                labels(&menu).iter().any(|l| l == expected),
+                "missing `{expected}` in {:?}",
+                labels(&menu)
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_permissions_hide_the_review_actions() {
+        let restricted = rsi_menu("read-only");
+        assert!(
+            restricted.items.iter().all(|i| i.category != "actions"),
+            "read-only must not offer write actions"
+        );
+        let normal = rsi_menu("default");
+        assert!(normal.items.iter().any(|i| i.category == "actions"));
+    }
+
+    /// Easy thing to assume wrongly, so the menu says it in both modes.
+    #[test]
+    fn every_hint_states_that_full_access_does_not_bypass_tier_three() {
+        for mode in ["read-only", "default", "auto-edit", "full-access"] {
+            assert!(
+                rsi_menu(mode).hint.contains("tier 3"),
+                "hint for `{mode}` omits the tier-3 note"
+            );
+        }
+    }
 }

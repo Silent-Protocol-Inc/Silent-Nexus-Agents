@@ -142,6 +142,7 @@ async fn dispatch(args: Cli) -> anyhow::Result<()> {
         Command::Persona(c) => commands::persona(&app, c, json).await,
         Command::Profile(c) => commands::profile(&app, c, json).await,
         Command::Memory(c) => commands::memory(&app, c, json).await,
+        Command::Rsi(c) => commands::rsi(&app, c).await,
         Command::Skill(c) => commands::skill(&app, c, json).await,
         Command::Mcp(c) => commands::mcp(&app, c, json).await,
         Command::Connector(c) => commands::connector(&app, c, json).await,

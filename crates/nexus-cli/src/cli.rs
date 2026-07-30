@@ -121,6 +121,10 @@ pub enum Command {
     #[command(subcommand)]
     Memory(MemoryCmd),
 
+    /// Governed self-improvement: candidates, evidence, promotions, governance.
+    #[command(subcommand)]
+    Rsi(RsiCmd),
+
     /// Versioned, inspectable skills.
     #[command(subcommand)]
     Skill(SkillCmd),
@@ -404,6 +408,26 @@ pub enum ProfileCmd {
     RejectProposal {
         id: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RsiCmd {
+    /// Observation state, candidate queue, and the last promotion.
+    Status,
+    /// Every candidate with its declared and classified risk tier.
+    Candidates,
+    /// One candidate: evidence, success metrics, WARP classification.
+    Show { id: String },
+    /// Redacted harness events the candidates are built from.
+    Observations,
+    /// Multi-dimensional outcome scores for finished tasks.
+    Outcomes,
+    /// Promotions recorded for this workspace.
+    Promotions,
+    /// Rollbacks recorded against the latest promotion.
+    Rollbacks,
+    /// The compile-time governance ruleset.
+    Governance,
 }
 
 #[derive(Subcommand, Debug)]
