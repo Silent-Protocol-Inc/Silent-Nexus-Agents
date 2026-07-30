@@ -10,7 +10,9 @@
 
 pub mod design;
 
-pub use design::{ActionState, Casing, ElapsedStyle, IconSet, Motion, Separators, Skin};
+pub use design::{
+    ActionState, Casing, ElapsedStyle, IconSet, LifecycleMark, Motion, Separators, Skin,
+};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 

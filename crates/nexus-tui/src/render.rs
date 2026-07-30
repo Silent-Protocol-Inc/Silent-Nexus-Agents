@@ -819,16 +819,23 @@ fn component_header(
         event.status,
         TimelineStatus::Failed | TimelineStatus::Blocked
     );
-    // `●` reads as live, `✓` settled, `✕` failed, `◆` handed to the background.
+    // Marks come from the design language, so a reskin reaches this header too.
+    // `●` is the one exception: a live component reads differently from a
+    // settled record, and that distinction belongs to this surface.
+    let skin = nexus_core::brand::Skin::nexus().for_terminal(
+        crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+        false,
+    );
+    use nexus_core::brand::LifecycleMark;
     let mark = match event.status {
         TimelineStatus::Running => "●",
-        TimelineStatus::Completed => "✓",
-        TimelineStatus::Failed => "✕",
-        TimelineStatus::Blocked => "■",
-        TimelineStatus::Cancelled => "×",
-        TimelineStatus::Waiting => "◫",
-        TimelineStatus::Pending => "◇",
-        TimelineStatus::Skipped => "–",
+        TimelineStatus::Completed => skin.lifecycle(LifecycleMark::Done),
+        TimelineStatus::Failed => skin.lifecycle(LifecycleMark::Failed),
+        TimelineStatus::Blocked => skin.lifecycle(LifecycleMark::Blocked),
+        TimelineStatus::Cancelled => skin.lifecycle(LifecycleMark::Cancelled),
+        TimelineStatus::Waiting => skin.lifecycle(LifecycleMark::Waiting),
+        TimelineStatus::Pending => skin.lifecycle(LifecycleMark::Pending),
+        TimelineStatus::Skipped => skin.lifecycle(LifecycleMark::Skipped),
     };
     let duration = event.duration_ms.map(human_duration);
     let mark = match &event.kind {
@@ -838,9 +845,7 @@ fn component_header(
         // pair reads as one thing settling rather than two different events.
         TimelineKind::AgentActivity { .. } if running => "◢",
         TimelineKind::AgentActivity { .. } => "◆",
-        TimelineKind::Intent { .. } => {
-            nexus_core::brand::Skin::nexus().icon(nexus_core::brand::ActionState::ShapingApproach)
-        }
+        TimelineKind::Intent { .. } => skin.icon(nexus_core::brand::ActionState::ShapingApproach),
         _ => mark,
     };
 
@@ -974,15 +979,38 @@ fn event_lines(
 ) -> Vec<Line<'static>> {
     use nexus_core::timeline::{TimelineKind, TimelineStatus};
 
+    // Marks come from the design language so a reskin reaches them; the labels
+    // and colors stay here because they are this surface's concern.
+    let skin = nexus_core::brand::Skin::nexus().for_terminal(
+        crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+        false,
+    );
+    use nexus_core::brand::LifecycleMark;
     let (glyph, status_label, status_style) = match event.status {
-        TimelineStatus::Pending => ("◇", "PENDING", t.muted()),
-        TimelineStatus::Running => ("◆", "RUNNING", t.primary()),
-        TimelineStatus::Completed => ("✓", "DONE", t.success()),
-        TimelineStatus::Failed => ("✗", "FAILED", t.failure()),
-        TimelineStatus::Blocked => ("■", "BLOCKED", t.failure()),
-        TimelineStatus::Cancelled => ("×", "CANCELLED", t.warning()),
-        TimelineStatus::Skipped => ("–", "SKIPPED", t.muted()),
-        TimelineStatus::Waiting => ("◫", "WAITING", t.warning()),
+        TimelineStatus::Pending => (skin.lifecycle(LifecycleMark::Pending), "PENDING", t.muted()),
+        TimelineStatus::Running => (
+            skin.lifecycle(LifecycleMark::Running),
+            "RUNNING",
+            t.primary(),
+        ),
+        TimelineStatus::Completed => (skin.lifecycle(LifecycleMark::Done), "DONE", t.success()),
+        TimelineStatus::Failed => (skin.lifecycle(LifecycleMark::Failed), "FAILED", t.failure()),
+        TimelineStatus::Blocked => (
+            skin.lifecycle(LifecycleMark::Blocked),
+            "BLOCKED",
+            t.failure(),
+        ),
+        TimelineStatus::Cancelled => (
+            skin.lifecycle(LifecycleMark::Cancelled),
+            "CANCELLED",
+            t.warning(),
+        ),
+        TimelineStatus::Skipped => (skin.lifecycle(LifecycleMark::Skipped), "SKIPPED", t.muted()),
+        TimelineStatus::Waiting => (
+            skin.lifecycle(LifecycleMark::Waiting),
+            "WAITING",
+            t.warning(),
+        ),
     };
     let label = event
         .kind

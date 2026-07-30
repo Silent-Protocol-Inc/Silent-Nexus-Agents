@@ -1,4 +1,9 @@
-//! Marks for tool families in the activity timeline.
+//! Marks for tool families — a **debug-layer** concern.
+//!
+//! Tool names do not appear on a product surface: the timeline says what
+//! happened and the status line says what is happening, both in the design
+//! language's action-state vocabulary. These marks label the tool rows that
+//! `/view detailed|debug` reveals, and nothing else.
 //!
 //! A tool row is read at a glance, and the family — is this reading, writing,
 //! running something? — is the part worth encoding in one cell. The names are
@@ -6,17 +11,15 @@
 //! MCP servers, and from custom agents; an unknown name gets the neutral mark
 //! instead of no mark at all.
 //!
-//! Three tiers, because the terminals this project supports do not agree on
-//! what they can draw. The geometric tier is the default: it is single-width
-//! everywhere, it matches the `✓ ✕ ◆ ◇ △` marks the timeline already uses, and
-//! it does not depend on an emoji font being installed. Emoji are opt-in — they
-//! are double-width and render as boxes on several mobile clients.
+//! **No emoji.** They are double-width, depend on an installed font, and render
+//! as replacement boxes on several of the mobile clients this project supports,
+//! so the product settled on one single-width geometric set with an ASCII
+//! fallback (`nexus_core::brand::design`). `[tui.activity].tool_icons =
+//! "emoji"` still parses — no config breaks — and now resolves to geometric.
 
 /// Which set of marks to draw with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GlyphTier {
-    /// Opt-in via `[tui.activity].tool_icons = "emoji"`.
-    Emoji,
     /// The default wherever the terminal can draw beyond ASCII.
     #[default]
     Geometric,
@@ -27,15 +30,14 @@ pub enum GlyphTier {
 impl GlyphTier {
     /// Resolve the tier from the configured preference and the terminal.
     ///
-    /// A terminal that cannot draw Unicode wins over any preference: honoring
-    /// `tool_icons = "emoji"` there would print replacement boxes down the
-    /// whole timeline.
+    /// A terminal that cannot draw Unicode still wins over any preference —
+    /// that rule is unchanged. The legacy `"emoji"` value resolves to geometric
+    /// rather than erroring, so an existing config keeps loading.
     pub fn resolve(preference: &str, unicode_supported: bool) -> Self {
         if !unicode_supported {
             return Self::Ascii;
         }
         match preference.trim() {
-            "emoji" => Self::Emoji,
             "ascii" => Self::Ascii,
             _ => Self::Geometric,
         }
@@ -107,23 +109,10 @@ pub fn family(tool: &str) -> ToolFamily {
 impl ToolFamily {
     /// The mark for this family in the given tier.
     ///
-    /// Every geometric and ASCII mark is one cell wide, so a row's alignment
-    /// does not depend on which tool ran. Emoji are two cells and callers must
-    /// measure with `unicode_width` rather than counting chars.
+    /// Every mark is one cell wide, so a row's alignment does not depend on
+    /// which tool ran.
     pub fn glyph(self, tier: GlyphTier) -> &'static str {
         match tier {
-            GlyphTier::Emoji => match self {
-                Self::Read => "📄",
-                Self::Write => "✏️",
-                Self::Search => "🔎",
-                Self::Exec => "⚙️",
-                Self::Git => "🌿",
-                Self::Net => "🌐",
-                Self::Memory => "🧠",
-                Self::Plan => "🗺️",
-                Self::Agent => "🤖",
-                Self::Other => "🔹",
-            },
             GlyphTier::Geometric => match self {
                 Self::Read => "▤",
                 Self::Write => "▨",
@@ -234,10 +223,17 @@ mod tests {
 
     #[test]
     fn a_terminal_without_unicode_overrides_the_preference() {
-        // Honoring "emoji" on a `C`-locale terminal prints boxes, not icons.
-        assert_eq!(GlyphTier::resolve("emoji", false), GlyphTier::Ascii);
-        assert_eq!(GlyphTier::resolve("emoji", true), GlyphTier::Emoji);
+        assert_eq!(GlyphTier::resolve("geometric", false), GlyphTier::Ascii);
         assert_eq!(GlyphTier::resolve("", true), GlyphTier::Geometric);
         assert_eq!(GlyphTier::resolve("nonsense", true), GlyphTier::Geometric);
+    }
+
+    /// The product no longer draws emoji anywhere, but an existing config that
+    /// asked for them must still load — it resolves to the geometric set
+    /// instead of failing or printing double-width boxes.
+    #[test]
+    fn a_legacy_emoji_preference_still_loads_and_resolves_to_geometric() {
+        assert_eq!(GlyphTier::resolve("emoji", true), GlyphTier::Geometric);
+        assert_eq!(GlyphTier::resolve("emoji", false), GlyphTier::Ascii);
     }
 }

@@ -198,12 +198,14 @@ pub struct ActivityConfig {
     pub reduced_motion: bool,
     /// Coalesce related events (tool start/complete, retries) into one entry.
     pub coalesce_events: bool,
-    /// Marks drawn beside tool rows: `geometric` (default), `emoji`, `ascii`.
+    /// Marks drawn beside the tool rows `/view detailed|debug` reveals:
+    /// `geometric` (default) or `ascii`.
     ///
-    /// Geometric is the default because it is single-width in every terminal
-    /// and needs no emoji font. `emoji` is opt-in: those marks are two cells
-    /// wide and render as boxes on several mobile clients. A terminal that
-    /// cannot draw Unicode at all falls back to `ascii` whatever this says.
+    /// The product surface itself no longer draws emoji anywhere — they are
+    /// two cells wide, need an installed font, and render as boxes on several
+    /// mobile clients — so a legacy `emoji` value still loads and resolves to
+    /// `geometric`. A terminal that cannot draw Unicode at all falls back to
+    /// `ascii` whatever this says.
     pub tool_icons: String,
 }
 

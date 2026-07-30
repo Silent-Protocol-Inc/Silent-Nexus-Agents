@@ -165,6 +165,64 @@ impl IconSet {
     }
 }
 
+/// Lifecycle marks for a record's status, as opposed to an agent's activity.
+///
+/// Kept as its own vocabulary rather than reusing [`ActionState`]: "this event
+/// is pending" and "the agent is tracing intent" are different statements, and
+/// collapsing them would make a reskin change one when it meant the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LifecycleMark {
+    Pending,
+    Running,
+    Done,
+    Failed,
+    Blocked,
+    Cancelled,
+    Skipped,
+    Waiting,
+}
+
+impl LifecycleMark {
+    pub const ALL: [LifecycleMark; 8] = [
+        Self::Pending,
+        Self::Running,
+        Self::Done,
+        Self::Failed,
+        Self::Blocked,
+        Self::Cancelled,
+        Self::Skipped,
+        Self::Waiting,
+    ];
+}
+
+impl IconSet {
+    /// The mark for a record's lifecycle status.
+    pub fn lifecycle(self, mark: LifecycleMark) -> &'static str {
+        match self {
+            Self::Geometric => match mark {
+                LifecycleMark::Pending => "◇",
+                LifecycleMark::Running => "◆",
+                LifecycleMark::Done => "✓",
+                LifecycleMark::Failed => "✕",
+                LifecycleMark::Blocked => "■",
+                LifecycleMark::Cancelled => "×",
+                LifecycleMark::Skipped => "–",
+                LifecycleMark::Waiting => "◫",
+            },
+            Self::Ascii => match mark {
+                LifecycleMark::Pending => "?",
+                LifecycleMark::Running => ">",
+                LifecycleMark::Done => "v",
+                LifecycleMark::Failed => "x",
+                LifecycleMark::Blocked => "#",
+                LifecycleMark::Cancelled => "-",
+                LifecycleMark::Skipped => ".",
+                LifecycleMark::Waiting => "=",
+            },
+        }
+    }
+}
+
 /// Animation timing and the one reduced-motion rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Motion {
@@ -308,6 +366,10 @@ impl Skin {
         self.icons.icon(state)
     }
 
+    pub fn lifecycle(&self, mark: LifecycleMark) -> &'static str {
+        self.icons.lifecycle(mark)
+    }
+
     /// One status/milestone row: `◇ Tracing intent · 24 seconds · high effort`.
     ///
     /// Absent fields are omitted rather than rendered empty — an unknown is
@@ -352,6 +414,24 @@ mod tests {
                 assert!(
                     !icon.chars().any(|c| c as u32 >= 0x1F000),
                     "{state:?} icon {icon:?} is an emoji"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_lifecycle_mark_has_a_single_width_icon_in_every_tier() {
+        for set in [IconSet::Geometric, IconSet::Ascii] {
+            for mark in LifecycleMark::ALL {
+                let icon = set.lifecycle(mark);
+                assert_eq!(
+                    UnicodeWidthStr::width(icon),
+                    1,
+                    "{mark:?} in {set:?} is not single-width"
+                );
+                assert!(
+                    !icon.chars().any(|c| c as u32 >= 0x1F000),
+                    "{mark:?} is an emoji"
                 );
             }
         }
