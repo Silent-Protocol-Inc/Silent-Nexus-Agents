@@ -19,6 +19,7 @@ pub mod promotion;
 pub mod replay;
 pub mod requirements;
 pub mod risk;
+pub mod shadow;
 
 pub use adversarial::{
     builtin_catalog, AdversarialCategory, AdversarialReport, AdversarialScenario, AdversarialSuite,
@@ -42,6 +43,10 @@ pub use replay::{
 };
 pub use requirements::{CompiledRequirement, RequirementCompiler, RequirementSet};
 pub use risk::{RiskAssessment, RiskClassifier};
+pub use shadow::{
+    Divergence, EffectDisposition, EffectFirewall, EffectRecord, ShadowExecutor, ShadowObservation,
+    ShadowReport, ShadowRunner, ShadowTask,
+};
 
 use serde::{Deserialize, Serialize};
 
