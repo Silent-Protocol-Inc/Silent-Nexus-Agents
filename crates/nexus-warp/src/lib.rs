@@ -12,6 +12,7 @@
 //! evaluators, risk/promotion, shadow, canary, and rollback build on top.
 
 pub mod adversarial;
+pub mod canary;
 pub mod deterministic;
 pub mod evaluators;
 pub mod isolation;
@@ -19,11 +20,16 @@ pub mod promotion;
 pub mod replay;
 pub mod requirements;
 pub mod risk;
+pub mod rollback;
 pub mod shadow;
 
 pub use adversarial::{
     builtin_catalog, AdversarialCategory, AdversarialReport, AdversarialScenario, AdversarialSuite,
     Expectation, ScenarioOutcome, ScenarioRunner,
+};
+pub use canary::{
+    CanaryDecision, CanaryManager, CanaryState, HealthBreach, HealthMetrics, HealthMonitor,
+    HealthStatus, HealthThresholds, CANARY_STAGES,
 };
 pub use deterministic::{
     Check, CheckKind, CheckOutcome, CheckRunner, DeterministicValidator, ProcessCheckRunner,
@@ -43,6 +49,9 @@ pub use replay::{
 };
 pub use requirements::{CompiledRequirement, RequirementCompiler, RequirementSet};
 pub use risk::{RiskAssessment, RiskClassifier};
+pub use rollback::{
+    PromotionLedger, PromotionRecord, RollbackManager, RollbackRecord, RollbackTrigger,
+};
 pub use shadow::{
     Divergence, EffectDisposition, EffectFirewall, EffectRecord, ShadowExecutor, ShadowObservation,
     ShadowReport, ShadowRunner, ShadowTask,
