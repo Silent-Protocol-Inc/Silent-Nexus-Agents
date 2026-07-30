@@ -44,6 +44,59 @@ pub struct Config {
     /// Recursive Self-Improvement behavior (`[self_improvement]`): the flagship
     /// `nexus` agent's post-turn analysis that records approval-gated proposals.
     pub self_improvement: SelfImprovementConfig,
+    /// How much the agent narrates its own work (`[narration]`).
+    pub narration: NarrationConfig,
+}
+
+/// What the agent says about its own work while it does it.
+///
+/// This is the **third** verbosity-adjacent axis, and each of the three owns
+/// exactly one question, so none is defined twice:
+///
+/// * `[thinking].mode` — how much *optional deliberation* the harness performs.
+/// * `[narration].mode` — whether the agent *says what it is doing*.
+/// * `[tui.activity].mode` (`/view`) — which *stored events render*.
+///
+/// The composition rule is one sentence: **narration folds, `/view` reveals.**
+/// There is no `debug` narration mode; raw-payload visibility stays with
+/// `/view` rather than being duplicated here.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct NarrationConfig {
+    /// `off`, `compact`, `auto`, or `verbose`. `off` restores the pre-narration
+    /// timeline exactly; the live status line renders in every mode, because
+    /// liveness feedback is not verbosity.
+    pub mode: String,
+    /// Allow one bounded model pass to improve the *wording* of the intent
+    /// steps. The deterministic skeleton stays the source of truth: a refinement
+    /// that changes the number, order, or meaning of steps is discarded.
+    pub refine_wording: bool,
+    /// Upper bound on intent steps (clamped to 2..=5). A plan longer than this
+    /// stops being a glance and starts being a document.
+    pub max_steps: u8,
+}
+
+impl Default for NarrationConfig {
+    fn default() -> Self {
+        Self {
+            mode: "auto".into(),
+            refine_wording: true,
+            max_steps: 5,
+        }
+    }
+}
+
+impl NarrationConfig {
+    /// Parsed mode, falling back to the default rather than failing a load —
+    /// an unreadable presentation preference must never stop the agent.
+    pub fn mode(&self) -> crate::timeline::NarrationMode {
+        crate::timeline::NarrationMode::parse(&self.mode).unwrap_or_default()
+    }
+
+    /// `max_steps`, clamped to the supported range.
+    pub fn max_steps(&self) -> usize {
+        usize::from(self.max_steps).clamp(2, 5)
+    }
 }
 
 /// Recursive Self-Improvement (RSI) — the flagship `nexus` agent's ability to

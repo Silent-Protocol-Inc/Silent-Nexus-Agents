@@ -548,6 +548,30 @@
       },
       "type": "object"
     },
+    "NarrationConfig": {
+      "additionalProperties": false,
+      "description": "What the agent says about its own work while it does it.\n\nThis is the **third** verbosity-adjacent axis, and each of the three owns exactly one question, so none is defined twice:\n\n* `[thinking].mode` — how much *optional deliberation* the harness performs. * `[narration].mode` — whether the agent *says what it is doing*. * `[tui.activity].mode` (`/view`) — which *stored events render*.\n\nThe composition rule is one sentence: **narration folds, `/view` reveals.** There is no `debug` narration mode; raw-payload visibility stays with `/view` rather than being duplicated here.",
+      "properties": {
+        "max_steps": {
+          "default": 5,
+          "description": "Upper bound on intent steps (clamped to 2..=5). A plan longer than this stops being a glance and starts being a document.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mode": {
+          "default": "auto",
+          "description": "`off`, `compact`, `auto`, or `verbose`. `off` restores the pre-narration timeline exactly; the live status line renders in every mode, because liveness feedback is not verbosity.",
+          "type": "string"
+        },
+        "refine_wording": {
+          "default": true,
+          "description": "Allow one bounded model pass to improve the *wording* of the intent steps. The deterministic skeleton stays the source of truth: a refinement that changes the number, order, or meaning of steps is discarded.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "PolicyConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1028,6 +1052,19 @@
       "default": {},
       "description": "Named model endpoints, e.g. `[models.local_main]`.",
       "type": "object"
+    },
+    "narration": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/NarrationConfig"
+        }
+      ],
+      "default": {
+        "max_steps": 5,
+        "mode": "auto",
+        "refine_wording": true
+      },
+      "description": "How much the agent narrates its own work (`[narration]`)."
     },
     "policy": {
       "allOf": [

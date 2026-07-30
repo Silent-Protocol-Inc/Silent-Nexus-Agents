@@ -592,6 +592,83 @@ impl ActivityMode {
     }
 }
 
+/// How much the agent says about its own work.
+///
+/// A **different axis** from [`ActivityMode`] and from `[thinking].mode`, and
+/// the three are deliberately not interchangeable:
+///
+/// * `[thinking].mode` — how much optional deliberation the harness does.
+/// * `NarrationMode` — whether the agent narrates what it is doing.
+/// * [`ActivityMode`] (`/view`) — which stored events render.
+///
+/// The composition rule between the last two is one sentence: **narration
+/// folds, `/view` reveals.** While narration is active, raw tool rows are
+/// folded into the covering activity segment; `/view detailed|debug` reveals
+/// them again regardless. There is deliberately no `Debug` variant here —
+/// raw-payload visibility belongs to `/view` and is not duplicated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NarrationMode {
+    /// Say nothing; render today's raw timeline. The live status line still
+    /// renders — liveness is not verbosity.
+    Off,
+    /// Intent, plus milestones only for failures, approvals, and validation.
+    Compact,
+    /// Intent and meaningful milestones. The default.
+    #[default]
+    Auto,
+    /// Intent and every observed action, still in operator language.
+    Verbose,
+}
+
+impl NarrationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Compact => "compact",
+            Self::Auto => "auto",
+            Self::Verbose => "verbose",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "compact" => Some(Self::Compact),
+            "auto" => Some(Self::Auto),
+            "verbose" => Some(Self::Verbose),
+            _ => None,
+        }
+    }
+
+    /// Whether the agent narrates at all.
+    pub fn narrates(self) -> bool {
+        self != Self::Off
+    }
+
+    /// Whether raw tool rows are folded into the covering activity segment.
+    /// False in `Off`, which is what makes that mode an exact restoration of
+    /// the pre-narration timeline.
+    pub fn folds_tool_rows(self) -> bool {
+        self.narrates()
+    }
+
+    /// Whether the one bounded wording-refinement pass may run.
+    pub fn refines_wording(self) -> bool {
+        matches!(self, Self::Auto | Self::Verbose)
+    }
+
+    /// Cycle Off → Compact → Auto → Verbose → Off.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Compact,
+            Self::Compact => Self::Auto,
+            Self::Auto => Self::Verbose,
+            Self::Verbose => Self::Off,
+        }
+    }
+}
+
 impl TimelineKind {
     /// Classify this event for the three-layer activity system.
     pub fn visibility(&self) -> ActivityVisibility {

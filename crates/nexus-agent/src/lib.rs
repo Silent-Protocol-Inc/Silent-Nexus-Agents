@@ -16,6 +16,7 @@ pub mod agents;
 pub mod classify;
 pub mod custom_agents;
 pub mod loop_engine;
+pub mod narration;
 pub mod session;
 pub mod subagent;
 pub mod thinking;
@@ -27,6 +28,7 @@ pub use loop_engine::{
     AgentLoop, ApprovalDecision, ApprovalHandler, CacheTokens, LoopEvent, LoopOutcome,
     PlanDecision, PlanReviewRequest, PlanReviewResponse, PlanReviewStage, RunOutcome, TurnLimits,
 };
+pub use narration::{NarrationPolicy, Presented, RuntimeFact, Significance};
 pub use session::{SessionMeta, SessionStore, SessionUsage};
 
 use nexus_core::redact::Redactor;
