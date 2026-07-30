@@ -4434,6 +4434,65 @@ pub fn thinking_report(app: &App) -> Report {
         )
 }
 
+/// Persist an explicit narration choice. From here on it outranks
+/// `[narration].mode` in config, exactly as `/thinking` and `/view` do for
+/// their own axes.
+pub fn set_narration(app: &App, mode: nexus_core::timeline::NarrationMode) -> Result<()> {
+    app.update_ui_state(move |state| state.narration_mode = mode.as_str().to_string())
+}
+
+/// What the agent will say about its own work, and what the neighbouring axes
+/// are set to — the three are easy to confuse, so this report names all of them.
+pub fn narration_report(app: &App) -> Report {
+    use nexus_core::timeline::NarrationMode;
+    let mode = app.narration_mode();
+    let description = match mode {
+        NarrationMode::Off => {
+            "Says nothing about its own work. The live status line still shows, because knowing \
+             the agent is alive is not verbosity."
+        }
+        NarrationMode::Compact => {
+            "States its intent, then speaks only for failures, approvals, and check results."
+        }
+        NarrationMode::Auto => {
+            "States its intent, then reports meaningful milestones as they happen. Greetings and \
+             one-step lookups stay silent."
+        }
+        NarrationMode::Verbose => "States its intent and reports every observed action.",
+    };
+    Report::new("narrate")
+        .field("mode", mode.as_str())
+        .line(description)
+        .header("the other two axes")
+        .field(
+            "thinking",
+            format!(
+                "{} — how much it deliberates",
+                app.read_ui_state(|state| state.thinking()).as_str()
+            ),
+        )
+        .field(
+            "view",
+            format!(
+                "{} — which stored events render",
+                nexus_core::timeline::ActivityMode::parse(
+                    &app.read_ui_state(|state| state.activity_mode.clone())
+                )
+                .unwrap_or_default()
+                .as_str()
+            ),
+        )
+        .line_sev(
+            "Narration folds raw tool rows into what it said; /view reveals them again.",
+            Sev::Dim,
+        )
+        .line_sev(
+            "Presentation only: none of these change what runs, what is checked, or what needs \
+             approval.",
+            Sev::Dim,
+        )
+}
+
 fn yes_no(value: bool) -> &'static str {
     if value {
         "yes"

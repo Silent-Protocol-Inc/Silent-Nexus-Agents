@@ -2128,6 +2128,7 @@ fn handle_effect(
                 nexus_app::View::Mcp => LoadRequest::Mcp,
                 nexus_app::View::Theme => LoadRequest::Theme,
                 nexus_app::View::Thinking => LoadRequest::Thinking,
+                nexus_app::View::Narrate => LoadRequest::Narrate,
                 nexus_app::View::Details => LoadRequest::Details,
                 nexus_app::View::Transcript => LoadRequest::Transcript,
                 nexus_app::View::Permissions => LoadRequest::Permissions,
@@ -2209,6 +2210,10 @@ fn handle_effect(
         Effect::SetActivityMode(mode) => {
             st.set_activity_mode(mode);
             st.toast(format!("activity view → {}", mode.as_str()), Sev::Ok);
+        }
+        Effect::SetNarration(mode) => {
+            st.narration_mode = mode;
+            st.toast(format!("narration → {}", mode.as_str()), Sev::Ok);
         }
         Effect::SetPlanMode(on) => {
             st.bar.plan_mode = on;
@@ -3124,6 +3129,9 @@ fn start_load(
             Ok(menu) => replace_or_push_menu(st, app, menu),
             Err(error) => st.system_sev(format!("memory: {error}"), Sev::Err),
         },
+        LoadRequest::Narrate => {
+            replace_or_push_menu(st, app, menus::narrate_menu(st.narration_mode));
+        }
         LoadRequest::Rsi => {
             let mode = nexus_app::services::permission_mode(&app.config.policy);
             replace_or_push_menu(st, app, menus::rsi_menu(mode));

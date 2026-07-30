@@ -55,6 +55,7 @@ pub enum View {
     Connector,
     Theme,
     Thinking,
+    Narrate,
     Details,
     Transcript,
     Welcome,
@@ -108,6 +109,7 @@ fn bare_interactive_view(def: &registry::CommandDef) -> Option<View> {
         CommandId::Config => View::Config,
         CommandId::Theme => View::Theme,
         CommandId::Thinking => View::Thinking,
+        CommandId::Narrate => View::Narrate,
         _ => View::CommandMenu(def.name.to_string()),
     })
 }
@@ -323,6 +325,10 @@ pub enum Effect {
     SetTheme(String),
     /// Set the deliberation mode. Independent of [`Effect::SetActivityMode`].
     SetThinking(nexus_core::ThinkingMode),
+    /// Set how much the agent narrates. A third axis: independent of both
+    /// [`Effect::SetThinking`] (how much it deliberates) and
+    /// [`Effect::SetActivityMode`] (which stored events render).
+    SetNarration(nexus_core::timeline::NarrationMode),
     /// Enter or leave plan mode. The flag is already persisted to UI state by
     /// the time this is emitted; the TUI reflects it and the next turn reads
     /// it back when the runtime is built.
@@ -1399,6 +1405,23 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                 Err(_) => usage(def),
             },
             None => view_or(View::Thinking, services::thinking_report(app)),
+        },
+
+        CommandId::Narrate => match args.first().copied() {
+            Some("status") => Effect::Report(services::narration_report(app)),
+            Some("cycle") | Some("next") => {
+                let next = app.narration_mode().cycle();
+                services::set_narration(app, next)?;
+                Effect::SetNarration(next)
+            }
+            Some(word) => match nexus_core::timeline::NarrationMode::parse(word) {
+                Some(mode) => {
+                    services::set_narration(app, mode)?;
+                    Effect::SetNarration(mode)
+                }
+                None => usage(def),
+            },
+            None => view_or(View::Narrate, services::narration_report(app)),
         },
 
         CommandId::Btw => {

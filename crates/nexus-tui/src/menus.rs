@@ -1733,6 +1733,47 @@ pub fn thinking_menu(active: nexus_core::ThinkingMode, preview: &str) -> Menu {
         .hint(preview.to_string())
 }
 
+/// The narration axis. The hint names the neighbouring axes on purpose: three
+/// verbosity-adjacent controls are easy to confuse, and each owns exactly one
+/// question.
+pub fn narrate_menu(active: nexus_core::timeline::NarrationMode) -> Menu {
+    use nexus_core::timeline::NarrationMode;
+    let items = [
+        (
+            NarrationMode::Auto,
+            "auto (recommended)",
+            "intent, then meaningful milestones; greetings stay silent",
+        ),
+        (
+            NarrationMode::Compact,
+            "compact",
+            "intent, then failures, approvals, and check results only",
+        ),
+        (
+            NarrationMode::Verbose,
+            "verbose",
+            "intent and every observed action, in plain language",
+        ),
+        (
+            NarrationMode::Off,
+            "off",
+            "says nothing; raw tool rows return, and the status line stays",
+        ),
+    ]
+    .into_iter()
+    .map(|(mode, label, detail)| {
+        MenuItem::new(
+            format!("{} {label}", if mode == active { "●" } else { " " }),
+            UiAction::RunCommand(format!("narrate {}", mode.as_str())),
+        )
+        .detail(detail)
+    })
+    .collect();
+    Menu::new("narration mode", items)
+        .route("/narrate")
+        .hint("Narration folds raw tool rows; /view reveals them · /thinking is deliberation")
+}
+
 pub fn details_menu(active: nexus_core::timeline::TranscriptDetail) -> Menu {
     let items = [
         (

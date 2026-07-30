@@ -101,6 +101,13 @@ pub enum Command {
         mode: Option<String>,
     },
 
+    /// Show or set how much the agent narrates its own work.
+    Narrate {
+        /// `off`, `compact`, `auto`, or `verbose` (omit, or `status`, to show
+        /// the current mode).
+        mode: Option<String>,
+    },
+
     /// Persistent, verifiable goals.
     #[command(subcommand)]
     Goal(GoalCmd),

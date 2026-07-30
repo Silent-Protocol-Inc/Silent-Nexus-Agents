@@ -40,6 +40,9 @@ pub struct StatusSnapshot {
     /// Governed RSI candidates and how many of them are waiting on a human.
     /// `None` when the harness cannot be read.
     pub rsi: Option<RsiFacts>,
+    /// The three presentation axes, as `thinking · narration · view`. They are
+    /// easy to confuse, so status shows them together and never alone.
+    pub presentation: String,
     pub model: Option<ModelFacts>,
     pub sandbox_backend: String,
     pub sandbox_level: String,
@@ -176,6 +179,16 @@ pub async fn snapshot(app: &App, active: &ActiveContext, probe_health: bool) -> 
             None
         },
         rsi: rsi_facts(app),
+        presentation: format!(
+            "{} thinking · {} narration · {} view",
+            app.read_ui_state(|state| state.thinking()).as_str(),
+            app.narration_mode().as_str(),
+            nexus_core::timeline::ActivityMode::parse(
+                &app.read_ui_state(|state| state.activity_mode.clone())
+            )
+            .unwrap_or_default()
+            .as_str(),
+        ),
         model,
         sandbox_backend: isolation.backend.clone(),
         sandbox_level: isolation.level.clone(),
@@ -346,6 +359,7 @@ pub fn to_report(s: &StatusSnapshot) -> Report {
             );
         }
     }
+    r = r.field("presentation", &s.presentation);
     if let Some(rsi) = &s.rsi {
         if rsi.candidates > 0 {
             let text = format!(

@@ -743,6 +743,24 @@ pub async fn theme(app: &App, name: Option<String>) -> Result<()> {
 
 // ------------------------------------------------------------------ thinking
 
+/// How much the agent says about its own work. A different axis from
+/// `snx thinking` (how much it deliberates) and from `/view` (which stored
+/// events render), so the report names all three.
+pub async fn narrate(app: &App, mode: Option<String>) -> Result<()> {
+    let ui = ui(app);
+    match mode.as_deref() {
+        None | Some("status") => ui.render_report(&nexus_app::services::narration_report(app)),
+        Some(word) => {
+            let mode = nexus_core::timeline::NarrationMode::parse(word).ok_or_else(|| {
+                anyhow!("unknown mode `{word}` — one of: off, compact, auto, verbose")
+            })?;
+            nexus_app::services::set_narration(app, mode)?;
+            ui.ok(&format!("narration set to `{}`", mode.as_str()));
+        }
+    }
+    Ok(())
+}
+
 pub async fn thinking(app: &App, mode: Option<String>) -> Result<()> {
     let ui = ui(app);
     match mode.as_deref() {

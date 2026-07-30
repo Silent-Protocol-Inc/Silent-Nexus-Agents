@@ -473,4 +473,41 @@ mod tests {
         assert!(!state.menus.contains_key("/route-00"));
         assert!(state.menus.contains_key("/route-69"));
     }
+    /// Empty means "not chosen", which is what keeps `[narration].mode` in
+    /// config authoritative until someone runs `/narrate`. A filled-in default
+    /// here would silently outrank the config file forever.
+    #[test]
+    fn narration_is_unset_until_the_operator_chooses() {
+        let fresh = UiState::default();
+        assert_eq!(fresh.narration(), None);
+
+        let chosen: UiState =
+            serde_json::from_str(r#"{ "version": 8, "narration_mode": "verbose" }"#)
+                .expect("state");
+        assert_eq!(
+            chosen.narration(),
+            Some(nexus_core::timeline::NarrationMode::Verbose)
+        );
+    }
+
+    /// An unreadable presentation preference must never stop the agent: it
+    /// reads as "no choice" and config decides.
+    #[test]
+    fn an_unrecognized_narration_mode_reads_as_no_choice() {
+        let state: UiState =
+            serde_json::from_str(r#"{ "version": 8, "narration_mode": "loud" }"#).expect("state");
+        assert_eq!(state.narration(), None);
+    }
+
+    /// The what's-new stage shows once per version, so the marker has to
+    /// survive a reload.
+    #[test]
+    fn the_last_seen_version_round_trips() {
+        let mut state = UiState::default();
+        assert!(state.last_seen_version.is_empty());
+        state.last_seen_version = "2.11.0".into();
+        let text = serde_json::to_string(&state).expect("encode");
+        let loaded: UiState = serde_json::from_str(&text).expect("decode");
+        assert_eq!(loaded.last_seen_version, "2.11.0");
+    }
 }
