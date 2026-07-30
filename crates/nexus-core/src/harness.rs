@@ -5243,4 +5243,106 @@ mod tests {
             "claims from unknown task ids are rejected"
         );
     }
+    /// A row written before schema v2 has none of the RSI fields. It must still
+    /// load — and it must land on the *conservative* defaults, not the
+    /// permissive ones: an un-annotated candidate is code-plane and tier 3, so
+    /// an upgrade can never turn old rows into auto-promotable ones.
+    #[test]
+    fn a_pre_v2_proposal_row_loads_with_conservative_defaults() {
+        let repository = repository();
+        let legacy = serde_json::json!({
+            "id": "imp_legacy",
+            "category": "tool",
+            "problem": "repeated failures",
+            "evidence": [],
+            "proposed_change": "retry with backoff",
+            "expected_benefit": "fewer failures",
+            "risks": [],
+            "required_permissions": [],
+            "validation_plan": [],
+            "rollback_plan": [],
+            "status": "proposed",
+            "approval_required": true,
+            "measurements": {},
+            "schema_version": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "reviewed_at": null
+        })
+        .to_string();
+        repository
+            .store
+            .with(|conn| {
+                conn.execute(
+                    "INSERT INTO harness_improvement_proposals
+                     (id,category,status,approval_required,schema_version,payload_json,
+                      created_at,updated_at,reviewed_at)
+                     VALUES ('imp_legacy','tool','proposed',1,1,?1,
+                             '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',NULL)",
+                    params![legacy],
+                )?;
+                Ok(())
+            })
+            .expect("insert legacy row");
+
+        let loaded = repository.improvement("imp_legacy").expect("load legacy");
+        assert_eq!(loaded.target, ImprovementTarget::HarnessComponent);
+        assert_eq!(loaded.target.plane(), ImprovementPlane::Code);
+        assert_eq!(loaded.risk_tier, RiskTier::High);
+        assert!(loaded.success_metrics.is_empty());
+        assert!(loaded.created_by.is_empty());
+        assert!(loaded.affected_components.is_empty());
+    }
+
+    /// Same direction for events: an old row has no severity, and absent
+    /// severity means `info` rather than a missing field or a panic.
+    #[test]
+    fn a_pre_v2_event_row_loads_with_default_severity() {
+        let legacy = serde_json::json!({
+            "id": "evt_legacy",
+            "event_type": "turn.completed",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "session_id": "sess_1",
+            "profile_id": null,
+            "goal_id": null,
+            "plan_id": null,
+            "task_id": null,
+            "agent_id": null,
+            "subagent_id": null,
+            "run_id": null,
+            "summary": "turn finished",
+            "metadata": {},
+            "sensitivity": "normal",
+            "schema_version": 1
+        })
+        .to_string();
+        let event: HarnessEvent = serde_json::from_str(&legacy).expect("decode legacy event");
+        assert_eq!(event.severity, "info");
+        assert!(event.provider.is_none());
+        assert!(event.candidate_id.is_none());
+    }
+    /// The downgrade direction: a payload written by 2.11.0 must still decode
+    /// under an older binary's narrower struct. `ImprovementProposal` therefore
+    /// must not be `deny_unknown_fields` — this test is what keeps that true.
+    #[test]
+    fn a_v2_payload_still_decodes_under_a_pre_v2_struct() {
+        #[derive(serde::Deserialize)]
+        struct LegacyProposal {
+            id: String,
+            status: ImprovementStatus,
+            problem: String,
+        }
+
+        let mut proposal = ImprovementProposal::new(ImprovementCategory::Tool, "problem", "change")
+            .expect("proposal");
+        proposal.target = ImprovementTarget::ToolRouter;
+        proposal.risk_tier = RiskTier::Moderate;
+        proposal.created_by = "improvement_planner".into();
+        let payload = serde_json::to_string(&proposal).expect("encode");
+
+        let legacy: LegacyProposal = serde_json::from_str(&payload).expect("old binary decode");
+        assert_eq!(legacy.id, proposal.id);
+        assert_eq!(legacy.status, ImprovementStatus::Draft);
+        assert_eq!(legacy.problem, "problem");
+    }
 }
