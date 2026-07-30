@@ -3,6 +3,14 @@
 //! This module owns the product geometry, copy, spacing, color rules, and
 //! Unicode/ASCII fallbacks. Renderers only translate semantic roles into
 //! their terminal framework's style type.
+//!
+//! [`design`] extends that ownership from the lockup to the rest of the
+//! product surface — icons, motion, separators, casing, elapsed formatting —
+//! so a reskin is a new [`design::Skin`] rather than an edit in every renderer.
+
+pub mod design;
+
+pub use design::{ActionState, Casing, ElapsedStyle, IconSet, Motion, Separators, Skin};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
