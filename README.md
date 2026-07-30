@@ -97,6 +97,11 @@ malicious model still cannot escape the boundary.
   you review with `snx profile`. Nothing is ever applied without your approval.
   Tune or disable the analysis under `[self_improvement]`
   (`enabled = false` turns it off); `snx status` shows any pending proposals.
+  Candidates are classified into risk tiers and validated by **WARP** — an
+  independent layer that can reject but never author a change — with a
+  compile-time governance ruleset the pipeline cannot edit. `/rsi` shows the
+  queue, the evidence, and the rules; see
+  [`docs/rsi.md`](docs/rsi.md).
 - **Web content is data, never instructions.** Fetched pages are wrapped as
   untrusted input; SSRF, private-range, cloud-metadata, and DNS-rebinding
   protections are enforced in the harness.
@@ -320,7 +325,7 @@ See the [`CHANGELOG`](CHANGELOG.md) for release-by-release detail.
 | [`docs/configuration.md`](docs/configuration.md) | Precedence and configuration groups |
 | [`docs/cli-reference.md`](docs/cli-reference.md) | Public CLI surface |
 | [`docs/operator-guide.md`](docs/operator-guide.md) | Safe daily operation |
-| [`docs/goals.md`](docs/goals.md) · [`docs/memory-and-skills.md`](docs/memory-and-skills.md) · [`docs/mcp.md`](docs/mcp.md) | Feature deep-dives |
+| [`docs/goals.md`](docs/goals.md) · [`docs/memory-and-skills.md`](docs/memory-and-skills.md) · [`docs/mcp.md`](docs/mcp.md) · [`docs/rsi.md`](docs/rsi.md) | Feature deep-dives |
 | [`docs/data-management.md`](docs/data-management.md) | State, backup, restore, retention |
 | [`docs/compatibility.md`](docs/compatibility.md) | The 1.x compatibility contract |
 | [`docs/upgrade-0.2-to-1.0.md`](docs/upgrade-0.2-to-1.0.md) | Migration checklist |

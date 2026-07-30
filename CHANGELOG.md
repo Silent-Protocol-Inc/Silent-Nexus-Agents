@@ -24,6 +24,45 @@
 - **Flagship identity in branding.** `snx about` and `snx status` now show the
   flagship agent line — `nexus · Recursive Self-Improvement (RSI)`. The product
   name stays **NEXUS by Silent Protocol**; this names the agent, not a rebrand.
+- **Governed self-improvement: Nexus RSI + WARP.** Self-improvement is no longer
+  just a proposal queue. Candidates are now typed (target, scope, risk tier,
+  success metrics, affected components) and judged by **WARP** — Watch, Assess,
+  Replay, Promote — an independent validation layer in its own crate that can
+  reject a candidate but never author one. WARP runs deterministic checks in an
+  isolated worktree or overlay, replays sanitized historical fixtures (including
+  holdouts), runs an adversarial suite, scans the candidate's diff for the
+  mechanical forms of reward hacking, and asks independent evaluators that never
+  see the author's reasoning. An objective failure is a hard veto no model
+  verdict can average away.
+- **A governance layer the pipeline cannot edit.** `nexus-core::governance` holds
+  the ruleset as compile-time constants with no setter and no config key; RSI and
+  WARP depend on that crate, so they cannot reach up and rewrite what constrains
+  them. A candidate touching governance, audit, policy, permissions, or the
+  validation layer is tier 4 and auto-rejected. Risk classification only moves
+  *up*: the effective tier is the maximum of declared and computed.
+- **Promotion fails closed.** The promotion gate rejects when WARP is
+  unavailable, a stage is missing, or a verdict is inconclusive. Tier 1 may
+  auto-promote after every stage passes; tier 2 needs a shadow run; tier 3 needs
+  a human signature that is not the author's. `/permissions full access` removes
+  prompts, not governance — `allow_tier_3_auto_promotion = true` is recorded and
+  ignored.
+- **Shadow, canary, and recorded rollback.** A shadow run gives the candidate
+  real inputs and the world nothing: only read-only tool calls execute, and an
+  effect that escapes containment is a hard veto. Canary rollout climbs
+  5→15→30→50→100% with deterministic per-session assignment; a success or error
+  breach rolls back, and one security violation rolls back at any sample size.
+  Every promotion is recorded with its author and a way back — the ledger
+  refuses to record one that has neither a rollback command nor a checkpoint.
+- **`/rsi` and `snx rsi`.** Status, candidates, candidate detail, observations,
+  outcomes, promotions, rollbacks, and the governance ruleset. The candidate list
+  shows the declared tier next to WARP's classified one, so a candidate that
+  undersold its blast radius is visible. `/status` shows how many candidates wait
+  on a human. Full documentation in [`docs/rsi.md`](docs/rsi.md).
+- **What this does not do**, stated plainly: the stages are implemented and
+  tested individually, but the loop is not yet wired to carry a candidate through
+  every stage on its own; code-plane changes are never hot-swapped into a running
+  process (they ship as a human-approved release); and open-ended self-directed
+  modification stays disabled.
 
 ## [2.10.2] — 2026-07-25
 
