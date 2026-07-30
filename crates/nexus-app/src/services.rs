@@ -785,7 +785,12 @@ pub fn agents_report(app: &App) -> Result<Report> {
             ),
         ]);
     }
-    Ok(Report::new("agents").table(&["role", "access", "charter"], rows))
+    Ok(Report::new("agents")
+        .table(&["role", "access", "charter"], rows)
+        .line_sev(
+            "WARP evaluator roles run in isolated contexts without the candidate author's reasoning — no role creates, judges, and promotes the same candidate (/rsi governance)",
+            Sev::Dim,
+        ))
 }
 
 // ---------------------------------------------------------- persona/profile
@@ -1565,6 +1570,10 @@ pub fn memory_candidates_report(app: &App, session_id: Option<&str>) -> Result<R
         .line_sev(
             "approve with /memory approve <id>, reject with /memory reject <id>",
             Sev::Dim,
+        )
+        .line_sev(
+            "a candidate is not a fact: RSI-derived memory stays unverified until evidence or you confirm it (/rsi)",
+            Sev::Dim,
         ))
 }
 
@@ -2039,6 +2048,13 @@ pub fn permissions_report(app: &App) -> Report {
             },
         );
     }
+    // Permission mode and self-improvement governance are different axes, and
+    // the difference is easy to assume away: `full-access` removes prompts, not
+    // governance. Say so where the mode is chosen.
+    r = r
+        .header("self-improvement governance")
+        .line("permission mode never grants a tier-3 bypass, an auto-MCP install, or the removal of a validation stage")
+        .line("governed candidates and the rules in force: /rsi governance");
     r
 }
 
