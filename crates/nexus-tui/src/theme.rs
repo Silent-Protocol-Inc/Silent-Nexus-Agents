@@ -204,6 +204,15 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// A theme with no color at all.
+    ///
+    /// Used for measuring (row counts do not depend on styling) and for tests
+    /// that assert on text, so an assertion can never accidentally pass or fail
+    /// on an escape sequence.
+    pub fn plain() -> Self {
+        Self::new("nexus-dark", ColorSupport::None)
+    }
+
     pub fn new(name: &str, support: ColorSupport) -> Self {
         let (palette, mono) = match name {
             "cyberpunk" => (&CYBERPUNK, false),

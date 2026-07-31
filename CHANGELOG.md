@@ -76,12 +76,21 @@
   with no `/view` to turn detail back on. It shares the intent card and the
   milestones with the TUI, so the two surfaces cannot drift.
   Full documentation in [`docs/presentation.md`](docs/presentation.md).
-- **A curated wake flow instead of startup logs.** The reveal is followed by
-  session restore, memory link, what's new, and a welcome line — each omitted
-  entirely when it has nothing real to say, so a fresh workspace shows only
-  `Ready`. "What's new" is read from the changelog compiled into the binary, so
-  it cannot claim a feature this build lacks, and it appears once per version.
-  No progress bar: startup is not measurable in advance.
+- **One welcome panel instead of startup logs.** Opening a session used to print
+  four `✓ DONE  NOTICE` cards — session restored, memory linked, what's new,
+  ready — because startup facts were pushed through the ordinary timeline
+  renderer, which files them as completed `Notice` events. Startup is not work
+  the agent did, so it is no longer an event at all: `BootSnapshot` gathers the
+  facts once and a dedicated panel above the timeline renders them, with
+  identity, workspace, model, agent, access, session, memory, one changelog
+  headline, and two or three tips chosen from live state. Every section is
+  omitted when it has nothing real to say, so a fresh workspace shows identity,
+  metadata, and a tip — never `Session: none`. Labels are `SESSION // RESTORED`,
+  not run outcomes. The panel collapses to one line
+  (`◢ NEXUS · implementer · Ollama / qwen · main · restored`) when the first turn
+  starts, so it is never a permanent tax on transcript height, and it sheds rows
+  in a defined order on a short terminal rather than being clipped. The timeline
+  now starts empty. No progress bar: startup is not measurable in advance.
 - **A live status line.** While a turn runs, one transient row above the input
   says what the agent is doing — `◇ Tracing intent · 24 seconds · high effort` —
   with a terse verb, elapsed time, and the *reported* effort, omitted rather than
@@ -127,8 +136,24 @@
   `debug` narration mode: raw-payload visibility belongs to `/view` and is not
   duplicated.
 
+- **Recording a memory takes effect immediately.** `memory.add` stored every
+  agent-recorded fact as a candidate that a human had to approve before it could
+  be read back, so an agent that wrote down what it had just established could
+  not use it, and the review queue filled with facts nobody disputed. Recording
+  now applies directly. The properties that make it safe are unchanged: secrets
+  are still refused, the store is still separate from the workspace, writes are
+  still budgeted per turn, and everything recorded is still visible and
+  deletable in `/memory`. Set `[memory].require_approval = true` to put the
+  queue back.
+
 ### Fixed
 
+- **A changelog headline no longer gets cut mid-word.** "What's new" read only
+  the first physical line of a markdown bold span, so a wrapped headline showed
+  as "…is now a real flagship agent — the def" + "ault Recursive". The span is
+  rejoined and the cap falls on a word boundary.
+- **The restored-session line shows a date, not a timestamp.** It printed the
+  raw `2026-07-23T18:25:53.941Z`; it now reads `23 Jul 2026`.
 - **Two places that leaked a tool name into operator-facing text.** A failed tool
   was narrated as `"<tool> failed: …"` and a passing validation as
   `"<tool> passed."`, both on surfaces that are supposed to be user-level. Both

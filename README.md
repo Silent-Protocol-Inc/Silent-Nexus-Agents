@@ -103,8 +103,9 @@ malicious model still cannot escape the boundary.
   queue, the evidence, and the rules; see
   [`docs/rsi.md`](docs/rsi.md).
 - **A product surface, not a machine log.** What NEXUS shows you is organized
-  into four strict layers — a curated boot flow, a live status line, a
-  user-level timeline, and debug. A task turn opens with a 2–5 step intent and
+  into four strict layers — one welcome panel at startup, a live status line, a
+  user-level timeline, and debug. Startup facts are not timeline events, so a
+  session no longer opens with a stack of completed-looking notices. A task turn opens with a 2–5 step intent and
   then reports milestones as they actually happen; a greeting stays a greeting.
   In the TUI, tool names, arguments, and raw output belong to `/view debug`: the
   product layers can only render what the translation layer emitted, which
@@ -219,7 +220,7 @@ snx run "summarize the architecture of this repo" --agent researcher
 | `snx session …` | Inspect sessions or persist a title |
 | `snx persona …` | Create, inherit, clone, select, and review persona definitions |
 | `snx profile …` | Select profiles and review explicit/inferred workflow traits or RSI proposals |
-| `snx memory …` | Approval-gated, secret-refusing long-term memory |
+| `snx memory …` | Secret-refusing long-term memory; review queue optional (`[memory].require_approval`) |
 | `snx skill …` | Versioned, inspectable skills |
 | `snx mcp …` | MCP client (register/connect) and server (`serve`) |
 | `snx connector …` | Discover/preview/import Codex MCP and Agent Skill definitions, disabled/untrusted |

@@ -7,7 +7,7 @@ the contract between them.
 
 | Layer | Answers | Sources | Never shows | Switch |
 | --- | --- | --- | --- | --- |
-| **Boot** | "What am I coming back to?" | completed startup facts | raw logs, internal timings, a stage that did not run | always (skippable) |
+| **Boot** | "What am I coming back to?" | startup facts, as one panel | raw logs, internal timings, run outcomes (`DONE`/`NOTICE`), a stage that did not run | always; collapses on the first turn |
 | **Status** | "Is it alive, and on what?" | phase, elapsed, reported effort, active intent step | tool names, commands, paths, percentages, ETAs | while a turn runs |
 | **Timeline** | "What happened?" | translated milestones, results, diffs, approvals, errors | tool names, argument JSON, raw output | `/narrate` |
 | **Debug** | "What *actually* happened?" | everything, unmodified | *nothing is hidden here* | `/view debug` |
@@ -67,20 +67,59 @@ approval.
 | `auto` *(default)* | yes | meaningful milestones | yes | folded | yes |
 | `verbose` | yes | every observed action | yes | folded | yes + step |
 
-## Boot — the wake flow
+## Boot — the welcome panel
 
 ```
-        ▓▒░ NEXUS ░▒▓
-  ◈  Session restored · fix the tier check · feat/nexus-rsi-flagship · 2026-07-30T…
-  ◆  Memory linked · 14 facts · 3 awaiting review · 2 improvement candidates — /rsi
-  ◇  What's new · Governed self-improvement
-  ✓  Ready · 3 uncommitted changes here — /diff to review, /commit to record
+╭─ ◢ N  E  X  U  S // ONLINE ──────────────────────────────────────────────╮
+│ NEXUS by Silent Protocol 2.11.0  Welcome back.                           │
+│                                                                          │
+│ WORKSPACE ~/Airsec_Inc/SP_Product/Silent-Nexus                           │
+│ MODEL     Ollama / sans-ai-v:latest                                      │
+│ AGENT     implementer                                                    │
+│ ACCESS    path-validation-only                                           │
+│                                                                          │
+│ SESSION // RESTORED  fix the tier check · main · 23 Jul 2026             │
+│ MEMORY // LINKED     14 facts · 2 awaiting review                        │
+│ UPDATE // NEW        Governed self-improvement                           │
+│                                                                          │
+│ /resume continue the restored session                                    │
+│ /memory review what the agent recorded                                   │
+╰──────────────────────────────────────────────────────────────────────────╯
 ```
 
-Every stage is omitted when it has nothing real to say — a fresh workspace shows
-only `Ready`. "What's new" is read from the changelog compiled into the binary,
-so it cannot claim a feature this build lacks, and it appears once per version.
-There is no progress bar, because startup is not measurable in advance.
+One panel, in its own region above the timeline. It is **not a timeline event**
+— that is the whole point. Startup facts used to be pushed through
+`State::system(…)`, which files them as `TimelineKind::Notice` with
+`TimelineStatus::Completed`, so the card renderer drew a `✓ DONE  NOTICE`
+header over each one and every session opened with four completed tasks that
+nobody performed.
+
+`nexus_app::boot::BootSnapshot` gathers the facts once, as data. The panel is a
+pure projection of it: no styling decisions in the model, no state in the
+renderer, and nothing written anywhere. `SESSION // RESTORED` is a **presentation
+label**, deliberately not one of the timeline's run outcomes — startup did not
+run any work, so `DONE`, `FAILED`, and `NOTICE` have no business in it.
+
+A field with nothing real in it is omitted, not filled with a placeholder: a
+fresh workspace shows identity, metadata, and a tip, and never
+`Session: none`. "What's new" is read from the changelog compiled into the
+binary, so it cannot claim a feature this build lacks, and it appears once per
+version. Tips come from live state — `/resume` only when something is
+resumable, `/memory` only when something is pending, and `/goal` says "define an
+objective" rather than "pick up the one in progress" when there is none.
+
+**It collapses on the first turn** to one line —
+`◢ NEXUS · implementer · Ollama / sans-ai-v:latest · main · restored` — so the
+panel never becomes a permanent tax on transcript height. Collapsing is bound to
+the turn starting, not to the timeline changing, so scrolling, resizing, or a
+background task landing never moves it, and it never reopens.
+
+Responsive: aligned label columns and a border above 44 columns, a bare stack
+below it, and paths truncated from the left so the project name survives. When
+the terminal is too short, the panel sheds rows in a fixed order — spacers,
+then extra tips, then the changelog headline, then the greeting, then the
+session block — and never sheds a notice the operator has to act on. There is
+no progress bar, because startup is not measurable in advance.
 
 ## Status line
 

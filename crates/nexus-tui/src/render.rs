@@ -146,10 +146,15 @@ pub fn draw(f: &mut Frame, st: &mut State) {
     // transcript widget, so scrolling the timeline never moves it and it never
     // becomes scrollback.
     let plan_rows = plan_panel_rows(st, &rl);
+    // The welcome panel is a *region*, not a timeline entry. Reserving its rows
+    // here is what keeps startup facts out of the transcript: they are drawn
+    // above it, scroll with nothing, and disappear when it collapses.
+    let welcome_rows = welcome_panel_rows(st, area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(rl.header_rows),
+            Constraint::Length(welcome_rows),
             Constraint::Min(3),
             Constraint::Length(plan_rows),
             Constraint::Length(input_rows),
@@ -158,23 +163,26 @@ pub fn draw(f: &mut Frame, st: &mut State) {
         .split(area);
 
     draw_header(f, rows[0], st, &t, &rl);
+    if welcome_rows > 0 {
+        draw_welcome(f, rows[1], st, &t);
+    }
 
     if rl.show_sidebar {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(40), Constraint::Length(rl.sidebar_width)])
-            .split(rows[1]);
+            .split(rows[2]);
         draw_transcript(f, body[0], st, &t, &rl);
         draw_context_rail(f, body[1], st, &t);
     } else {
-        draw_transcript(f, rows[1], st, &t, &rl);
+        draw_transcript(f, rows[2], st, &t, &rl);
     }
 
     if plan_rows > 0 {
-        draw_plan_panel(f, rows[2], st, &t);
+        draw_plan_panel(f, rows[3], st, &t);
     }
-    draw_input(f, rows[3], st, &t, &rl);
-    draw_footer(f, rows[4], st, &t, &rl);
+    draw_input(f, rows[4], st, &t, &rl);
+    draw_footer(f, rows[5], st, &t, &rl);
 
     // Overlay stack: render every overlay, topmost last.
     for overlay in &st.overlays {
@@ -193,6 +201,61 @@ pub fn draw(f: &mut Frame, st: &mut State) {
     }
 
     draw_toasts(f, area, st, &t);
+}
+
+/// Rows to reserve for the welcome panel.
+///
+/// Zero once it has collapsed *and* the identity is already in the header, so
+/// the panel never becomes a permanent tax on timeline height. The panel is
+/// also dropped whole rather than clipped when the terminal is too short to
+/// hold it and a usable transcript — half a border is worse than none.
+fn welcome_panel_rows(st: &State, area: Rect) -> u16 {
+    let Some(snapshot) = &st.boot_snapshot else {
+        return 0;
+    };
+    if st.welcome_collapsed {
+        return 1;
+    }
+    let unicode = crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii;
+    // Leave the transcript, composer, and status bar room to exist. The panel
+    // sheds its own content to fit rather than being clipped or dropped whole,
+    // so an 80×24 gets a shorter panel instead of no panel.
+    // Two independent limits, both necessary: an absolute floor so the
+    // transcript, composer, and status bar always exist, and a proportional cap
+    // so the panel never takes more than half the screen on a tall terminal.
+    let budget = area
+        .height
+        .saturating_sub(MIN_ROWS_BELOW_WELCOME)
+        .min(area.height / 2);
+    if budget < MIN_PANEL_ROWS {
+        return 0;
+    }
+    crate::welcome::panel_rows(snapshot, area.width, budget, unicode)
+}
+
+/// Header, a few transcript rows, composer, and status bar.
+///
+/// Tuned against a real 80×24: at 10 the panel squeezed the transcript to a
+/// single row, and at 16 the panel itself was reduced to an identity line and
+/// one tip. The transcript is briefly thin before the first turn and gets every
+/// row back the moment the panel collapses, so the balance favours the panel
+/// while it is the only thing there is to read.
+const MIN_ROWS_BELOW_WELCOME: u16 = 13;
+/// Below this there is no panel worth drawing: the collapsed line carries the
+/// identity instead, and the status bar already has the rest.
+const MIN_PANEL_ROWS: u16 = 6;
+
+fn draw_welcome(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
+    let Some(snapshot) = &st.boot_snapshot else {
+        return;
+    };
+    let unicode = crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii;
+    let lines = if st.welcome_collapsed {
+        vec![crate::welcome::collapsed_line(snapshot, t, unicode)]
+    } else {
+        crate::welcome::panel_lines(snapshot, area.width, area.height, t, unicode)
+    };
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Controlled message when the terminal is below the usable floor.

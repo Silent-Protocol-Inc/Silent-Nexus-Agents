@@ -23,6 +23,7 @@ mod state;
 mod theme;
 mod thinking;
 mod views;
+mod welcome;
 
 use approver::{ApprovalRequest, TuiApprover};
 use crossterm::event::{
@@ -307,16 +308,14 @@ async fn event_loop(
     st.reduced_motion = st.reduced_motion || activity.reduced_motion;
     glyphs::configure(&activity.tool_icons);
     st.active_work = nexus_app::services::active_work_snapshot(&app, None, "idle");
-    // The wake flow: identity (already revealed by `intro`), then session
-    // restore, memory link, what's new, and where to go next — each omitted
-    // when there is nothing real to say. This replaces three `st.system(…)`
-    // calls that lived in two files, one of which still pointed at the
-    // superseded `snx profile` for the RSI review queue.
-    let skin = nexus_core::brand::Skin::nexus().for_terminal(
-        glyphs::tier() != glyphs::GlyphTier::Ascii,
-        st.reduced_motion,
-    );
-    st.boot(&nexus_app::boot::wake_flow(&app), &skin);
+    // Startup facts go to the welcome panel, not the timeline. The panel owns
+    // identity, the restored session, memory, one changelog headline, and the
+    // tips — the five things that used to be emitted from three files as
+    // completed `Notice` events.
+    st.boot(nexus_app::boot::BootSnapshot::gather(
+        &app,
+        st.bar.model_label.clone(),
+    ));
     // "What's new" has now been shown for this version.
     let _ = app.update_ui_state(|state| {
         state.last_seen_version = nexus_core::brand::VERSION.to_string();
@@ -3556,6 +3555,10 @@ fn submit_objective(
     };
 
     st.mode = Mode::Running;
+    // The welcome panel has done its job the moment there is real work to look
+    // at. Collapsing here — on the turn starting, not on the timeline changing
+    // — means scrolling, resizing, or a background task landing never moves it.
+    st.collapse_welcome();
     // Per-turn status facts belong to the turn that produced them: a stale
     // effort or step count carried into the next turn would be an invention.
     st.provider_effort = None;

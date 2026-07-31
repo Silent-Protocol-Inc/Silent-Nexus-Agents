@@ -644,6 +644,16 @@ pub struct MemoryConfig {
     pub global_enabled: bool,
     /// Days after which unverified memories expire (0 = never).
     pub default_ttl_days: u32,
+    /// Hold agent-recorded memories as candidates until a human approves them.
+    ///
+    /// Off by default: an agent that records what it just established and then
+    /// cannot read it back has not remembered anything, and the review queue
+    /// filled up with facts nobody disputed. The protections that make
+    /// recording safe are unchanged either way — secrets are still refused, the
+    /// store is still separate from the workspace, writes are still budgeted
+    /// per turn, and everything recorded is still visible and deletable in
+    /// `/memory`. Set this to `true` to put the queue back.
+    pub require_approval: bool,
 }
 
 impl Default for MemoryConfig {
@@ -652,6 +662,7 @@ impl Default for MemoryConfig {
             enabled: true,
             global_enabled: false,
             default_ttl_days: 90,
+            require_approval: false,
         }
     }
 }

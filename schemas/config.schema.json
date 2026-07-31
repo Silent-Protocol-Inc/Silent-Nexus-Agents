@@ -372,6 +372,11 @@
           "default": false,
           "description": "Allow global (cross-project) memory. Off by default.",
           "type": "boolean"
+        },
+        "require_approval": {
+          "default": false,
+          "description": "Hold agent-recorded memories as candidates until a human approves them.\n\nOff by default: an agent that records what it just established and then cannot read it back has not remembered anything, and the review queue filled up with facts nobody disputed. The protections that make recording safe are unchanged either way — secrets are still refused, the store is still separate from the workspace, writes are still budgeted per turn, and everything recorded is still visible and deletable in `/memory`. Set this to `true` to put the queue back.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1042,7 +1047,8 @@
       "default": {
         "default_ttl_days": 90,
         "enabled": true,
-        "global_enabled": false
+        "global_enabled": false,
+        "require_approval": false
       }
     },
     "models": {

@@ -260,6 +260,13 @@ pub struct State {
     pub provider_effort: Option<String>,
     /// Steps in the intent plan for this turn, for the `verbose` step counter.
     pub intent_steps: usize,
+    /// Startup facts for the welcome panel. `None` on a surface that never
+    /// gathered them; the panel simply does not render.
+    pub boot_snapshot: Option<nexus_app::boot::BootSnapshot>,
+    /// Whether the welcome panel has collapsed to its one-line form. Set once,
+    /// when the first turn starts, and never cleared — a panel that reopened
+    /// when the operator scrolled back would fight them for the screen.
+    pub welcome_collapsed: bool,
     /// The status verb currently on screen and when it was committed. Held in
     /// a `Cell` so the dwell window works from `&State` at render time; the
     /// alternative was threading `&mut` through every render helper for a
@@ -293,6 +300,8 @@ impl State {
             color_support,
             reduced_motion,
             timeline: Vec::new(),
+            boot_snapshot: None,
+            welcome_collapsed: false,
             transcript_filter: TranscriptFilter::All,
             detail_level: TranscriptDetail::Compact,
             collapsed_cards: std::collections::BTreeSet::new(),
@@ -369,28 +378,24 @@ impl State {
         s
     }
 
-    /// Render the curated wake flow into the timeline.
+    /// Hand the startup facts to the welcome panel.
     ///
-    /// A stage with nothing real to say was already dropped by
-    /// `nexus_app::boot::wake_flow`; this only draws what survived.
-    pub fn boot(&mut self, lines: &[nexus_app::boot::BootLine], skin: &brand::Skin) {
-        for line in lines {
-            let detail = if line.detail.trim().is_empty() {
-                line.label.clone()
-            } else {
-                format!("{} · {}", line.label, line.detail)
-            };
-            // The wake flow reports; it does not compete with the transcript,
-            // so it is dim. The one exception is the stage that asks the
-            // operator for something — an unconfigured install cannot do
-            // anything until they act, and a dim line is easy to scroll past.
-            let severity = if line.state == brand::ActionState::NeedsApproval {
-                Sev::Warn
-            } else {
-                Sev::Dim
-            };
-            self.system_sev(format!("{} {detail}", skin.icon(line.state)), severity);
-        }
+    /// Deliberately **not** a timeline write. These four facts used to be
+    /// pushed through `system_sev`, which files them as completed `Notice`
+    /// events — so every session opened with four `✓ DONE  NOTICE` cards for
+    /// work nobody did. The panel owns them now, and the timeline starts empty.
+    pub fn boot(&mut self, snapshot: nexus_app::boot::BootSnapshot) {
+        self.boot_snapshot = Some(snapshot);
+        self.welcome_collapsed = false;
+    }
+
+    /// Collapse the welcome panel to its one-line form.
+    ///
+    /// Called when the first turn starts, not when the timeline first changes:
+    /// scrolling, resizing, or a background task landing must not disturb it,
+    /// and once collapsed it never reopens.
+    pub fn collapse_welcome(&mut self) {
+        self.welcome_collapsed = true;
     }
 
     /// Whether an event appears in the main timeline: it must pass the

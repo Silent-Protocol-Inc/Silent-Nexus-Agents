@@ -76,8 +76,9 @@ pub fn register(registry: &mut ToolRegistry) {
             description: "Record one durable fact worth carrying into later sessions. Use it for \
                           findings, operator preferences, and conclusions that cost real work to \
                           establish — not for turn-by-turn narration, and not for anything \
-                          secret (credentials are refused). The entry is stored as a candidate \
-                          the operator reviews; say so when you report having recorded it."
+                          secret (credentials are refused). Report what you recorded; the tool \
+                          result says whether it is available to later turns immediately or is \
+                          waiting on operator review."
                 .into(),
             category: ToolCategory::Memory,
             input_schema: input_schema(),
@@ -97,6 +98,11 @@ pub fn register(registry: &mut ToolRegistry) {
                 .into(),
         },
     }));
+}
+
+/// Whether this workspace holds agent-recorded memories for review first.
+fn requires_approval(ctx: &ToolContext) -> bool {
+    ctx.config.memory.require_approval
 }
 
 /// The parsed, validated arguments.
@@ -184,7 +190,7 @@ impl Tool for MemoryAddTool {
             command: None,
             command_analysis: None,
             destination: None,
-            summary: format!("record one {scope} memory for review"),
+            summary: format!("record one {scope} memory"),
         })
     }
 
@@ -207,13 +213,19 @@ impl Tool for MemoryAddTool {
             confidence: AGENT_CONFIDENCE,
             scope: input.scope.clone(),
             sensitivity: "normal".into(),
-            // An agent-authored memory is a candidate. It is visible in
-            // `/memory` at once, and recalled into later turns once approved.
-            requires_approval: true,
+            // Recording takes effect immediately unless the operator asked for
+            // a review queue. An agent that writes down what it just worked out
+            // and then cannot read it back has not remembered anything.
+            requires_approval: requires_approval(ctx),
             ttl_days: input.ttl_days,
         })?;
+        let tail = if requires_approval(ctx) {
+            " — awaiting operator approval before it is recalled"
+        } else {
+            " — available to later turns"
+        };
         Ok(ToolOutput::text(format!(
-            "recorded memory {} ({}, {} scope) — awaiting operator approval before it is recalled",
+            "recorded memory {} ({}, {} scope){tail}",
             id.as_str(),
             input.kind.as_str(),
             input.scope
@@ -222,7 +234,7 @@ impl Tool for MemoryAddTool {
             "memory_id": id.as_str(),
             "kind": input.kind.as_str(),
             "scope": input.scope,
-            "requires_approval": true,
+            "requires_approval": requires_approval(ctx),
         })))
     }
 }
@@ -235,6 +247,53 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register(&mut registry);
         registry.get("memory.add").expect("registered")
+    }
+
+    /// Recording is not an approval gate by default.
+    ///
+    /// It used to be: every agent-recorded fact landed as a candidate and was
+    /// invisible to later turns until a human clicked approve, so an agent that
+    /// wrote down what it had just established could not read it back. The
+    /// safety properties that matter are elsewhere and unchanged — secrets are
+    /// refused, the store is separate from the workspace, and writes are
+    /// budgeted per turn.
+    #[test]
+    fn recording_takes_effect_immediately_unless_the_operator_asks_otherwise() {
+        let mut config = nexus_core::config::Config::default();
+        assert!(
+            !config.memory.require_approval,
+            "recording must not be gated by default"
+        );
+        config.memory.require_approval = true;
+        assert!(config.memory.require_approval, "the queue is still opt-in");
+    }
+
+    /// The description tells the model what to say about a recording, and it
+    /// must not promise a review that is not happening.
+    #[test]
+    fn the_tool_description_does_not_promise_a_review_queue() {
+        let description = tool().meta().description.clone();
+        assert!(
+            !description.contains("stored as a candidate"),
+            "{description}"
+        );
+        assert!(
+            description.contains("credentials are refused"),
+            "{description}"
+        );
+    }
+
+    #[test]
+    fn the_summary_no_longer_says_the_memory_is_for_review() {
+        let request = tool()
+            .action_request(&json!({"content": "the parser is hand-written"}))
+            .expect("action request");
+        assert!(
+            !request.summary.contains("for review"),
+            "{}",
+            request.summary
+        );
+        assert_eq!(request.risk, RiskLevel::Read);
     }
 
     #[test]
