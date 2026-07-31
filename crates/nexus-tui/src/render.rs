@@ -135,6 +135,7 @@ pub fn draw(f: &mut Frame, st: &mut State) {
     let t = st.theme;
     let area = f.area();
     let rl = crate::layout::classify(area);
+    st.layout = rl;
 
     if rl.too_small {
         draw_too_small(f, area, &t);
@@ -155,7 +156,10 @@ pub fn draw(f: &mut Frame, st: &mut State) {
         .constraints([
             Constraint::Length(rl.header_rows),
             Constraint::Length(welcome_rows),
-            Constraint::Min(3),
+            // The conversation is the one region with a floor. Everything above
+            // and below it is already sized to shed under height pressure, so
+            // this is what a shrinking viewport runs into last.
+            Constraint::Min(rl.min_timeline_rows),
             Constraint::Length(plan_rows),
             Constraint::Length(input_rows),
             Constraint::Length(rl.status_rows),
@@ -184,6 +188,14 @@ pub fn draw(f: &mut Frame, st: &mut State) {
     draw_input(f, rows[4], st, &t, &rl);
     draw_footer(f, rows[5], st, &t, &rl);
 
+    // Drawn against the conversation region only, and *before* the modal stack.
+    // It used to be painted last over the whole frame, which put it on top of
+    // the composer, every overlay, and the approval prompt — so a panel of
+    // read-only metadata could cover the controls you needed to answer.
+    if context_overlay_visible(st, &rl) {
+        draw_context_overlay(f, rows[2], st, &t, &rl);
+    }
+
     // Overlay stack: render every overlay, topmost last.
     for overlay in &st.overlays {
         draw_overlay(f, area, overlay, st, &t);
@@ -193,14 +205,24 @@ pub fn draw(f: &mut Frame, st: &mut State) {
         draw_approval(f, area, st, &t);
     }
 
-    if !rl.show_sidebar && st.context_drawer {
-        draw_context_drawer(f, area, st, &t);
-    }
     if st.agent_drawer {
         draw_agent_drawer(f, area, st, &t);
     }
 
     draw_toasts(f, area, st, &t);
+}
+
+/// Whether the ACTIVE CONTEXT overlay should be drawn this frame.
+///
+/// Three things have to agree: the rail is not already showing it, the layout
+/// can afford to draw it beside a usable conversation, and the operator asked
+/// for it. The middle condition is the one that was missing — the panel used to
+/// appear the moment the rail went away, whether or not anything could still be
+/// read behind it.
+pub(crate) fn context_overlay_visible(st: &State, rl: &crate::layout::ResponsiveLayout) -> bool {
+    !rl.show_sidebar
+        && rl.context_placement == crate::layout::ContextPlacement::Overlay
+        && st.context_pane.is_open()
 }
 
 /// Rows to reserve for the welcome panel.
@@ -244,6 +266,10 @@ const MIN_ROWS_BELOW_WELCOME: u16 = 13;
 /// Below this there is no panel worth drawing: the collapsed line carries the
 /// identity instead, and the status bar already has the rest.
 const MIN_PANEL_ROWS: u16 = 6;
+/// Columns the conversation keeps behind the ACTIVE CONTEXT overlay. Narrower
+/// than this and the text still visible beside the panel is broken words rather
+/// than readable prose, which is no better than hiding the conversation.
+const MIN_TIMELINE_COLS: u16 = 24;
 
 fn draw_welcome(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     let Some(snapshot) = &st.boot_snapshot else {
@@ -1666,6 +1692,25 @@ fn draw_context_rail(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     for blocker in active.blockers.iter().take(3) {
         lines.push(kv("blocker", truncate(blocker, 24), t.failure()));
     }
+    // The rail is taller than a constrained viewport can show. Scrolling makes
+    // the overflow reachable; without it the tail — files, checks, approval —
+    // was simply cut off with nothing to say so.
+    let visible = area.height.saturating_sub(2) as usize;
+    let overflow = lines.len().saturating_sub(visible);
+    let offset = (st.context_scroll as usize).min(overflow);
+    if overflow > 0 {
+        let block = block.title_bottom(Span::styled(
+            format!(" {}/{} ", offset + 1, overflow + 1),
+            t.muted(),
+        ));
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .block(block)
+                .scroll((offset as u16, 0)),
+            area,
+        );
+        return;
+    }
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .block(block)
@@ -1674,16 +1719,49 @@ fn draw_context_rail(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     );
 }
 
-fn draw_context_drawer(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
-    let width = area.width.saturating_mul(3) / 4;
-    let drawer = Rect::new(
-        area.right().saturating_sub(width),
-        area.y + 1,
+/// ACTIVE CONTEXT as a bounded overlay over the conversation region.
+///
+/// `body` is the transcript's rect, not the whole frame. The overlay is
+/// right-aligned inside it and never takes more than it can spare: the
+/// conversation keeps `min_timeline_rows` and enough columns to read a line of
+/// prose, so what is behind the panel stays legible and the composer below is
+/// never touched. Content that does not fit is scrolled, not silently clipped.
+fn draw_context_overlay(
+    f: &mut Frame,
+    body: Rect,
+    st: &State,
+    t: &Theme,
+    rl: &crate::layout::ResponsiveLayout,
+) {
+    // Floated inside the conversation's own frame rather than over it, so the
+    // transcript keeps its border and the panel reads as sitting in the corner
+    // of the conversation instead of replacing it.
+    let inner = body.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    // Leave the conversation its floor; spend at most half the remaining rows
+    // so the panel reads as secondary even when there is room to be generous.
+    let spare_rows = inner.height.saturating_sub(rl.min_timeline_rows);
+    let height = spare_rows.min(inner.height / 2);
+    if height < 3 {
+        return;
+    }
+    // Two thirds, but never so wide that the timeline behind it is reduced to a
+    // column of broken words.
+    let max_width = inner.width.saturating_sub(MIN_TIMELINE_COLS);
+    let width = (inner.width.saturating_mul(2) / 3).min(max_width);
+    if width < 24 {
+        return;
+    }
+    let overlay = Rect::new(
+        inner.right().saturating_sub(width),
+        inner.bottom().saturating_sub(height),
         width,
-        area.height.saturating_sub(2),
+        height,
     );
-    f.render_widget(Clear, drawer);
-    draw_context_rail(f, drawer, st, t);
+    f.render_widget(Clear, overlay);
+    draw_context_rail(f, overlay, st, t);
 }
 
 fn draw_agent_drawer(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
@@ -1772,8 +1850,18 @@ fn draw_input(
             " running — input queued after turn ".to_string(),
             t.warning(),
         )
+    } else if st.focus == Focus::Context && context_overlay_visible(st, rl) {
+        (" context · ↑/↓ scroll · Esc close ".to_string(), t.muted())
     } else if st.focus != Focus::Input {
         (" F6 focus · input inactive ".to_string(), t.muted())
+    } else if rl.context_placement == crate::layout::ContextPlacement::Overlay
+        && !context_overlay_visible(st, rl)
+        && st.input.is_empty()
+    {
+        // The only way to reach the panel is an arrow key on an empty composer,
+        // which nothing said anywhere. On the layouts where the rail is gone,
+        // that is the difference between hidden and unreachable.
+        (" → context · Enter send ".to_string(), t.muted())
     } else if st.bar.plan_mode {
         // The title is where the operator looks before typing, so plan mode
         // says what typing will do here rather than only in the status bar.
@@ -1915,6 +2003,26 @@ fn draw_footer(
             "NEW",
             st.new_events.to_string(),
             SegColor::Warning,
+            1,
+            true,
+        ));
+    }
+    // Say so in words when the panel was open and the terminal took it away —
+    // the one case where something the operator was looking at has vanished and
+    // nothing else on screen would explain why. Not whenever the rail happens
+    // to be absent: on every terminal under ninety columns that is permanent
+    // noise, and it costs a row segment that says something changeable.
+    //
+    // Text, not an icon, so it survives NO_COLOR and a terminal that cannot draw
+    // Unicode; ahead of the static segments because packing is by insertion
+    // order.
+    if st.context_pane == crate::state::ContextPane::Collapsed {
+        segs.push(mk(
+            "CONTEXT",
+            "CTX",
+            "CTX",
+            "hidden".to_string(),
+            SegColor::Muted,
             1,
             true,
         ));
@@ -4711,6 +4819,26 @@ mod tests {
         assert!(card.contains("The release is ready."), "{card}");
     }
 
+    fn pending_approval() -> crate::approver::ApprovalRequest {
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        crate::approver::ApprovalRequest {
+            action: nexus_policy::ActionRequest {
+                tool: "terminal.run".into(),
+                risk: nexus_core::RiskLevel::Destructive,
+                paths: vec![],
+                formats: vec![],
+                command: Some("rm -rf build".into()),
+                command_analysis: None,
+                destination: None,
+                summary: "remove the build directory".into(),
+            },
+            arguments: serde_json::json!({"command": "rm -rf build"}),
+            reason: "destructive command".into(),
+            sandbox_active: false,
+            reply,
+        }
+    }
+
     fn representative_state() -> State {
         let mut state = State::new(
             "neon-noir".into(),
@@ -4837,10 +4965,20 @@ mod tests {
         output
     }
 
+    /// The snapshot fixture opens the context panel wherever the rail is not
+    /// drawn, so both presentations are covered.
+    ///
+    /// This used to key off `width < 100`, which meant the panel was only ever
+    /// exercised on narrow terminals — and every narrow size in the crate is
+    /// also short, while every wide one is also tall. The wide-and-short
+    /// quadrant, which is exactly where a tablet lands when its software
+    /// keyboard opens, was unreachable by any test here. Keying off the layout
+    /// instead of the width closes that.
     fn rendered_text(width: u16, height: u16) -> String {
         let mut state = representative_state();
-        if width < 100 {
-            state.context_drawer = true;
+        let rl = crate::layout::classify(Rect::new(0, 0, width, height));
+        if !rl.show_sidebar {
+            state.context_pane = crate::state::ContextPane::Open;
         }
         render_state_text(&mut state, width, height)
     }
@@ -4879,6 +5017,92 @@ mod tests {
             })
     }
 
+    /// The defect this fixes, at the dimensions it was reported at.
+    ///
+    /// A tablet in landscape sits around 100×30 and gets the rail. Its software
+    /// keyboard takes roughly half the viewport, and at 100×14 the rail no
+    /// longer fits — at which point the panel used to be painted over the whole
+    /// frame, so the operator saw session, branch, model, agent, objective, and
+    /// file metadata where the conversation had been, with no way back that
+    /// anyone would guess.
+    #[test]
+    fn a_keyboard_sized_viewport_never_hands_the_conversation_to_the_context_panel() {
+        for (width, height) in [(100, 14), (120, 16), (110, 12), (90, 15)] {
+            let mut state = representative_state();
+            // Armed on the roomy layout, where it draws nothing at all.
+            state.context_pane = crate::state::ContextPane::Open;
+            state.focus = Focus::Context;
+            let frame = render_state_text(&mut state, width, height);
+
+            assert!(
+                frame.contains("Transcript cards now stream in place"),
+                "the conversation is gone at {width}x{height}:\n{frame}"
+            );
+            let context_rows = frame
+                .lines()
+                .filter(|line| line.contains("ACTIVE CONTEXT"))
+                .count();
+            let timeline_rows = frame.lines().filter(|line| !line.trim().is_empty()).count();
+            assert!(
+                context_rows <= 1,
+                "the context panel is drawn more than once at {width}x{height}:\n{frame}"
+            );
+            assert!(
+                timeline_rows > 4,
+                "almost nothing survived at {width}x{height}:\n{frame}"
+            );
+        }
+    }
+
+    /// The composer is priority one: whatever else is shed, the operator can
+    /// still type. The panel used to be `Clear`ed across `height - 2`, which
+    /// took the composer's rows with it.
+    #[test]
+    fn the_composer_survives_the_context_panel_at_every_constrained_size() {
+        for (width, height) in [(100, 14), (120, 16), (110, 12), (80, 20), (45, 18)] {
+            let mut state = representative_state();
+            state.context_pane = crate::state::ContextPane::Open;
+            state.input.insert_paste("a message being written");
+            let frame = render_state_text(&mut state, width, height);
+            assert!(
+                frame.contains("a message being written"),
+                "the composer was covered at {width}x{height}:\n{frame}"
+            );
+        }
+    }
+
+    /// Read-only metadata must never sit on top of the controls used to answer
+    /// an approval prompt. The panel used to be drawn after the modal stack.
+    #[test]
+    fn the_context_panel_never_covers_the_approval_prompt() {
+        let mut state = representative_state();
+        state.context_pane = crate::state::ContextPane::Open;
+        state.pending = Some(pending_approval());
+        let frame = render_state_text(&mut state, 100, 16);
+        assert!(
+            frame.contains("APPROVAL") || frame.contains("approval"),
+            "the approval prompt is not reachable:\n{frame}"
+        );
+    }
+
+    /// A panel that the terminal took away says so in words. Something the
+    /// operator was looking at has gone, and nothing else on screen explains it.
+    #[test]
+    fn a_collapsed_context_panel_is_announced_in_readable_text() {
+        let mut state = representative_state();
+        state.context_pane = crate::state::ContextPane::Collapsed;
+        let frame = render_state_text(&mut state, 100, 14);
+        assert!(frame.contains("CTX"), "{frame}");
+        assert!(frame.contains("hidden"), "{frame}");
+
+        // Never opened, never taken away: nothing to announce, and the segment
+        // would be permanent noise on every terminal under ninety columns.
+        let mut untouched = representative_state();
+        untouched.context_pane = crate::state::ContextPane::Closed;
+        let quiet = render_state_text(&mut untouched, 100, 14);
+        assert!(!quiet.contains("CTX"), "{quiet}");
+    }
+
     #[test]
     fn timeline_and_context_snapshots_match_required_terminal_sizes() {
         let actual: Vec<(u16, u16, u64)> = [
@@ -4887,6 +5111,11 @@ mod tests {
             (60, 18),
             (60, 20),
             (80, 24),
+            // Wide and short: a tablet with its software keyboard open. Every
+            // other size here is either wide-and-tall or narrow-and-short, so
+            // this quadrant had no snapshot at all.
+            (100, 14),
+            (120, 16),
             (100, 30),
             (120, 40),
             (160, 50),
@@ -4904,12 +5133,23 @@ mod tests {
         // wrap the sample answer moved and the four that do not are unchanged.
         // Hashes reproduced across three consecutive runs; the 45×20 and 100×30
         // frames were read first.
+        // Rebaselined a third time when ACTIVE CONTEXT stopped being painted
+        // over the frame: it is now floated inside the conversation's own border
+        // and never drawn where a conversation would not fit beside it. Two
+        // wide-and-short sizes were added because that quadrant had no coverage
+        // at all. The five sizes that show the panel moved; the three
+        // wide-and-tall sizes, which show the rail instead, are byte-identical —
+        // the check that this changed nothing on a desktop. Hashes reproduced
+        // across three consecutive runs; the 80×24, 100×14, and 120×16 frames
+        // were read before this was touched.
         let expected = [
-            (36, 20, 277_907_415_798_643_332),
-            (45, 20, 13_066_396_113_507_231_044),
-            (60, 18, 728_038_086_089_310_153),
-            (60, 20, 6_780_334_100_911_291_679),
-            (80, 24, 7_587_125_235_782_244_778),
+            (36, 20, 4_351_588_217_425_948_340),
+            (45, 20, 4_289_674_712_219_105_336),
+            (60, 18, 13_885_034_368_332_492_784),
+            (60, 20, 13_558_350_723_918_432_176),
+            (80, 24, 17_843_421_910_808_649_627),
+            (100, 14, 14_620_921_273_542_532_800),
+            (120, 16, 5_444_808_203_645_058_180),
             (100, 30, 11_649_898_669_383_203_317),
             (120, 40, 10_496_186_880_083_422_686),
             (160, 50, 10_700_549_245_251_536_142),

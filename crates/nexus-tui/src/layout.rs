@@ -71,6 +71,25 @@ impl HeightClass {
     }
 }
 
+/// Where the ACTIVE CONTEXT metadata may be shown at this size.
+///
+/// The conversation is the primary surface and the composer is how you act on
+/// it; context is secondary diagnostic metadata. So the placement degrades —
+/// rail beside the timeline, then a bounded overlay the operator opens
+/// deliberately, then a single word in the status bar — and the timeline is
+/// never the thing that yields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextPlacement {
+    /// Beside the timeline, always visible. Costs columns, not rows.
+    Rail,
+    /// Hidden by default; opening it draws a bounded overlay *inside* the
+    /// conversation region that still leaves a usable timeline behind it.
+    Overlay,
+    /// Not drawable at all without making the conversation unusable. The
+    /// status bar carries a `CTX` marker instead.
+    StatusOnly,
+}
+
 /// Derived layout budget shared by every major TUI section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResponsiveLayout {
@@ -85,6 +104,11 @@ pub struct ResponsiveLayout {
     /// of the chrome has been paid for. Zero when the terminal is too short to
     /// spend any: the conversation and the input matter more than the tracker.
     pub plan_panel_max_rows: u16,
+    /// Rows the conversation keeps no matter what else wants them. Everything
+    /// optional is shed before this is touched.
+    pub min_timeline_rows: u16,
+    /// Where ACTIVE CONTEXT may go at this size.
+    pub context_placement: ContextPlacement,
     pub compact_labels: bool,
     pub too_small: bool,
 }
@@ -99,6 +123,18 @@ impl ResponsiveLayout {
 const MIN_CONVERSATION_WIDTH: u16 = 50;
 /// Sidebar width when shown.
 const SIDEBAR_WIDTH: u16 = 36;
+/// Rows the conversation keeps when there is room to be generous: enough for a
+/// couple of events plus the answer being written.
+const TIMELINE_ROWS: u16 = 8;
+/// Rows the conversation keeps when there is not: still a readable window, not
+/// a single line with a border around it.
+const TIMELINE_ROWS_TIGHT: u16 = 6;
+/// Below this the conversation cannot afford to give up any columns, so an
+/// overlay would cover rather than sit beside it.
+const MIN_OVERLAY_WIDTH: u16 = 56;
+/// Rows an overlay needs to show anything worth opening it for, on top of the
+/// timeline rows it must leave behind.
+const MIN_OVERLAY_ROWS: u16 = 5;
 
 /// Classify a terminal area into a full responsive budget.
 pub fn classify(area: Rect) -> ResponsiveLayout {
@@ -128,7 +164,7 @@ pub fn classify(area: Rect) -> ResponsiveLayout {
         _ => {}
     }
 
-    let input_max_rows = match (width_class, height_class) {
+    let input_max_rows: u16 = match (width_class, height_class) {
         (_, HeightClass::VeryShort) => 1,
         (WidthClass::Mobile, _) => 3,
         _ => 4,
@@ -149,6 +185,29 @@ pub fn classify(area: Rect) -> ResponsiveLayout {
         HeightClass::Tall => 7,
     };
 
+    let min_timeline_rows = match height_class {
+        HeightClass::Tall | HeightClass::Standard => TIMELINE_ROWS,
+        HeightClass::Short | HeightClass::VeryShort => TIMELINE_ROWS_TIGHT,
+    };
+
+    // What the conversation region will actually be handed, once the chrome
+    // above and below it has been paid for. The overlay has to fit *inside*
+    // that, on top of the rows the timeline keeps — which is the whole point:
+    // a software keyboard halving the viewport must cost the metadata panel,
+    // never the conversation.
+    let body_rows = area
+        .height
+        .saturating_sub(header_rows + status_rows + input_max_rows.saturating_add(2));
+    let context_placement = if show_sidebar {
+        ContextPlacement::Rail
+    } else if area.width >= MIN_OVERLAY_WIDTH
+        && body_rows >= min_timeline_rows.saturating_add(MIN_OVERLAY_ROWS)
+    {
+        ContextPlacement::Overlay
+    } else {
+        ContextPlacement::StatusOnly
+    };
+
     ResponsiveLayout {
         width_class,
         height_class,
@@ -158,6 +217,8 @@ pub fn classify(area: Rect) -> ResponsiveLayout {
         status_rows,
         input_max_rows,
         plan_panel_max_rows,
+        min_timeline_rows,
+        context_placement,
         compact_labels: width_class != WidthClass::Wide,
         too_small: area.width < 24 || area.height < 8,
     }
@@ -382,6 +443,72 @@ mod tests {
         assert_eq!(HeightClass::from_height(21), HeightClass::Short);
         assert_eq!(HeightClass::from_height(16), HeightClass::Short);
         assert_eq!(HeightClass::from_height(15), HeightClass::VeryShort);
+    }
+
+    /// The conversation has a floor and nothing may spend below it.
+    #[test]
+    fn the_conversation_keeps_a_usable_height_at_every_size() {
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 30),
+            (100, 14),
+            (80, 12),
+            (40, 10),
+        ] {
+            let rl = classify(rect(width, height));
+            if rl.too_small {
+                continue;
+            }
+            assert!(
+                rl.min_timeline_rows >= 6,
+                "{width}x{height} would leave {} conversation rows",
+                rl.min_timeline_rows
+            );
+        }
+    }
+
+    /// A tablet as its software keyboard eats the viewport. The rail is a
+    /// luxury of a tall terminal; losing it must demote the metadata one step
+    /// at a time, and must never promote it into the conversation's place.
+    ///
+    /// The last step is honest rather than generous: at fourteen rows, once the
+    /// chrome is paid for, there is no way to show a panel worth opening *and*
+    /// a conversation worth reading. `/context` remains the full view.
+    #[test]
+    fn a_software_keyboard_demotes_the_context_panel_one_step_at_a_time() {
+        let roomy = classify(rect(100, 30));
+        assert!(roomy.show_sidebar);
+        assert_eq!(roomy.context_placement, ContextPlacement::Rail);
+
+        let half = classify(rect(100, 20));
+        assert!(!half.show_sidebar);
+        assert_eq!(half.context_placement, ContextPlacement::Overlay);
+
+        let keyboard = classify(rect(100, 14));
+        assert!(!keyboard.show_sidebar);
+        assert_eq!(keyboard.context_placement, ContextPlacement::StatusOnly);
+
+        for rl in [roomy, half, keyboard] {
+            assert!(rl.min_timeline_rows >= 6);
+        }
+    }
+
+    /// Below the point where an overlay could sit beside a readable
+    /// conversation, there is no placement left but a word in the status bar.
+    #[test]
+    fn a_viewport_with_no_room_to_spare_keeps_only_the_status_marker() {
+        for (width, height) in [(40, 12), (30, 10), (100, 9), (100, 14)] {
+            let rl = classify(rect(width, height));
+            if rl.too_small {
+                continue;
+            }
+            assert_eq!(
+                rl.context_placement,
+                ContextPlacement::StatusOnly,
+                "{width}x{height} still offers an overlay",
+            );
+        }
     }
 
     #[test]

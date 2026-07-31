@@ -47,7 +47,7 @@ use nexus_core::{SessionId, SpanId, TraceId, TurnId};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
-use state::{Focus, Mode, State, StatusBar, TimelineEventUpdate};
+use state::{ContextPane, Focus, Mode, State, StatusBar, TimelineEventUpdate};
 use std::io::Stdout;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -694,6 +694,37 @@ fn pressed_key(event: Event) -> Option<KeyEvent> {
     }
 }
 
+/// Bring pane and focus state back in line with a terminal that just changed
+/// size.
+///
+/// A resize used to be a no-op — "the next draw adapts" — which was true of
+/// everything the renderer recomputes per frame and false of the panel state it
+/// does not. On a phone or tablet the software keyboard opening *is* a resize,
+/// and it was enough to make a panel appear that the operator had no way to
+/// know was armed. So the size class is reconciled here, once, before the next
+/// draw: what the layout takes away is remembered as taken away, and what it
+/// gives back is given back. Everything the operator was in the middle of —
+/// composer text and cursor, timeline scroll and follow state, input history —
+/// is untouched.
+fn reconcile_layout(st: &mut State, columns: u16, rows: u16) {
+    let rl = crate::layout::classify(ratatui::layout::Rect::new(0, 0, columns, rows));
+    let can_show = rl.show_sidebar
+        || matches!(
+            rl.context_placement,
+            crate::layout::ContextPlacement::Overlay
+        );
+    st.context_pane = if can_show {
+        st.context_pane.relax()
+    } else {
+        st.context_pane.constrain()
+    };
+    // Focus must not be left pointing at something that is no longer drawn:
+    // keystrokes would go somewhere invisible, which reads as a frozen UI.
+    if st.focus == Focus::Context && !rl.show_sidebar && !st.context_pane.is_open() {
+        st.focus = Focus::Input;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_key(
     st: &mut State,
@@ -750,7 +781,10 @@ fn handle_key(
             }
             return;
         }
-        Event::Resize(..) => return, // next draw adapts
+        Event::Resize(columns, rows) => {
+            reconcile_layout(st, columns, rows);
+            return;
+        }
         _ => return,
     };
 
@@ -978,7 +1012,11 @@ fn handle_key(
 
     if matches!(key.code, KeyCode::F(6)) {
         st.focus = st.focus.next();
-        st.context_drawer = st.focus == Focus::Context;
+        // Focus no longer decides visibility. Cycling onto Context used to arm
+        // the panel, and on a roomy terminal that was invisible — the rail is
+        // already drawn there — so the flag sat latched until a resize made it
+        // paint over the conversation. Showing the panel is now something the
+        // operator asks for directly.
         st.agent_drawer = st.focus == Focus::Drawer;
         return;
     }
@@ -1046,6 +1084,29 @@ fn handle_key(
         }
     }
 
+    // The context panel is the operator's, so Esc closes it and Up/Down move
+    // through it while it holds focus. Without this it could be opened and then
+    // only dismissed by pressing the same arrow again — no way out that anyone
+    // would guess, on the layout where it matters most.
+    if st.context_pane.is_open() && st.focus == Focus::Context {
+        match key.code {
+            KeyCode::Esc => {
+                st.context_pane = ContextPane::Closed;
+                st.focus = Focus::Input;
+                return;
+            }
+            KeyCode::Up => {
+                st.context_scroll = st.context_scroll.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                st.context_scroll = st.context_scroll.saturating_add(1);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::PageUp => {
             transcript_scroll_up(st, st.viewport_rows.max(4) / 2, app, session.as_ref());
@@ -1065,7 +1126,7 @@ fn handle_key(
         KeyCode::Down => st.input.history_next(),
         KeyCode::Left if st.input.is_empty() => {
             st.agent_drawer = !st.agent_drawer;
-            st.context_drawer = false;
+            st.context_pane = ContextPane::Closed;
             st.focus = if st.agent_drawer {
                 Focus::Drawer
             } else {
@@ -1073,9 +1134,18 @@ fn handle_key(
             };
         }
         KeyCode::Right if st.input.is_empty() => {
-            st.context_drawer = !st.context_drawer;
+            // At sizes with nothing to spare, say so instead of setting a flag
+            // that draws nothing — a toggle with no visible effect is how the
+            // panel came to be armed without anyone knowing in the first place.
+            if !st.layout.show_sidebar
+                && st.layout.context_placement == crate::layout::ContextPlacement::StatusOnly
+            {
+                st.toast("no room for the context panel here — /context", Sev::Info);
+                return;
+            }
+            st.context_pane = st.context_pane.toggle();
             st.agent_drawer = false;
-            st.focus = if st.context_drawer {
+            st.focus = if st.context_pane.is_open() {
                 Focus::Context
             } else {
                 Focus::Input
@@ -4477,6 +4547,88 @@ mod tests {
             Vec::new(),
             nexus_core::ThinkingMode::Auto,
         )
+    }
+
+    /// A panel the terminal took away comes back when the terminal gives the
+    /// room back — the operator never asked for it to close.
+    #[test]
+    fn a_pane_the_keyboard_collapsed_reopens_when_the_keyboard_closes() {
+        let mut st = turn_test_state();
+        st.context_pane = ContextPane::Open;
+
+        reconcile_layout(&mut st, 100, 14);
+        assert_eq!(
+            st.context_pane,
+            ContextPane::Collapsed,
+            "the panel must not stay open where it cannot be drawn",
+        );
+
+        reconcile_layout(&mut st, 100, 30);
+        assert_eq!(st.context_pane, ContextPane::Open);
+    }
+
+    /// The other half of the same rule: a panel the *operator* closed is theirs
+    /// to reopen. Restoring it for them would be the same surprise in reverse.
+    #[test]
+    fn a_pane_the_operator_closed_stays_closed_through_a_resize() {
+        let mut st = turn_test_state();
+        st.context_pane = ContextPane::Closed;
+
+        reconcile_layout(&mut st, 100, 14);
+        reconcile_layout(&mut st, 160, 50);
+        assert_eq!(st.context_pane, ContextPane::Closed);
+    }
+
+    /// Focus pointing at something no longer drawn reads as a frozen UI: keys
+    /// go somewhere invisible and nothing on screen responds.
+    #[test]
+    fn focus_leaves_a_pane_that_the_resize_took_away() {
+        let mut st = turn_test_state();
+        st.context_pane = ContextPane::Open;
+        st.focus = Focus::Context;
+
+        reconcile_layout(&mut st, 100, 14);
+        assert_eq!(st.focus, Focus::Input);
+    }
+
+    /// A resize must not disturb what the operator was in the middle of.
+    #[test]
+    fn a_resize_preserves_the_composer_and_the_timeline_position() {
+        let mut st = turn_test_state();
+        st.input.insert_paste("half a sentence");
+        st.input.left();
+        let cursor = st.input.cursor();
+        st.scroll = 12;
+        st.follow = false;
+
+        reconcile_layout(&mut st, 100, 14);
+        reconcile_layout(&mut st, 120, 40);
+
+        assert_eq!(st.input.text(), "half a sentence");
+        assert_eq!(st.input.cursor(), cursor);
+        assert_eq!(st.scroll, 12);
+        assert!(!st.follow);
+    }
+
+    /// Terminals emit resize storms while a window is dragged or a keyboard
+    /// animates in; none of it may panic or leave the state inconsistent.
+    #[test]
+    fn a_storm_of_resizes_settles_without_panicking() {
+        let mut st = turn_test_state();
+        st.context_pane = ContextPane::Open;
+        for (columns, rows) in [
+            (120, 40),
+            (100, 14),
+            (24, 8),
+            (160, 50),
+            (30, 9),
+            (100, 30),
+            (100, 12),
+            (120, 40),
+        ] {
+            reconcile_layout(&mut st, columns, rows);
+        }
+        assert_eq!(st.context_pane, ContextPane::Open);
     }
 
     fn outcome(message: &str) -> nexus_agent::LoopOutcome {

@@ -154,6 +154,57 @@ impl Focus {
     }
 }
 
+/// Whether the ACTIVE CONTEXT panel is showing, and — when it is not — whether
+/// that was the operator's decision or the terminal's.
+///
+/// The distinction is the whole fix. The panel used to be one latched bool that
+/// nothing reconciled against the current size, so arming it on a roomy
+/// terminal (where it draws nothing, because the rail is already there) left a
+/// flag that only became visible once a software keyboard shrank the viewport —
+/// at which point it painted over the conversation. Now a pane that the layout
+/// took away comes back on its own, and a pane the operator closed stays closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextPane {
+    /// The operator closed it. It stays closed until they ask again.
+    Closed,
+    /// The operator opened it, and there is room to draw it.
+    Open,
+    /// The operator had it open, but the terminal no longer has room. It
+    /// reopens by itself when the room comes back.
+    Collapsed,
+}
+
+impl ContextPane {
+    /// Whether the panel should be drawn, given room to draw it.
+    pub fn is_open(self) -> bool {
+        matches!(self, ContextPane::Open)
+    }
+
+    /// The layout can no longer afford the panel.
+    pub fn constrain(self) -> Self {
+        match self {
+            ContextPane::Open => ContextPane::Collapsed,
+            other => other,
+        }
+    }
+
+    /// The layout can afford it again. Only what the layout took away is given
+    /// back — a pane the operator closed is not reopened for them.
+    pub fn relax(self) -> Self {
+        match self {
+            ContextPane::Collapsed => ContextPane::Open,
+            other => other,
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            ContextPane::Open => ContextPane::Closed,
+            _ => ContextPane::Open,
+        }
+    }
+}
+
 pub struct State {
     pub theme: Theme,
     pub theme_name: String,
@@ -214,7 +265,14 @@ pub struct State {
     pub event_row_offsets: std::collections::BTreeMap<String, usize>,
     pub(crate) wrap_layout_cache: std::collections::HashMap<String, WrapLayoutCacheEntry>,
     pub focus: Focus,
-    pub context_drawer: bool,
+    /// The layout the last frame was drawn with. Key handling needs to know
+    /// what is actually on screen — offering to open a panel that this size
+    /// cannot draw is worse than saying there is no room for it.
+    pub layout: crate::layout::ResponsiveLayout,
+    pub context_pane: ContextPane,
+    /// Scroll offset within the ACTIVE CONTEXT panel. Survives collapse and
+    /// restore, so a panel the keyboard took away comes back where it was.
+    pub context_scroll: u16,
     pub agent_drawer: bool,
     pub toasts: VecDeque<Toast>,
     pub spinner: usize,
@@ -340,7 +398,9 @@ impl State {
             event_row_offsets: std::collections::BTreeMap::new(),
             wrap_layout_cache: std::collections::HashMap::new(),
             focus: Focus::Input,
-            context_drawer: false,
+            layout: crate::layout::classify(ratatui::layout::Rect::new(0, 0, 80, 24)),
+            context_pane: ContextPane::Closed,
+            context_scroll: 0,
             agent_drawer: false,
             toasts: VecDeque::new(),
             spinner: 0,
