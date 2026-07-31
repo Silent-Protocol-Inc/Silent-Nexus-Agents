@@ -106,10 +106,11 @@ malicious model still cannot escape the boundary.
   into four strict layers — a curated boot flow, a live status line, a
   user-level timeline, and debug. A task turn opens with a 2–5 step intent and
   then reports milestones as they actually happen; a greeting stays a greeting.
-  Tool names, arguments, and raw output live in `/view debug` and nowhere else:
-  the product layers can only render what the translation layer emitted, which
-  carries no field to put a tool name in. Nothing is presented before it
-  happened, no percentage or ETA is ever shown, and animation is cosmetic. One
+  In the TUI, tool names, arguments, and raw output belong to `/view debug`: the
+  product layers can only render what the translation layer emitted, which
+  carries no field to put a tool name in. (`snx run` is a log, so it renders at
+  the debug layer throughout.) Nothing is presented before it happened, no
+  percentage or ETA is ever shown, and animation is cosmetic. One
   design language (`nexus-core::brand::design`) owns every icon, separator, and
   timing — no emoji anywhere. See
   [`docs/presentation.md`](docs/presentation.md).

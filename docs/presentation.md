@@ -27,6 +27,15 @@ The same fact reads differently per layer. Status says *Running checks*; the
 timeline later says *Tests passed (14s)*; debug shows
 `terminal.exec cargo test -j2 … exit 0`.
 
+### Where each surface sits
+
+The TUI carries all four layers and switches between them. **`snx run` renders
+at the debug layer** and always has: it is a non-interactive runner whose output
+is a log, it has no `/view` to turn detail back on, and a CI job that cannot see
+which command failed is worse off than a noisy one. It shares the intent card
+and the milestones with the TUI — that is what keeps the two surfaces from
+drifting apart — and prints the raw tool rows underneath them.
+
 ## The three axes
 
 Three verbosity-adjacent controls, each owning exactly one question:
@@ -109,6 +118,13 @@ the gate accepts only a 1:1 rewording — same count, same order, each step stil
 opening with a verb compatible with what that step is, and no identifier-shaped
 token. Anything else keeps the skeleton and records `refined: false` rather than
 implying model authorship.
+
+The refinement is one small completion (`temperature 0`, 256 tokens, 8-second
+leash) on task-shaped turns in `auto` and `verbose`, and nothing at all
+otherwise. Every way it can go wrong — no provider, an error, a timeout, an
+unparseable answer, a rejected rewording — lands on the same place: the
+skeleton, unchanged. `refine_wording = false` removes the call entirely and
+keeps the deterministic half.
 
 The plan is an **intention**. No step is ever ticked off; progress comes from
 milestones, and a milestone is constructible only from a completed fact.

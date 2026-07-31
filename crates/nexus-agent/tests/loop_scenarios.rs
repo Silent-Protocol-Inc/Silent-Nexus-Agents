@@ -1621,3 +1621,230 @@ fn every_stop_reason_classifies_and_nothing_incomplete_reads_as_success() {
         }
     }
 }
+
+/// Run one scripted turn in a given narration mode and return its loop events.
+///
+/// The scenarios below assert what the *operator* ends up reading, which is the
+/// one thing unit tests of the translation layer cannot check: they can prove a
+/// sentence is clean, not that the sentence is the one the loop actually
+/// produced for a real tool, a real failure, and a real refusal.
+async fn narrated_turn(
+    mode: nexus_core::timeline::NarrationMode,
+    script: Vec<MockScript>,
+    objective: &str,
+) -> Vec<LoopEvent> {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("hello.txt"), "world").expect("write");
+    let (mut runtime, session) = runtime_with(script, dir.path());
+    runtime.narration = mode;
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+    AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .with_events(events_tx)
+        .run(&session, objective, Arc::new(AutoApprove))
+        .await
+        .expect("run");
+    let mut events = Vec::new();
+    while let Ok(event) = events_rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+/// A turn that reads a file, fails a read, and finishes.
+fn three_tool_script() -> Vec<MockScript> {
+    vec![
+        MockScript::ToolCall {
+            name: "fs.read_file".into(),
+            arguments: json!({"path": "hello.txt"}).to_string(),
+        },
+        MockScript::ToolCall {
+            name: "fs.read_file".into(),
+            arguments: json!({"path": "does-not-exist.txt"}).to_string(),
+        },
+        MockScript::ToolCall {
+            name: "fs.create_file".into(),
+            arguments: json!({"path": "out.txt", "content": "done\n", "overwrite": true})
+                .to_string(),
+        },
+        MockScript::Text("Wrote out.txt.".into()),
+    ]
+}
+
+fn narration_texts(events: &[LoopEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            LoopEvent::AgentActivity { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **The layer boundary, end to end.** The unit tests prove `present()` never
+/// writes a tool name; this proves the loop never routes around it.
+#[tokio::test]
+async fn no_tool_name_reaches_the_narration_of_a_real_turn() {
+    let registry = ToolRegistry::with_builtins();
+    let names = registry.names();
+    for mode in [
+        nexus_core::timeline::NarrationMode::Off,
+        nexus_core::timeline::NarrationMode::Compact,
+        nexus_core::timeline::NarrationMode::Auto,
+        nexus_core::timeline::NarrationMode::Verbose,
+    ] {
+        let events = narrated_turn(
+            mode,
+            three_tool_script(),
+            "update out.txt from hello.txt and verify the result",
+        )
+        .await;
+        for text in narration_texts(&events) {
+            for name in &names {
+                assert!(
+                    !text.contains(name.as_str()),
+                    "{mode:?} leaked `{name}`: {text}"
+                );
+            }
+        }
+        for event in &events {
+            if let LoopEvent::IntentPlanned { steps, .. } = event {
+                for step in steps {
+                    for name in &names {
+                        assert!(
+                            !step.contains(name.as_str()),
+                            "intent leaked `{name}`: {step}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `off` is the rollback path: no intent, and nothing the narration layer
+/// would have added. The tool rows the timeline stores are untouched.
+#[tokio::test]
+async fn narration_off_emits_no_intent_and_no_milestones() {
+    let events = narrated_turn(
+        nexus_core::timeline::NarrationMode::Off,
+        three_tool_script(),
+        "update out.txt from hello.txt and verify the result",
+    )
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, LoopEvent::IntentPlanned { .. })),
+        "off emitted an intent plan"
+    );
+    // The failure milestone is the loudest thing narration adds; in `off` the
+    // operator reads the raw tool row instead, which is exactly the pre-2.11.0
+    // timeline.
+    assert!(
+        !narration_texts(&events)
+            .iter()
+            .any(|text| text.contains("failed")),
+        "off narrated a failure milestone"
+    );
+    // The tool calls still happened and are still recorded as tool events.
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, LoopEvent::ToolExecutionFinished { .. })));
+}
+
+/// A task-shaped turn opens with an intention: 2–5 steps, stated once, and
+/// never ticked off from the plan alone.
+#[tokio::test]
+async fn a_task_turn_opens_with_two_to_five_steps_stated_once() {
+    let events = narrated_turn(
+        nexus_core::timeline::NarrationMode::Auto,
+        three_tool_script(),
+        "update out.txt from hello.txt and verify the result",
+    )
+    .await;
+    let plans: Vec<&Vec<String>> = events
+        .iter()
+        .filter_map(|event| match event {
+            LoopEvent::IntentPlanned { steps, .. } => Some(steps),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(plans.len(), 1, "the intent is stated exactly once");
+    assert!(
+        (2..=5).contains(&plans[0].len()),
+        "plan was {} steps: {:?}",
+        plans[0].len(),
+        plans[0]
+    );
+    // The skeleton is the source of truth and the refinement pass is off in
+    // these scenarios, so the turn must not claim model-authored wording.
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, LoopEvent::IntentPlanned { refined, .. } if !refined)));
+}
+
+/// A greeting is not a task: no intent, no milestones, in the default mode.
+#[tokio::test]
+async fn a_greeting_gets_no_intent_and_no_milestones() {
+    let events = narrated_turn(
+        nexus_core::timeline::NarrationMode::Auto,
+        vec![MockScript::Text("Hello.".into())],
+        "hi",
+    )
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, LoopEvent::IntentPlanned { .. })),
+        "a greeting was given a plan"
+    );
+}
+
+/// The failure is the line the operator needs, and every narrating mode says
+/// it — a quieter mode lowers the noise floor, never the alarm.
+#[tokio::test]
+async fn a_failure_is_narrated_in_every_mode_that_narrates() {
+    for mode in [
+        nexus_core::timeline::NarrationMode::Compact,
+        nexus_core::timeline::NarrationMode::Auto,
+        nexus_core::timeline::NarrationMode::Verbose,
+    ] {
+        let events = narrated_turn(
+            mode,
+            three_tool_script(),
+            "update out.txt from hello.txt and verify the result",
+        )
+        .await;
+        assert!(
+            narration_texts(&events)
+                .iter()
+                .any(|text| text.contains("failed")),
+            "{mode:?} swallowed the failure"
+        );
+    }
+}
+
+/// `compact` promises failures, approvals, and check results — and approvals
+/// were the half that never arrived: the fact existed and was unit-tested, but
+/// nothing in the loop ever constructed one, so the quietest narrating mode
+/// was quieter than documented.
+#[tokio::test]
+async fn compact_narrates_the_approval_it_promises() {
+    let events = narrated_turn(
+        nexus_core::timeline::NarrationMode::Compact,
+        three_tool_script(),
+        "update out.txt from hello.txt and verify the result",
+    )
+    .await;
+    let texts = narration_texts(&events);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, LoopEvent::ApprovalRequested { .. })),
+        "the scenario did not actually reach an approval: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("approved")),
+        "compact swallowed the approval: {texts:?}"
+    );
+}

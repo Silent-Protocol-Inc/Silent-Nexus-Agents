@@ -46,20 +46,28 @@ pub enum RuntimeFact {
     ApprovalResolved { granted: bool, summary: String },
     /// Policy refused an action outright.
     PolicyRefused { reason: String },
-    /// The loop waited on something outside itself and has stopped waiting.
-    ProviderWaited { detail: String },
     /// History was folded so the run could continue.
     ContextCompacted { before: usize, after: usize },
-    /// Files changed on disk.
-    FilesChanged { paths: Vec<String> },
 }
+
+// Two facts deliberately do not live here, because the type's past-tense rule
+// is the wrong shape for them:
+//
+// * **A provider wait** is worth saying *while* it blocks — "rate limited,
+//   waiting 30s, your work is preserved" — and a past-tense "Waited on the
+//   provider" arrives after the operator has already wondered what happened.
+//   It also has to survive `narration = off`, since a stalled turn with no
+//   explanation is a bug report. It stays an ordinary operational message.
+// * **Files changed** is already carried by the tool translation, which names
+//   the path the operator asked about. A second line counting the same writes
+//   would be the filler this layer exists to remove.
 
 /// How much a statement matters, which is what the narration modes gate on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Significance {
     /// An ordinary successful step. Shown only in `verbose`.
     Routine,
-    /// Worth a line: files changed, history folded, a provider wait ended.
+    /// Worth a line: a change landed, history was folded.
     Notable,
     /// The operator needs to know: a failure, a refusal, an approval, or a
     /// validation outcome. Shown in every narrating mode.
@@ -181,27 +189,12 @@ pub fn present(fact: &RuntimeFact) -> Presented {
                 .subject(short(reason, 80))
                 .significance(Significance::Critical)
         }
-        RuntimeFact::ProviderWaited { detail } => {
-            Presented::new(ActionState::WaitingOnProvider, "Waited on the provider.")
-                .subject(short(detail, 80))
-                .significance(Significance::Notable)
-        }
         RuntimeFact::ContextCompacted { before, after } => Presented::new(
             ActionState::Composing,
             "Folded earlier history to keep going.",
         )
         .evidence(Some(format!("{before} → {after} tokens")))
         .significance(Significance::Notable),
-        RuntimeFact::FilesChanged { paths } => {
-            let text = match paths.len() {
-                0 => "No files changed.".to_string(),
-                1 => "Changed a file.".to_string(),
-                n => format!("Changed {n} files."),
-            };
-            Presented::new(ActionState::Applying, text)
-                .subject(paths.first().cloned())
-                .significance(Significance::Notable)
-        }
     }
 }
 
@@ -477,18 +470,6 @@ mod tests {
             "Folded earlier history to keep going. (2662 → 2394 tokens)"
         );
         assert_eq!(presented.significance, Significance::Notable);
-    }
-
-    #[test]
-    fn file_changes_count_what_actually_changed() {
-        let one = present(&RuntimeFact::FilesChanged {
-            paths: vec!["a.rs".into()],
-        });
-        assert_eq!(one.line(), "Changed a file. a.rs");
-        let many = present(&RuntimeFact::FilesChanged {
-            paths: vec!["a.rs".into(), "b.rs".into(), "c.rs".into()],
-        });
-        assert!(many.line().starts_with("Changed 3 files."));
     }
 
     #[test]

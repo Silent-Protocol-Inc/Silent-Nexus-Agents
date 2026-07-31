@@ -72,6 +72,9 @@
   That is structural — the product layers consume a `Presented` value that has
   no field for a tool name, an argument blob, or raw output, so a leak is a
   compile error, and a test asserts it over every tool in the real registry.
+  `snx run` renders at the debug layer throughout, as it always has: it is a log
+  with no `/view` to turn detail back on. It shares the intent card and the
+  milestones with the TUI, so the two surfaces cannot drift.
   Full documentation in [`docs/presentation.md`](docs/presentation.md).
 - **A curated wake flow instead of startup logs.** The reveal is followed by
   session restore, memory link, what's new, and a welcome line — each omitted

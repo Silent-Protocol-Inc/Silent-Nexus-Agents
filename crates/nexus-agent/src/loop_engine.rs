@@ -1700,13 +1700,21 @@ impl AgentLoop {
     /// Emit one activity segment. The single door every narration goes through,
     /// so the "never private reasoning" rule has one place to hold.
     fn narrate(&self, work: &WorkBreakdown, phase: ActivityPhase, text: impl AsRef<str>) {
+        self.emit_activity(Self::active_step(work), phase, text);
+    }
+
+    /// The same door, for the facts that happen outside a stage — compaction
+    /// and provider backoff belong to the turn, not to a step of its plan, and
+    /// inventing a step number for them would be exactly the fabricated
+    /// progress the status line refuses to show.
+    fn emit_activity(&self, step: Option<(u32, u32)>, phase: ActivityPhase, text: impl AsRef<str>) {
         let text = text.as_ref().trim();
         if text.is_empty() {
             return;
         }
         self.emit(LoopEvent::AgentActivity {
             role: self.review_agent_name(),
-            step: Self::active_step(work),
+            step,
             phase,
             text: self.safe_model_text(text),
         });
@@ -1726,7 +1734,7 @@ impl AgentLoop {
     /// the machine detail; the policy decides whether this mode says anything
     /// at all. A routine success in `compact` produces silence rather than a
     /// line nobody needed.
-    fn narrate_fact(&self, work: &WorkBreakdown, fact: &crate::narration::RuntimeFact) {
+    fn narrate_fact(&self, work: Option<&WorkBreakdown>, fact: &crate::narration::RuntimeFact) {
         let policy = self.narration_policy();
         let presented = crate::narration::present(fact);
         if !policy.shows(&presented) {
@@ -1742,7 +1750,7 @@ impl AgentLoop {
             nexus_core::brand::ActionState::Scanning => ActivityPhase::Analysis,
             _ => ActivityPhase::Execution,
         };
-        self.narrate(work, phase, presented.line());
+        self.emit_activity(work.and_then(Self::active_step), phase, presented.line());
     }
 
     fn agent_can_write(&self) -> bool {
@@ -2561,11 +2569,20 @@ impl AgentLoop {
         if let Ok(mut stored) = self.narration.lock() {
             *stored = narration;
         }
-        let intent = if narration.emits_intent() {
+        let mut intent = if narration.emits_intent() {
             crate::narration::skeleton(class, &observed_work, self.runtime.narration_max_steps)
         } else {
             None
         };
+        // One bounded pass to improve the *wording* — the deterministic half
+        // above is the source of truth, and `accept_rewording` discards
+        // anything that is not a 1:1 restatement of it.
+        if let (Some(plan), true) = (
+            intent.as_mut(),
+            narration.refines_wording() && self.runtime.narration_refine,
+        ) {
+            *plan = self.refine_intent(plan, objective, &model_name).await;
+        }
         if let Some(plan) = &intent {
             self.emit(LoopEvent::IntentPlanned {
                 steps: plan.texts(),
@@ -3913,6 +3930,17 @@ impl AgentLoop {
         };
         timeline.record_loop_event(&event)?;
         self.emit(event);
+        // Compaction is a degradation: earlier turns are now a summary, and the
+        // operator should know that before wondering why a detail was
+        // forgotten. It belongs to the turn rather than to a step of its plan,
+        // so it carries no step number.
+        self.narrate_fact(
+            None,
+            &crate::narration::RuntimeFact::ContextCompacted {
+                before: before_tokens,
+                after: after_tokens,
+            },
+        );
         Ok(())
     }
 
@@ -3974,6 +4002,94 @@ impl AgentLoop {
                 (fallback_compaction_summary(folded), false)
             }
         }
+    }
+
+    /// One bounded model pass over the intent wording.
+    ///
+    /// The hybrid half of the planner: the skeleton decides *what* the steps
+    /// are, and this may only say them better. Every failure mode — no
+    /// provider, an error, an empty reply, a wrong number of lines, a step that
+    /// changed the act or reached for a function name — lands on the same
+    /// outcome: the skeleton, unchanged, with `refined: false`. A degraded
+    /// refinement is recorded rather than implied, so a plan never *looks*
+    /// model-authored when it is not.
+    ///
+    /// It costs one small completion on a task-shaped turn and nothing at all
+    /// otherwise, because `emits_intent()` already excluded greetings and
+    /// lookups before this is reached.
+    async fn refine_intent(
+        &self,
+        skeleton: &crate::narration::IntentPlan,
+        objective: &str,
+        model_name: &str,
+    ) -> crate::narration::IntentPlan {
+        let numbered = skeleton
+            .texts()
+            .iter()
+            .enumerate()
+            .map(|(index, text)| format!("{}. {text}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let request = nexus_models::types::ModelRequest {
+            messages: vec![
+                ChatMessage::system(
+                    "Rewrite each step of this plan so it reads naturally for the person who \
+                     asked. Keep exactly the same number of steps, in the same order, each \
+                     describing the same action as the step it replaces — you are improving \
+                     the sentence, not the plan. One step per line, numbered as given, at \
+                     most 80 characters each. Plain language only: no function names, no \
+                     file paths, no shell commands, no identifiers with dots or underscores. \
+                     Output the numbered lines and nothing else.",
+                ),
+                ChatMessage::user(format!(
+                    "The person asked: {}\n\nThe plan:\n{numbered}",
+                    self.safe_model_text(objective)
+                )),
+            ],
+            // Enough for five short lines and no more; an overrun is a
+            // rejection anyway, so there is no reason to pay for one.
+            max_tokens: Some(256),
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+        // The intent is meant to appear *before* the work starts, so this pass
+        // gets a short leash: a slow local model must not turn "here is what I
+        // am about to do" into ten seconds of silence. Timing out is just
+        // another way of keeping the skeleton.
+        const REFINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+        let completion = match self.runtime.models.get(model_name) {
+            Ok(provider) => {
+                match tokio::time::timeout(REFINE_TIMEOUT, provider.complete(request)).await {
+                    Ok(Ok(completion)) => completion.content,
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "intent rewording failed; keeping the skeleton");
+                        return skeleton.clone();
+                    }
+                    Err(_) => {
+                        tracing::debug!("intent rewording timed out; keeping the skeleton");
+                        return skeleton.clone();
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(%error, "no provider for the intent rewording");
+                return skeleton.clone();
+            }
+        };
+        // Model text on a product surface goes through the same sanitizer as
+        // every other model text; the rewording gate is about meaning, not
+        // about control characters or secrets.
+        let completion = self.safe_model_text(&completion);
+        let reworded: Vec<String> = completion
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| strip_step_number(line).to_string())
+            .collect();
+        if reworded.len() != skeleton.len() {
+            return skeleton.clone();
+        }
+        crate::narration::accept_rewording(skeleton, &reworded)
     }
 
     /// Turn a validated `plan.submit` payload into a durable plan.
@@ -4456,6 +4572,15 @@ impl AgentLoop {
         let mut unsafe_host_authorized = false;
         match effective_decision {
             Decision::Deny => {
+                // A refusal changes what the turn can do, so it is a milestone
+                // in every mode that narrates at all — the operator otherwise
+                // sees a turn that simply stopped short.
+                self.narrate_fact(
+                    Some(work),
+                    &crate::narration::RuntimeFact::PolicyRefused {
+                        reason: outcome.reason.clone(),
+                    },
+                );
                 return Err(NexusError::PolicyDenied(format!(
                     "`{}` denied ({})",
                     call.name, outcome.reason
@@ -4543,6 +4668,13 @@ impl AgentLoop {
                                 tool: call.name.clone(),
                                 approved: false,
                                 edited: false,
+                            },
+                        );
+                        self.narrate_fact(
+                            Some(work),
+                            &crate::narration::RuntimeFact::ApprovalResolved {
+                                granted: false,
+                                summary: action_req.summary.clone(),
                             },
                         );
                         return Err(NexusError::ApprovalRequired(format!(
@@ -4688,6 +4820,17 @@ impl AgentLoop {
                         edited,
                     },
                 );
+                // Every path that reaches here approved; the decline returned
+                // above. An approval is a decision the operator made, so it is
+                // recorded in the timeline rather than living only in the modal
+                // that has since closed.
+                self.narrate_fact(
+                    Some(work),
+                    &crate::narration::RuntimeFact::ApprovalResolved {
+                        granted: true,
+                        summary: action_req.summary.clone(),
+                    },
+                );
             }
             Decision::Allow | Decision::AllowOnce | Decision::AllowSession => {}
         }
@@ -4794,7 +4937,7 @@ impl AgentLoop {
                 output: output.clone(),
             }
         };
-        self.narrate_fact(work, &fact);
+        self.narrate_fact(Some(work), &fact);
         let changed_paths = if action_req.risk >= nexus_core::RiskLevel::Write {
             action_req.paths.clone()
         } else {
@@ -5891,6 +6034,27 @@ fn summarize(text: &str, max_chars: usize) -> String {
     summary
 }
 
+/// Drop a leading list marker from a reworded intent step.
+///
+/// The model is asked for `1. Read the failing test`, and models variously
+/// answer `1)`, `- `, or `1 - `. The marker is formatting, not content, so it
+/// is removed rather than counted against the rewording — but only from the
+/// front, and only once, so a step that legitimately contains a number keeps it.
+fn strip_step_number(line: &str) -> &str {
+    let trimmed = line.trim_start_matches(['-', '*', '•']).trim_start();
+    let rest = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
+    if rest.len() == trimmed.len() {
+        // No leading digits, so there is no number to strip and nothing that
+        // looks like one to mistake for a marker.
+        return trimmed;
+    }
+    // `1.`, `1)`, and `1 - ` all reach here; the separator may be spaced away
+    // from the digits, so whitespace is taken before it as well as after.
+    rest.trim_start()
+        .trim_start_matches(['.', ')', ':', '-'])
+        .trim()
+}
+
 /// Best-effort path + insertion/deletion counts from git unified-diff text.
 /// Returns `(path, insertions, deletions)`; the path prefers the `+++ b/<path>`
 /// header and counts exclude the `+++`/`---` file markers.
@@ -6042,6 +6206,36 @@ fn idempotency_key(session_scope: &str, tool: &str, args: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The refinement asks for `1. Step`, and models answer in every list
+    /// dialect there is. The marker is formatting; the sentence is the content.
+    #[test]
+    fn every_list_dialect_a_model_answers_in_reduces_to_the_sentence() {
+        for line in [
+            "1. Read the failing test",
+            "1) Read the failing test",
+            "1 - Read the failing test",
+            "1: Read the failing test",
+            "- Read the failing test",
+            "* Read the failing test",
+            "  2.  Read the failing test  ",
+            "Read the failing test",
+        ] {
+            assert_eq!(strip_step_number(line), "Read the failing test", "{line:?}");
+        }
+    }
+
+    /// Only a *leading* marker goes. A step that is about a number keeps it,
+    /// and a bare number is not a step at all — the rewording gate rejects the
+    /// empty string that falls out.
+    #[test]
+    fn a_number_inside_a_step_is_content_not_a_marker() {
+        assert_eq!(
+            strip_step_number("Update the 3 failing cases"),
+            "Update the 3 failing cases"
+        );
+        assert_eq!(strip_step_number("3."), "");
+    }
 
     #[test]
     fn the_summary_budget_tracks_the_window_instead_of_a_flat_ceiling() {

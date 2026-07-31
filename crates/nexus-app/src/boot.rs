@@ -133,11 +133,49 @@ fn whats_new(app: &App) -> Option<BootLine> {
     ))
 }
 
-/// Where to go next, when there is somewhere real to point.
+/// Where to go next — the one line that is always worth saying.
+///
+/// This is the whole orientation surface. It used to be three: this stage, plus
+/// a first-run branch and a returning-operator branch in the TUI's own startup,
+/// and the last of those printed `next_step_hint` a second time, verbatim,
+/// directly under the `Ready` line that had just printed it. Three cases, one
+/// owner, one line.
 fn welcome(app: &App) -> Option<BootLine> {
-    let hint = crate::services::next_step_hint(app)
-        .unwrap_or_else(|| "Type a message, / for commands, Ctrl+K for the palette.".into());
-    Some(BootLine::new(ActionState::Done, "Ready", hint))
+    welcome_line(
+        app.config.models.is_empty(),
+        app.read_ui_state(|state| !state.first_run_completed),
+        crate::services::next_step_hint(app),
+    )
+}
+
+/// The orientation decision, separated from the reads so it can be tested
+/// without standing up a whole workspace.
+fn welcome_line(no_models: bool, first_run: bool, hint: Option<String>) -> Option<BootLine> {
+    if no_models {
+        // Nothing configured. Onboarding is the only useful next step, and this
+        // is the one boot line that asks for something rather than reporting —
+        // the renderer draws `NeedsApproval` as a warning for exactly that.
+        return Some(BootLine::new(
+            ActionState::NeedsApproval,
+            "First run",
+            "no models configured yet — /setup gets you talking to an agent",
+        ));
+    }
+    if first_run {
+        // Configured but never opened interactively — an inherited config, or
+        // `snx setup` run headless. Orient rather than nag.
+        return Some(BootLine::new(
+            ActionState::Done,
+            "Ready",
+            "new here? /help lists the keys, Ctrl+K opens the palette, or just \
+             describe what you want to change",
+        ));
+    }
+    Some(BootLine::new(
+        ActionState::Done,
+        "Ready",
+        hint.unwrap_or_else(|| "Type a message, / for commands, Ctrl+K for the palette.".into()),
+    ))
 }
 
 fn plural(n: usize) -> &'static str {
@@ -238,6 +276,49 @@ mod tests {
         let headline = changelog_headline(&long, "9.0.0").expect("headline");
         assert!(headline.chars().count() <= 64, "{headline}");
         assert!(headline.ends_with('…'));
+    }
+
+    /// Orientation is one line in every case, and it is this one. The bug this
+    /// pins: the returning-operator hint was rendered here *and* again by the
+    /// TUI's own startup, so the operator read the same sentence twice.
+    #[test]
+    fn orientation_is_exactly_one_line_in_every_case() {
+        let hint = Some("3 uncommitted changes here — /diff to review".to_string());
+        let cases = [
+            (true, true, hint.clone()),
+            (true, false, None),
+            (false, true, hint.clone()),
+            (false, false, hint.clone()),
+            (false, false, None),
+        ];
+        for (no_models, first_run, hint) in cases {
+            let line = welcome_line(no_models, first_run, hint)
+                .expect("orientation always has something to say");
+            assert!(!line.detail.trim().is_empty(), "{line:?}");
+        }
+    }
+
+    /// An unconfigured install is the only stage that asks rather than reports,
+    /// and the renderer keys the warning styling off this state.
+    #[test]
+    fn only_an_unconfigured_install_asks_for_something() {
+        let unconfigured = welcome_line(true, true, None).expect("line");
+        assert_eq!(unconfigured.state, ActionState::NeedsApproval);
+        assert!(unconfigured.detail.contains("/setup"), "{unconfigured:?}");
+
+        for first_run in [true, false] {
+            let configured = welcome_line(false, first_run, None).expect("line");
+            assert_eq!(configured.state, ActionState::Done);
+        }
+    }
+
+    /// A returning operator's line is the real next step, not a generic one.
+    #[test]
+    fn a_returning_operator_gets_the_hint_rather_than_the_generic_line() {
+        let line = welcome_line(false, false, Some("2 goals need verification".into()))
+            .expect("line")
+            .detail;
+        assert_eq!(line, "2 goals need verification");
     }
 
     #[test]

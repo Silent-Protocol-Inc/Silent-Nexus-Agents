@@ -349,31 +349,13 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut last_background_poll = std::time::Instant::now();
 
-    // What the operator sees on opening, in three cases. The point is to give
-    // a real next step when one exists and stay quiet when none does.
+    // The orientation line itself was written by the wake flow above, which is
+    // the single owner of startup text. What is left here is the one case that
+    // needs more than a line: an unconfigured install gets the setup menu put
+    // in front of it, because there is nothing else it can usefully do.
     let first_run = app.read_ui_state(|state| !state.first_run_completed);
     if app.config.models.is_empty() {
-        // Nothing configured: onboarding is the only useful next step.
-        st.system_sev(
-            "FIRST RUN :: no models configured yet — /setup gets you talking to an agent",
-            Sev::Warn,
-        );
         push_menu(&mut st, &app, menus::welcome_menu());
-    } else if first_run {
-        // Configured but never opened interactively (inherited config, or
-        // `snx setup` run headless). Orient rather than nag.
-        st.system_sev(
-            format!(
-                "{} READY :: {}",
-                nexus_core::brand::MARK,
-                st.bar.model_label
-            ),
-            Sev::Ok,
-        );
-        st.system("New here? /help lists the keys, Ctrl+K opens the palette, or just describe what you want to change.");
-    } else if let Some(hint) = nexus_app::services::next_step_hint(&app) {
-        // Returning operator with something real to point at.
-        st.system(hint);
     }
     if first_run {
         let seed = app.config.thinking.mode;

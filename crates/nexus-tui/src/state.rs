@@ -380,7 +380,16 @@ impl State {
             } else {
                 format!("{} · {}", line.label, line.detail)
             };
-            self.system_sev(format!("{} {detail}", skin.icon(line.state)), Sev::Dim);
+            // The wake flow reports; it does not compete with the transcript,
+            // so it is dim. The one exception is the stage that asks the
+            // operator for something — an unconfigured install cannot do
+            // anything until they act, and a dim line is easy to scroll past.
+            let severity = if line.state == brand::ActionState::NeedsApproval {
+                Sev::Warn
+            } else {
+                Sev::Dim
+            };
+            self.system_sev(format!("{} {detail}", skin.icon(line.state)), severity);
         }
     }
 
