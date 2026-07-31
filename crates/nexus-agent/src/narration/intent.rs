@@ -226,6 +226,7 @@ pub fn accept_rewording(skeleton: &IntentPlan, reworded: &[String]) -> IntentPla
         let acceptable = !text.is_empty()
             && !text.contains('\n')
             && text.chars().count() <= MAX_STEP_CHARS
+            && !names_an_identifier(text)
             && original.kind.allows(text);
         if !acceptable {
             return skeleton.clone();
@@ -239,6 +240,23 @@ pub fn accept_rewording(skeleton: &IntentPlan, reworded: &[String]) -> IntentPla
         steps,
         refined: true,
     }
+}
+
+/// Whether the text contains something identifier-shaped — `fs.read_file`,
+/// `terminal_exec` — rather than prose.
+///
+/// The intent card renders on a product surface, and product surfaces do not
+/// name tools. The step kinds catch a rewording that changed the *act*; this
+/// catches one that kept the act and reached for the machine's vocabulary to
+/// describe it.
+fn names_an_identifier(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let dotted = word.split_once('.').is_some_and(|(a, b)| {
+            !a.is_empty() && b.chars().next().is_some_and(char::is_alphabetic)
+        });
+        dotted || word.contains('_')
+    })
 }
 
 #[cfg(test)]
@@ -374,6 +392,30 @@ mod tests {
         let mut reworded = plan.texts();
         reworded[0] = "Obliterate everything".into();
         assert!(!accept_rewording(&plan, &reworded).refined);
+    }
+
+    /// The intent card is a product surface, so a rewording may not reach for
+    /// the machine's vocabulary even when the act it describes is unchanged.
+    #[test]
+    fn a_rewording_that_names_a_tool_is_rejected() {
+        let plan = skeleton(TaskClass::Coding, &estimate(true, true), 5).expect("plan");
+        for smuggled in [
+            "Read via fs.read_file",
+            "Read with terminal_exec",
+            "Read repo.git_status output",
+        ] {
+            let mut reworded = plan.texts();
+            reworded[0] = smuggled.into();
+            assert_eq!(
+                accept_rewording(&plan, &reworded),
+                plan,
+                "accepted a tool name: {smuggled}"
+            );
+        }
+        // Ordinary prose with punctuation is still fine.
+        let mut reworded = plan.texts();
+        reworded[0] = "Read the failing test, then its module.".into();
+        assert!(accept_rewording(&plan, &reworded).refined);
     }
 
     #[test]

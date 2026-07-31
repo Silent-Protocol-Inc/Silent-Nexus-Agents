@@ -102,6 +102,17 @@ malicious model still cannot escape the boundary.
   compile-time governance ruleset the pipeline cannot edit. `/rsi` shows the
   queue, the evidence, and the rules; see
   [`docs/rsi.md`](docs/rsi.md).
+- **A product surface, not a machine log.** What NEXUS shows you is organized
+  into four strict layers — a curated boot flow, a live status line, a
+  user-level timeline, and debug. A task turn opens with a 2–5 step intent and
+  then reports milestones as they actually happen; a greeting stays a greeting.
+  Tool names, arguments, and raw output live in `/view debug` and nowhere else:
+  the product layers can only render what the translation layer emitted, which
+  carries no field to put a tool name in. Nothing is presented before it
+  happened, no percentage or ETA is ever shown, and animation is cosmetic. One
+  design language (`nexus-core::brand::design`) owns every icon, separator, and
+  timing — no emoji anywhere. See
+  [`docs/presentation.md`](docs/presentation.md).
 - **Web content is data, never instructions.** Fetched pages are wrapped as
   untrusted input; SSRF, private-range, cloud-metadata, and DNS-rebinding
   protections are enforced in the harness.
@@ -237,6 +248,12 @@ Inside the TUI, `/details compact|expanded|raw` controls card density;
 cycles input/timeline/context/agent focus, and the arrow drawers expose live
 context and agent/session activity on smaller terminals.
 
+`/narrate off|compact|auto|verbose` sets how much the agent says about its own
+work; `/view default|detailed|debug` sets which stored events render. The two
+compose in one sentence — **narration folds; `/view` reveals** — so turning
+narration up never hides machine detail, and `/view debug` always shows it. See
+[`docs/presentation.md`](docs/presentation.md).
+
 Argumentless configuration commands open menus, including `/model`, `/agent`,
 `/permissions`, `/persona`, `/profile`, `/connector`, `/theme`, and `/thinking`.
 `/plan`, `/task`, `/subagents`, and `/continue` manage durable work. Shift+Tab
@@ -325,6 +342,7 @@ See the [`CHANGELOG`](CHANGELOG.md) for release-by-release detail.
 | [`docs/configuration.md`](docs/configuration.md) | Precedence and configuration groups |
 | [`docs/cli-reference.md`](docs/cli-reference.md) | Public CLI surface |
 | [`docs/operator-guide.md`](docs/operator-guide.md) | Safe daily operation |
+| [`docs/presentation.md`](docs/presentation.md) | Boot, status, timeline, debug — the four layers and the design language |
 | [`docs/goals.md`](docs/goals.md) · [`docs/memory-and-skills.md`](docs/memory-and-skills.md) · [`docs/mcp.md`](docs/mcp.md) · [`docs/rsi.md`](docs/rsi.md) | Feature deep-dives |
 | [`docs/data-management.md`](docs/data-management.md) | State, backup, restore, retention |
 | [`docs/compatibility.md`](docs/compatibility.md) | The 1.x compatibility contract |

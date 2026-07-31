@@ -223,4 +223,65 @@ mod tests {
         )
         .refines_wording());
     }
+    /// **The layer boundary, against the real registry.**
+    ///
+    /// Boot, the status line, and the timeline can only render a `Presented`,
+    /// and a `Presented` has no field for a tool name. This checks the other
+    /// half: that no translation *writes* one into the text either, for every
+    /// tool this build actually ships.
+    #[test]
+    fn no_real_registry_tool_can_reach_a_product_surface() {
+        let registry = nexus_tools::ToolRegistry::with_builtins();
+        let names = registry.names();
+        assert!(names.len() > 5, "registry looks empty: {names:?}");
+
+        for name in &names {
+            for ok in [true, false] {
+                let fact = RuntimeFact::ToolCompleted {
+                    name: name.clone(),
+                    arguments: json!({"path": "src/lib.rs", "command": "cargo test"}),
+                    ok,
+                    output: "some output".into(),
+                };
+                let line = present(&fact).line();
+                assert!(!line.contains(name.as_str()), "`{name}` reached: {line}");
+                // Identifier-shaped fragments are the tell; a bare English word
+                // that happens to match a segment is the sentence working.
+                for fragment in name.split('.').filter(|f| f.contains('_')) {
+                    assert!(!line.contains(fragment), "`{fragment}` reached: {line}");
+                }
+            }
+        }
+    }
+
+    /// The intent plan is written before any tool is chosen, so it cannot name
+    /// one — but it is also model-reworded, and this pins that the rewording
+    /// gate does not let one in.
+    #[test]
+    fn an_intent_plan_never_names_a_tool() {
+        let registry = nexus_tools::ToolRegistry::with_builtins();
+        let plan = skeleton(
+            TaskClass::Coding,
+            &WorkEstimate {
+                writes: true,
+                needs_grounding: true,
+                predicted_actions: 4,
+                ..Default::default()
+            },
+            5,
+        )
+        .expect("plan");
+        for step in plan.texts() {
+            for name in registry.names() {
+                assert!(!step.contains(&name), "`{name}` in intent step: {step}");
+            }
+        }
+
+        // And a rewording that tries to smuggle one in is refused, so the
+        // model cannot put a function name on a product surface by describing
+        // a legitimate step in the machine's vocabulary.
+        let mut reworded = plan.texts();
+        reworded[0] = "Read via fs.read_file".into();
+        assert_eq!(accept_rewording(&plan, &reworded), plan);
+    }
 }

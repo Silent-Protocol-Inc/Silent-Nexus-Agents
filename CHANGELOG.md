@@ -63,6 +63,78 @@
   every stage on its own; code-plane changes are never hot-swapped into a running
   process (they ship as a human-approved release); and open-ended self-directed
   modification stays disabled.
+- **A presentation architecture: boot, status, timeline, debug.** A turn used to
+  be either raw tool rows (`fs.read`, `terminal.exec`, argument JSON) or silence
+  until the final answer, and startup was three unrelated system lines pushed
+  from two different files. What you see is now organized into four strict
+  layers with one rule between them: *boot, status, and timeline may render only
+  what the translation layer emitted; debug renders the untranslated truth.*
+  That is structural — the product layers consume a `Presented` value that has
+  no field for a tool name, an argument blob, or raw output, so a leak is a
+  compile error, and a test asserts it over every tool in the real registry.
+  Full documentation in [`docs/presentation.md`](docs/presentation.md).
+- **A curated wake flow instead of startup logs.** The reveal is followed by
+  session restore, memory link, what's new, and a welcome line — each omitted
+  entirely when it has nothing real to say, so a fresh workspace shows only
+  `Ready`. "What's new" is read from the changelog compiled into the binary, so
+  it cannot claim a feature this build lacks, and it appears once per version.
+  No progress bar: startup is not measurable in advance.
+- **A live status line.** While a turn runs, one transient row above the input
+  says what the agent is doing — `◇ Tracing intent · 24 seconds · high effort` —
+  with a terse verb, elapsed time, and the *reported* effort, omitted rather than
+  guessed when the provider did not report one. It degrades to verb-only on
+  narrow terminals, holds a verb for a dwell window so a fast tool sequence
+  cannot strobe, and disappears when idle. It renders in every narration and
+  thinking mode, including `off`: liveness is not verbosity. Being a render-time
+  projection with no store write, it cannot append to the record it sits above.
+- **Intent and milestones (`/narrate`, `snx narrate`).** A task turn opens with a
+  2–5 step intent card and then reports milestones as they happen. The steps come
+  from a deterministic skeleton built from the same task class and work estimate
+  the work breakdown uses; a model may improve the *wording* only, and the gate
+  accepts a rewording only if it is 1:1 — same count, same order, verb still
+  compatible with the step, no identifier-shaped token — otherwise the skeleton
+  stands and the plan records `refined: false` rather than implying model
+  authorship. The plan is an intention: no step is ever ticked off, and a
+  milestone is constructible only from a completed fact. Greetings and one-step
+  lookups get no intent and no milestones. New `[narration]` block: `mode`
+  (`off|compact|auto|verbose`, default `auto`), `refine_wording`, `max_steps`.
+- **One design language, and one icon per action state.**
+  `nexus-core::brand::design` owns the icons, motion timings, separators, casing,
+  and elapsed formatting; nothing else picks a glyph, so a reskin is a second
+  `Skin` constructor rather than an edit to every renderer. Icons are keyed to
+  what the agent is *doing* (`◇` tracing intent, `⌕` scanning, `▸` applying,
+  `◎` checking, `◌` waiting, `◆` composing) rather than to a tool family, with a
+  full ASCII fallback. Reduced motion collapses an animation to its final frame
+  instead of swapping in a different design, and animation never encodes
+  progress, because nothing here measures its own.
+
+### Changed
+
+- **No emoji on any product surface.** They are double-width, font-dependent, and
+  render as boxes on several supported mobile clients. `[tui.activity].tool_icons
+  = "emoji"` still parses and now resolves to geometric, so no configuration
+  breaks; the tool-family glyph ladder survives as a debug-layer concern, since
+  tool rows no longer appear above it. A terminal that cannot draw Unicode still
+  overrides any preference, exactly as before.
+- **Raw tool rows fold while narration is active** — into the milestone that
+  describes them. `/view detailed|debug` reveals them whatever narration says,
+  and `/narrate off` folds nothing, restoring the previous timeline. `/status`
+  now prints all three axes together (`auto thinking · verbose narration ·
+  default view`) because they are easy to confuse. There is deliberately no
+  `debug` narration mode: raw-payload visibility belongs to `/view` and is not
+  duplicated.
+
+### Fixed
+
+- **Two places that leaked a tool name into operator-facing text.** A failed tool
+  was narrated as `"<tool> failed: …"` and a passing validation as
+  `"<tool> passed."`, both on surfaces that are supposed to be user-level. Both
+  now route through the single translation layer, which replaces two partial
+  implementations that disagreed with each other.
+- **Startup text is emitted from one place.** The pending-proposals line — which
+  still pointed at the superseded `snx profile` — moved into the boot memory
+  stage and points at `/rsi`, and the two hardcoded system rows moved into the
+  welcome stage.
 
 ## [2.10.2] — 2026-07-25
 
