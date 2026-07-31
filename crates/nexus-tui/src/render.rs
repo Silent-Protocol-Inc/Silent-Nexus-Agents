@@ -870,6 +870,21 @@ fn event_layout_signature(
 
 /// A concise, purpose-built header for the kinds the operator sees most.
 /// Returns `None` for kinds that keep the generic status/type row.
+/// Whether a notice is short enough to *be* its header rather than sit under
+/// one. Anything multi-line or long keeps a separate body so it can wrap.
+fn inlines_into_header(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty() && !text.contains('\n') && text.chars().count() <= 72
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
 fn component_header(
     event: &nexus_core::timeline::TimelineEvent,
     t: &Theme,
@@ -909,6 +924,22 @@ fn component_header(
         TimelineKind::AgentActivity { .. } if running => "◢",
         TimelineKind::AgentActivity { .. } => "◆",
         TimelineKind::Intent { .. } => skin.icon(nexus_core::brand::ActionState::ShapingApproach),
+        // The composer's own prompt character, so the operator's turn is marked
+        // where they typed it rather than stamped with an outcome.
+        TimelineKind::UserMessage { .. } => {
+            if crate::glyphs::tier() == crate::glyphs::GlyphTier::Ascii {
+                ">"
+            } else {
+                "❯"
+            }
+        }
+        // A notice is the harness talking, not a task reporting. Only the ones
+        // that mean something get a mark with weight.
+        TimelineKind::Notice { severity, .. } => match severity.as_str() {
+            "warning" => skin.lifecycle(LifecycleMark::Waiting),
+            "error" => skin.lifecycle(LifecycleMark::Failed),
+            _ => "·",
+        },
         _ => mark,
     };
 
@@ -1007,6 +1038,23 @@ fn component_header(
             format!("Background · {}", truncate(event.summary.trim(), 60)),
             duration,
         ),
+        // The operator's own message. `✓ DONE  USER MESSAGE` told them their
+        // typing had succeeded, which is neither news nor an outcome of any
+        // work; the text is right underneath.
+        TimelineKind::UserMessage { .. } => ("You".to_string(), None),
+        // A plan is an intention, so a run status on it is a category error:
+        // an intent is never `RUNNING` and never `DONE`, whatever the turn
+        // around it is doing.
+        TimelineKind::Intent { steps, .. } => (
+            format!("Intent · {} step{}", steps.len(), plural(steps.len())),
+            None,
+        ),
+        // A short notice becomes its own header. Two rows — a status word and
+        // then one sentence — is what made startup and turn summaries read as
+        // completed tasks.
+        TimelineKind::Notice { text, .. } if inlines_into_header(text) => {
+            (text.trim().to_string(), duration)
+        }
         _ => return None,
     };
 
@@ -1017,6 +1065,16 @@ fn component_header(
         TimelineKind::ProviderLimit { .. } => t.warning(),
         // Identity, in the accent that means identity everywhere else.
         TimelineKind::AgentActivity { .. } => t.secondary(),
+        // The operator's own words, in the colour the composer uses for them.
+        TimelineKind::UserMessage { .. } => t.user(),
+        // An inlined notice keeps the severity styling its body row had.
+        TimelineKind::Notice { severity, .. } => match severity.as_str() {
+            "ok" => t.success(),
+            "warning" => t.warning(),
+            "error" => t.failure(),
+            "dim" => t.muted(),
+            _ => t.text(),
+        },
         _ => t.text(),
     };
     let mut spans = vec![
@@ -1195,7 +1253,9 @@ fn event_lines(
                 "dim" => t.muted(),
                 _ => t.text(),
             };
-            if !text.trim().is_empty() {
+            // A short notice is already the header; repeating it here is the
+            // second of the two rows this change exists to remove.
+            if !text.trim().is_empty() && !inlines_into_header(text) {
                 push_wrapped(&mut lines, text, width, style);
             }
         }
@@ -3677,6 +3737,79 @@ mod tests {
         assert!(debug.contains("fs.read_file"), "{debug}");
     }
 
+    /// **Run outcomes belong to runs.** `✓ DONE  USER MESSAGE` told the
+    /// operator that their own typing had succeeded, and every one-sentence
+    /// notice cost two rows: a status word and then the sentence.
+    #[test]
+    fn a_user_message_is_not_stamped_with_a_run_outcome() {
+        let event = message_event(
+            "read the config",
+            TimelineKind::UserMessage {
+                text: "read the config".into(),
+            },
+        );
+        let text = rendered(&event, 80);
+        assert!(!text.contains("DONE"), "{text}");
+        assert!(!text.contains("USER MESSAGE"), "{text}");
+        assert!(text.contains("You"), "{text}");
+        assert!(text.contains("read the config"), "{text}");
+    }
+
+    /// A short notice is its own header. The turn summary used to be
+    /// `✓ DONE  NOTICE` with `COMPLETE · 1/1 tasks …` underneath it.
+    #[test]
+    fn a_short_notice_is_one_row_with_no_status_word() {
+        let event = message_event(
+            "COMPLETE · 1/1 tasks · 2 steps · 1 tool call",
+            TimelineKind::Notice {
+                text: "COMPLETE · 1/1 tasks · 2 steps · 1 tool call".into(),
+                severity: "ok".into(),
+            },
+        );
+        let text = rendered(&event, 80);
+        assert!(!text.contains("DONE"), "{text}");
+        assert!(!text.contains("NOTICE"), "{text}");
+        assert_eq!(
+            text.matches("COMPLETE · 1/1 tasks").count(),
+            1,
+            "the sentence must not appear twice:\n{text}"
+        );
+        assert_eq!(text.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+    }
+
+    /// A long or multi-line notice keeps a separate body so it can wrap.
+    #[test]
+    fn a_long_notice_still_gets_a_body_to_wrap_into() {
+        let long = "a".repeat(200);
+        let event = message_event(
+            "long",
+            TimelineKind::Notice {
+                text: long.clone(),
+                severity: "warning".into(),
+            },
+        );
+        let text = rendered(&event, 60);
+        assert!(text.contains(&"a".repeat(20)), "{text}");
+        assert!(text.lines().count() > 1, "{text}");
+    }
+
+    /// A plan is an intention, so it is never `RUNNING` and never `DONE`.
+    #[test]
+    fn an_intent_header_states_a_count_not_a_status() {
+        let event = message_event(
+            "intent · 3 step(s)",
+            TimelineKind::Intent {
+                steps: vec!["One".into(), "Two".into(), "Three".into()],
+                class: "coding".into(),
+                refined: false,
+            },
+        );
+        let text = rendered(&event, 80);
+        assert!(text.contains("Intent · 3 steps"), "{text}");
+        assert!(!text.contains("DONE"), "{text}");
+        assert!(!text.contains("RUNNING"), "{text}");
+    }
+
     #[test]
     fn an_intent_renders_numbered_steps_and_never_ticks_one_off() {
         let event = message_event(
@@ -4684,15 +4817,20 @@ mod tests {
         .into_iter()
         .map(|(width, height)| (width, height, fnv1a64(&rendered_text(width, height))))
         .collect();
+        // Rebaselined when the card headers stopped stamping run outcomes on
+        // things that are not runs: `✓ DONE  USER MESSAGE` became `❯ You`, and
+        // a short notice became its own header instead of a status word above a
+        // sentence. New hashes reproduced across three consecutive runs and the
+        // 80×24 and 120×40 frames were read before this was touched.
         let expected = [
-            (36, 20, 5_109_255_286_466_179_782),
-            (45, 20, 9_711_206_854_701_928_601),
-            (60, 18, 2_036_211_522_606_675_275),
-            (60, 20, 12_044_102_317_102_766_665),
-            (80, 24, 2_926_271_281_647_782_349),
-            (100, 30, 3_979_066_461_458_076_351),
-            (120, 40, 9_251_621_077_969_128_800),
-            (160, 50, 2_050_824_127_170_740_716),
+            (36, 20, 12_009_394_473_618_940_532),
+            (45, 20, 7_645_522_699_486_435_091),
+            (60, 18, 14_911_602_788_091_088_413),
+            (60, 20, 8_421_355_566_967_938_635),
+            (80, 24, 7_587_125_235_782_244_778),
+            (100, 30, 1_435_855_389_048_873_909),
+            (120, 40, 10_496_186_880_083_422_686),
+            (160, 50, 10_700_549_245_251_536_142),
         ];
         assert_eq!(actual, expected);
     }

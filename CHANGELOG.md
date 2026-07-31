@@ -148,6 +148,14 @@
 
 ### Fixed
 
+- **Card headers stop stamping run outcomes on things that are not runs.** The
+  operator's own message was headed `✓ DONE  USER MESSAGE` — telling them their
+  typing had succeeded — and every one-sentence notice cost two rows, a status
+  word above the sentence. A user message now reads `❯ You` in the composer's
+  own prompt character, a short notice becomes its own single row, and an intent
+  card says `Intent · 3 steps` rather than `RUNNING`, because a plan is an
+  intention and is never running or done. Long and multi-line notices keep a
+  separate body so they can still wrap.
 - **A changelog headline no longer gets cut mid-word.** "What's new" read only
   the first physical line of a markdown bold span, so a wrapped headline showed
   as "…is now a real flagship agent — the def" + "ault Recursive". The span is
