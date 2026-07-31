@@ -214,8 +214,8 @@ pub struct AboutArgs {
 pub struct RunArgs {
     /// The objective for the agent to accomplish.
     pub objective: Vec<String>,
-    /// Agent role: orchestrator, planner, implementer, researcher, debugger,
-    /// reviewer, verifier, security_reviewer, documentation.
+    /// Agent role, or the name of a custom agent. `nexus` is the flagship and
+    /// the default; `/agents` in the TUI lists them all with descriptions.
     #[arg(long)]
     pub agent: Option<String>,
     /// Continue an existing session by id.

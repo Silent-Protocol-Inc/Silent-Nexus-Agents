@@ -1005,7 +1005,10 @@ pub fn agents_menu(active: &str, custom: &[nexus_agent::CustomAgentDefinition]) 
                 }
                 .to_string(),
             )
-            .detail(r.output_contract().chars().take(90).collect::<String>())
+            // No manual truncation: the renderer already cuts the detail to the
+            // panel width. Taking a fixed character count on top of that cut
+            // words in half at widths where the row had room to spare.
+            .detail(r.description().to_string())
         })
         .collect();
     items.extend(custom.iter().map(|definition| {
@@ -1027,7 +1030,13 @@ pub fn agents_menu(active: &str, custom: &[nexus_agent::CustomAgentDefinition]) 
             } else {
                 "read-only"
             },
-            definition.description
+            // A custom agent may legitimately omit its description; without a
+            // fallback the row ended in a dangling separator.
+            if definition.description.trim().is_empty() {
+                "no description"
+            } else {
+                definition.description.trim()
+            }
         ))
     }));
     Menu::new("agents", items)
@@ -2005,6 +2014,69 @@ mod tests {
 
     fn labels(menu: &Menu) -> Vec<String> {
         menu.items.iter().map(|i| i.label.clone()).collect()
+    }
+
+    /// The flagship used to render as a bare name with no second line, because
+    /// its subtitle was an empty string and the renderer drops empty details.
+    /// Every selectable row must carry one — a blank row makes the default
+    /// agent look unfinished and says nothing about what it is for.
+    #[test]
+    fn every_agent_row_carries_a_subtitle() {
+        let menu = agents_menu("nexus", &[]);
+        assert_eq!(menu.items.len(), AgentRole::all().len());
+        for item in &menu.items {
+            assert!(
+                !item.detail.trim().is_empty(),
+                "`{}` renders without a subtitle",
+                item.label
+            );
+        }
+    }
+
+    /// The panel is capped at 78 columns and the detail is truncated to fit it,
+    /// so a subtitle written past that budget is shown cut off mid-word.
+    ///
+    /// Several of the older subtitles already run past it and are ellipsized —
+    /// rewriting them is not this change. The flagship's is new, so it is held
+    /// to the budget: a default agent whose one line of explanation trails off
+    /// is the defect this was meant to fix.
+    #[test]
+    fn the_flagship_subtitle_is_not_truncated_by_the_panel() {
+        const DETAIL_BUDGET: usize = 70;
+        let width = nexus_core::brand::visible_width(AgentRole::Nexus.description());
+        assert!(
+            width <= DETAIL_BUDGET,
+            "the flagship subtitle needs {width} columns, budget is {DETAIL_BUDGET}",
+        );
+    }
+
+    /// A custom agent may omit its description; the row used to end in a
+    /// dangling separator when it did.
+    #[test]
+    fn a_custom_agent_without_a_description_still_reads_cleanly() {
+        let definition = nexus_agent::CustomAgentDefinition {
+            name: "auditor".into(),
+            base: "reviewer".into(),
+            description: String::new(),
+            instructions: String::new(),
+            tool_categories: None,
+            allow_write: None,
+            max_risk: None,
+            max_steps: None,
+            max_tokens: None,
+            max_runtime_ms: None,
+            allow_delegation: None,
+            scope: "project".into(),
+            source: std::path::PathBuf::new(),
+        };
+        let menu = agents_menu("nexus", std::slice::from_ref(&definition));
+        let row = menu
+            .items
+            .iter()
+            .find(|item| item.label.trim_start_matches([' ', '●']).trim() == "auditor")
+            .expect("custom row");
+        assert!(row.detail.contains("no description"), "{}", row.detail);
+        assert!(!row.detail.trim_end().ends_with('·'), "{}", row.detail);
     }
 
     #[test]

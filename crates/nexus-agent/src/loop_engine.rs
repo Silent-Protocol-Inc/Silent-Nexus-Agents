@@ -5300,6 +5300,19 @@ impl AgentLoop {
             "selected agent contract",
             agent_contract,
         ));
+        // The flagship's charter is identity, not a contract: it says how the
+        // role works rather than what the turn must produce. It is pinned at
+        // the same authority as the contract, which sits *below* the immutable
+        // safety rules — so it can shape conduct and can never relax
+        // confinement, approval, or the evidence requirement.
+        let charter = self.role.charter();
+        if !charter.is_empty() {
+            sections.push(ContextSection::pinned(
+                AuthorityLayer::SelectedAgent,
+                format!("{} charter", self.role.as_str()),
+                charter,
+            ));
+        }
 
         let mut goal_constraints = Vec::new();
         if let Some(goal_id) = session.current_goal.as_deref() {

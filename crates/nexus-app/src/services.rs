@@ -678,7 +678,8 @@ pub fn agent_show_report(app: &App, name: &str) -> Result<Report> {
                     .collect::<Vec<_>>()
                     .join(", "),
             )
-            .line(role.output_contract()));
+            .field("output contract", role.output_contract())
+            .line(role.description()));
     }
     let catalog = app.agent_catalog()?;
     let Some(definition) = catalog
@@ -762,7 +763,7 @@ pub fn agents_report(app: &App) -> Result<Report> {
                     "read-only"
                 }
                 .to_string(),
-                r.output_contract().chars().take(70).collect::<String>(),
+                r.description().chars().take(70).collect::<String>(),
             ]
         })
         .collect();
