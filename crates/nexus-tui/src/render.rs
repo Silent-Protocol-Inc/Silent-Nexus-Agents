@@ -1191,8 +1191,21 @@ fn event_lines(
         TimelineKind::UserMessage { text } => {
             push_wrapped(&mut lines, text, width, t.user());
         }
+        // The answer is a document, not a log line. It used to go through
+        // `push_wrapped`, a plain word-wrapper, so `##`, `**`, and backticks
+        // reached the operator as literal source — there was no parser to
+        // ignore, there was no parser. The stored text stays the canonical
+        // source; this is a projection of it for one width and theme.
         TimelineKind::AssistantMessage { text, .. } | TimelineKind::FinalAnswer { text } => {
-            push_wrapped(&mut lines, text, width, t.text());
+            lines.extend(crate::markdown::render_source(
+                text,
+                t,
+                crate::markdown::RenderOptions {
+                    width,
+                    compact: detail == nexus_core::timeline::TranscriptDetail::Compact,
+                    unicode: crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+                },
+            ));
         }
         TimelineKind::ReasoningSummary { text } => {
             push_wrapped(&mut lines, text, width, t.muted());
@@ -4822,13 +4835,18 @@ mod tests {
         // a short notice became its own header instead of a status word above a
         // sentence. New hashes reproduced across three consecutive runs and the
         // 80×24 and 120×40 frames were read before this was touched.
+        // Rebaselined again when answers started rendering as documents: the
+        // body now reflows through the Markdown wrapper, so the four sizes that
+        // wrap the sample answer moved and the four that do not are unchanged.
+        // Hashes reproduced across three consecutive runs; the 45×20 and 100×30
+        // frames were read first.
         let expected = [
-            (36, 20, 12_009_394_473_618_940_532),
-            (45, 20, 7_645_522_699_486_435_091),
-            (60, 18, 14_911_602_788_091_088_413),
-            (60, 20, 8_421_355_566_967_938_635),
+            (36, 20, 277_907_415_798_643_332),
+            (45, 20, 13_066_396_113_507_231_044),
+            (60, 18, 728_038_086_089_310_153),
+            (60, 20, 6_780_334_100_911_291_679),
             (80, 24, 7_587_125_235_782_244_778),
-            (100, 30, 1_435_855_389_048_873_909),
+            (100, 30, 11_649_898_669_383_203_317),
             (120, 40, 10_496_186_880_083_422_686),
             (160, 50, 10_700_549_245_251_536_142),
         ];

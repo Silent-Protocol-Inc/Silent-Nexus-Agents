@@ -1774,6 +1774,47 @@ pub fn narrate_menu(active: nexus_core::timeline::NarrationMode) -> Menu {
         .hint("Narration folds raw tool rows; /view reveals them · /thinking is deliberation")
 }
 
+/// `/view` as a selector rather than a flag.
+///
+/// Every other presentation control opens a menu with the current value marked;
+/// this one printed a report and expected the operator to retype the command
+/// with the value they wanted. Typed arguments still work — they are the
+/// scripting path — but they are no longer how you discover the options.
+pub fn view_menu(active: nexus_core::timeline::ActivityMode) -> Menu {
+    use nexus_core::timeline::ActivityMode;
+    let items = [
+        (
+            ActivityMode::Default,
+            "default (recommended)",
+            "essential activity only; the product surface",
+        ),
+        (
+            ActivityMode::Detailed,
+            "detailed",
+            "adds reasoning summaries, plans, stages, and raw tool rows",
+        ),
+        (
+            ActivityMode::Debug,
+            "debug",
+            "adds routing, policy, and provider diagnostics; nothing is hidden",
+        ),
+    ]
+    .into_iter()
+    .map(|(mode, label, detail)| {
+        MenuItem::new(
+            format!("{} {label}", if mode == active { "●" } else { " " }),
+            UiAction::RunCommand(format!("view {}", mode.as_str())),
+        )
+        .id(format!("view:{}", mode.as_str()))
+        .detail(detail)
+    })
+    .collect();
+    Menu::new("timeline view", items)
+        .id("view-menu")
+        .route("/view")
+        .hint("/view reveals machine detail · /narrate folds it · Esc close")
+}
+
 pub fn details_menu(active: nexus_core::timeline::TranscriptDetail) -> Menu {
     let items = [
         (

@@ -138,6 +138,7 @@ pub enum LoadRequest {
     Tools,
     Memory,
     Narrate,
+    Activity,
     Rsi,
     Skills,
     Mcp,

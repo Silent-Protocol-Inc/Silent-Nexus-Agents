@@ -148,6 +148,28 @@
 
 ### Fixed
 
+- **Answers render as terminal documents, not Markdown source.** A model answer
+  arrives as Markdown, and the timeline handed it to a plain word-wrapper — so
+  `## Review summary`, `**Suggested fix:**`, and backticked commands reached the
+  operator as literal source. There was no parser to ignore; there was no
+  parser. Answers are now parsed with CommonMark (`pulldown-cmark`, tables, task
+  lists, and strikethrough on, **HTML off**) into a width-independent document
+  and projected to styled rows: ruled headings, real bold and italic, inline
+  code without backticks, nested lists with hanging indents and per-depth
+  bullets, framed code blocks with their language label, quoted bars, thematic
+  rules, and responsive tables that degrade to key/value records rather than
+  being crushed. Severity headings (`Critical`, `High`, `Medium`, `Low`,
+  `Informational`) take a theme accent, and the word stays, so meaning is never
+  carried by colour alone. The stored answer remains the canonical source —
+  export and copy are unaffected — and the parse is memoised, so a resize
+  re-renders rather than re-parses. Streaming is safe: an unclosed fence renders
+  as provisional code, a list still filling stays a list, and an unmatched
+  emphasis opener is dropped at the tip so `**` never flickers into view — using
+  CommonMark's left-flanking rule, so `2 * 3` keeps its asterisk.
+- **`/view` is a selector, not a flag.** Every other presentation control opens
+  a menu with the current value marked; `/view` printed a report and expected
+  you to retype the command with the value you wanted. Bare `/view` now opens
+  the picker. Typed arguments still work as the scripting path.
 - **Card headers stop stamping run outcomes on things that are not runs.** The
   operator's own message was headed `✓ DONE  USER MESSAGE` — telling them their
   typing had succeeded — and every one-sentence notice cost two rows, a status

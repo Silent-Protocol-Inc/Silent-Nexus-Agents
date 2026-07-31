@@ -17,6 +17,7 @@ mod glyphs;
 mod input;
 mod intro;
 mod layout;
+mod markdown;
 mod menus;
 mod render;
 mod state;
@@ -2110,6 +2111,7 @@ fn handle_effect(
                 nexus_app::View::Theme => LoadRequest::Theme,
                 nexus_app::View::Thinking => LoadRequest::Thinking,
                 nexus_app::View::Narrate => LoadRequest::Narrate,
+                nexus_app::View::Activity => LoadRequest::Activity,
                 nexus_app::View::Details => LoadRequest::Details,
                 nexus_app::View::Transcript => LoadRequest::Transcript,
                 nexus_app::View::Permissions => LoadRequest::Permissions,
@@ -3112,6 +3114,9 @@ fn start_load(
         },
         LoadRequest::Narrate => {
             replace_or_push_menu(st, app, menus::narrate_menu(st.narration_mode));
+        }
+        LoadRequest::Activity => {
+            replace_or_push_menu(st, app, menus::view_menu(st.activity_mode));
         }
         LoadRequest::Rsi => {
             let mode = nexus_app::services::permission_mode(&app.config.policy);

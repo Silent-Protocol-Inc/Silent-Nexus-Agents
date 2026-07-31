@@ -56,6 +56,7 @@ pub enum View {
     Theme,
     Thinking,
     Narrate,
+    Activity,
     Details,
     Transcript,
     Welcome,
@@ -110,6 +111,7 @@ fn bare_interactive_view(def: &registry::CommandDef) -> Option<View> {
         CommandId::Theme => View::Theme,
         CommandId::Thinking => View::Thinking,
         CommandId::Narrate => View::Narrate,
+        CommandId::View => View::Activity,
         _ => View::CommandMenu(def.name.to_string()),
     })
 }
@@ -1053,7 +1055,8 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                     app.update_ui_state(|s| s.activity_mode = mode.as_str().into())?;
                     Effect::SetActivityMode(mode)
                 }
-                None => Effect::Report(
+                None => view_or(
+                    View::Activity,
                     Report::new("view")
                         .field("mode", current(app).as_str())
                         .line("default — essential activity only")
