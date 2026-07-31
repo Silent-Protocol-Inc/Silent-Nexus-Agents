@@ -1848,3 +1848,106 @@ async fn compact_narrates_the_approval_it_promises() {
         "compact swallowed the approval: {texts:?}"
     );
 }
+
+/// **Every function call in the persisted history has an answer.**
+///
+/// The bug this pins wedged a session permanently. A tool refused by policy
+/// ended the turn with an early `return`, *after* the assistant message
+/// carrying the `function_call` had already been persisted — so the stored
+/// conversation held a call with no `function_call_output`. Providers that
+/// speak the Responses API validate that pairing, so every subsequent turn came
+/// back `HTTP 400 … No tool output found for function call call_…` and no
+/// amount of retrying could clear it: the session was dead.
+///
+/// The refusal itself is correct and stays. What must also happen is that the
+/// call is answered before the turn ends.
+#[tokio::test]
+async fn a_policy_refusal_still_answers_the_function_call() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("victim.txt"), "data").expect("write");
+    let (runtime, session) = runtime_with(
+        vec![MockScript::ToolCall {
+            name: "fs.delete".into(),
+            arguments: json!({"path": "victim.txt"}).to_string(),
+        }],
+        dir.path(),
+    );
+    let sessions = runtime.sessions.clone();
+    let outcome = AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .run(&session, "delete victim.txt", Arc::new(AutoDeny))
+        .await
+        .expect("run");
+    assert_eq!(outcome.stopped_reason, "policy_stop");
+    assert!(
+        dir.path().join("victim.txt").exists(),
+        "deletion was denied"
+    );
+
+    let messages = sessions.messages(session.as_str()).expect("messages");
+    let calls: Vec<&str> = messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .map(|call| call.id.as_str())
+        .collect();
+    assert!(!calls.is_empty(), "the scenario made no tool call");
+    for id in &calls {
+        assert!(
+            messages.iter().any(|message| {
+                message.role == nexus_models::types::Role::Tool
+                    && message.tool_call_id.as_deref() == Some(*id)
+            }),
+            "no tool result for `{id}` — this history would 400 on the next turn: {messages:#?}"
+        );
+    }
+    // And the refusal is stated to the model, not silently dropped.
+    assert!(
+        messages.iter().any(|message| {
+            message.role == nexus_models::types::Role::Tool && message.content.contains("ERROR:")
+        }),
+        "the refusal never reached the transcript"
+    );
+}
+
+/// The same invariant for the other early exits: a repeated malformed call and
+/// an exhausted failure budget both end the turn after a tool call.
+#[tokio::test]
+async fn every_early_stop_leaves_a_well_formed_history() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (runtime, session) = runtime_with(
+        vec![
+            MockScript::ToolCall {
+                name: "fs.read_file".into(),
+                arguments: json!({"nope": 1}).to_string(),
+            },
+            MockScript::ToolCall {
+                name: "fs.read_file".into(),
+                arguments: json!({"nope": 2}).to_string(),
+            },
+            MockScript::ToolCall {
+                name: "fs.read_file".into(),
+                arguments: json!({"nope": 3}).to_string(),
+            },
+            MockScript::Text("done".into()),
+        ],
+        dir.path(),
+    );
+    let sessions = runtime.sessions.clone();
+    let _ = AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .run(&session, "read something", Arc::new(AutoApprove))
+        .await
+        .expect("run");
+    let messages = sessions.messages(session.as_str()).expect("messages");
+    for call in messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+    {
+        assert!(
+            messages.iter().any(|message| {
+                message.role == nexus_models::types::Role::Tool
+                    && message.tool_call_id.as_deref() == Some(call.id.as_str())
+            }),
+            "unanswered call `{}`: {messages:#?}",
+            call.id
+        );
+    }
+}

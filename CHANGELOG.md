@@ -178,6 +178,26 @@
   card says `Intent · 3 steps` rather than `RUNNING`, because a plan is an
   intention and is never running or done. Long and multi-line notices keep a
   separate body so they can still wrap.
+- **A refused tool call no longer wedges the session permanently.** When policy
+  refused an action, the turn returned immediately — after the assistant message
+  carrying the `function_call` had already been persisted. The stored
+  conversation was left holding a call with no `function_call_output`, and
+  providers that speak the Responses API validate that pairing, so *every*
+  subsequent turn came back `HTTP 400 … No tool output found for function call
+  call_…`. The session was dead and no amount of retrying could clear it. Every
+  early exit now records the tool result first and ends the turn after, so the
+  refusal reaches the model as well as the operator. The same fix covers the
+  repeated-malformed-arguments, no-progress, and failure-budget exits.
+- **The restricted-file refusal says what to do instead.** A workspace holding
+  files classified as no-read — a password manager, a keystore, a repo with
+  `.env` — cannot run host commands, because nothing can prove those files are
+  masked from the process. The message stated the rule and stopped; it now names
+  how many files blocked it and points at the two ways forward: the per-file
+  tools, which are checked individually, or the container sandbox.
+- **An approval card states its decision.** Answering a prompt flipped the card
+  to `✓ DONE` but left the summary reading "awaiting approval", so a resolved
+  request looked like a pending one. It now reads `Approved once · run: cargo
+  test`, or `Awaiting your approval · …` while it is genuinely waiting.
 - **A changelog headline no longer gets cut mid-word.** "What's new" read only
   the first physical line of a markdown bold span, so a wrapped headline showed
   as "…is now a real flagship agent — the def" + "ault Recursive". The span is

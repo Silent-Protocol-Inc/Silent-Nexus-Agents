@@ -877,6 +877,14 @@ fn inlines_into_header(text: &str) -> bool {
     !text.is_empty() && !text.contains('\n') && text.chars().count() <= 72
 }
 
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
@@ -1042,6 +1050,28 @@ fn component_header(
         // typing had succeeded, which is neither news nor an outcome of any
         // work; the text is right underneath.
         TimelineKind::UserMessage { .. } => ("You".to_string(), None),
+        // An approval is a decision, and the card should read as one. It is
+        // also the one place a tool name belongs above the debug layer: the
+        // operator is being asked to authorize a specific action, and "approve
+        // something" is not a question anyone can answer.
+        TimelineKind::Approval {
+            tool,
+            decision,
+            summary,
+            edited,
+        } => {
+            let subject = if summary.trim().is_empty() {
+                tool.clone()
+            } else {
+                truncate(summary.trim(), 60)
+            };
+            let verb = match decision.as_deref() {
+                None => "Awaiting your approval",
+                Some(decision) => &capitalize_first(decision),
+            };
+            let note = edited.then(|| "edited".to_string());
+            (format!("{verb} · {subject}"), note.or(duration))
+        }
         // A plan is an intention, so a run status on it is a category error:
         // an intent is never `RUNNING` and never `DONE`, whatever the turn
         // around it is doing.
@@ -3804,6 +3834,40 @@ mod tests {
         let text = rendered(&event, 60);
         assert!(text.contains(&"a".repeat(20)), "{text}");
         assert!(text.lines().count() > 1, "{text}");
+    }
+
+    /// An approval card is a decision, and it must never say `DONE` over the
+    /// words "awaiting approval" — which is exactly what it did once the status
+    /// was resolved but the summary was left behind.
+    #[test]
+    fn an_approval_card_states_the_decision_not_a_run_status() {
+        let pending = message_event(
+            "awaiting approval · terminal.run_program",
+            TimelineKind::Approval {
+                tool: "terminal.run_program".into(),
+                decision: None,
+                summary: "run: cargo test".into(),
+                edited: false,
+            },
+        );
+        let text = rendered(&pending, 80);
+        assert!(text.contains("Awaiting your approval"), "{text}");
+        assert!(text.contains("run: cargo test"), "{text}");
+        assert!(!text.contains("DONE"), "{text}");
+        assert!(!text.contains("APPROVAL"), "{text}");
+
+        let resolved = message_event(
+            "approved once · terminal.run_program",
+            TimelineKind::Approval {
+                tool: "terminal.run_program".into(),
+                decision: Some("approved once".into()),
+                summary: "run: cargo test".into(),
+                edited: false,
+            },
+        );
+        let text = rendered(&resolved, 80);
+        assert!(text.contains("Approved once"), "{text}");
+        assert!(!text.contains("awaiting"), "{text}");
     }
 
     /// A plan is an intention, so it is never `RUNNING` and never `DONE`.

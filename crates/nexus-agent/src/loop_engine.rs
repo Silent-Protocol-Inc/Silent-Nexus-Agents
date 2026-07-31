@@ -3586,50 +3586,52 @@ impl AgentLoop {
                     tool_calls_count += 1;
                     harness_state.tool_call_count = tool_calls_count;
 
+                    // **Every path out of here must first answer the call.**
+                    //
+                    // The provider has already been sent an assistant message
+                    // containing this `function_call`, and that message is
+                    // persisted. A Responses-API provider rejects an entire
+                    // conversation whose `function_call` has no matching
+                    // `function_call_output` — so returning early on a refusal
+                    // left the session permanently wedged: every later turn came
+                    // back `HTTP 400 … No tool output found for function call
+                    // call_…`, and no amount of retrying could clear it. A stop
+                    // is therefore *decided* here and *acted on* after the result
+                    // has been recorded.
+                    let mut stop: Option<(String, &'static str)> = None;
+                    let mut hard_error: Option<NexusError> = None;
+
                     let result_text = match tool_result {
                         Ok(text) => text,
                         Err(e) if e.is_policy_stop() => {
-                            // Denied or budget: surface and stop the turn.
-                            let msg = format!("stopped: {e}");
-                            self.emit(LoopEvent::Error(msg.clone()));
-                            return Ok(LoopOutcome {
-                                final_message: msg,
-                                steps,
-                                tool_calls: tool_calls_count,
-                                stopped_reason: "policy_stop".into(),
-                                input_tokens,
-                                output_tokens,
-                                cache,
-                            });
+                            // Denied or budget: the turn stops, but the model
+                            // still gets told why — a refusal the transcript
+                            // does not record is a refusal that repeats.
+                            let message = format!("stopped: {e}");
+                            stop = Some((message, "policy_stop"));
+                            format!("ERROR: {e}")
                         }
                         Err(e @ NexusError::ToolInput { .. }) => {
                             failure_count += 1;
                             harness_state.failure_count = failure_count;
                             if tool_input_correction_used {
-                                let msg = format!(
+                                let message = format!(
                                     "stopped: model repeated malformed tool arguments after one schema correction ({e})"
                                 );
-                                self.emit(LoopEvent::Error(msg.clone()));
-                                return Ok(LoopOutcome {
-                                    final_message: msg,
-                                    steps,
-                                    tool_calls: tool_calls_count,
-                                    stopped_reason: "malformed_action".into(),
-                                    input_tokens,
-                                    output_tokens,
-                                    cache,
-                                });
+                                stop = Some((message, "malformed_action"));
+                                format!("ERROR: {e}")
+                            } else {
+                                tool_input_correction_used = true;
+                                let schema = self
+                                    .runtime
+                                    .tools
+                                    .get(&call.name)
+                                    .map(|tool| compact_schema(&tool.meta().input_schema))
+                                    .unwrap_or_else(|_| "{}".into());
+                                format!(
+                                    "ERROR: malformed tool arguments. Retry once with valid JSON matching {schema}. {e}"
+                                )
                             }
-                            tool_input_correction_used = true;
-                            let schema = self
-                                .runtime
-                                .tools
-                                .get(&call.name)
-                                .map(|tool| compact_schema(&tool.meta().input_schema))
-                                .unwrap_or_else(|_| "{}".into());
-                            format!(
-                                "ERROR: malformed tool arguments. Retry once with valid JSON matching {schema}. {e}"
-                            )
                         }
                         Err(e) if e.is_model_recoverable() => {
                             failure_count += 1;
@@ -3637,44 +3639,33 @@ impl AgentLoop {
                             // Feed the error back so the model can correct.
                             format!("ERROR: {e}")
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            let text = format!("ERROR: {e}");
+                            hard_error = Some(e);
+                            text
+                        }
                     };
 
-                    if result_text.starts_with("ERROR:") {
+                    if stop.is_none() && result_text.starts_with("ERROR:") {
                         recent_errors.push(result_text.clone());
                         let repeats = recent_errors
                             .iter()
                             .filter(|previous| **previous == result_text)
                             .count() as u32;
                         if repeats >= limits.max_repeated_calls {
-                            let message = format!(
-                                "stopped: no progress after {repeats} identical tool errors"
-                            );
-                            self.emit(LoopEvent::Error(message.clone()));
-                            return Ok(LoopOutcome {
-                                final_message: message,
-                                steps,
-                                tool_calls: tool_calls_count,
-                                stopped_reason: "no_progress".into(),
-                                input_tokens,
-                                output_tokens,
-                                cache,
-                            });
+                            stop = Some((
+                                format!(
+                                    "stopped: no progress after {repeats} identical tool errors"
+                                ),
+                                "no_progress",
+                            ));
                         }
                     }
-                    if failure_count > limits.max_failures {
-                        let message =
-                            format!("stopped: failure budget {} exhausted", limits.max_failures);
-                        self.emit(LoopEvent::Error(message.clone()));
-                        return Ok(LoopOutcome {
-                            final_message: message,
-                            steps,
-                            tool_calls: tool_calls_count,
-                            stopped_reason: "failure_budget".into(),
-                            input_tokens,
-                            output_tokens,
-                            cache,
-                        });
+                    if stop.is_none() && failure_count > limits.max_failures {
+                        stop = Some((
+                            format!("stopped: failure budget {} exhausted", limits.max_failures),
+                            "failure_budget",
+                        ));
                     }
 
                     let tool_msg = ChatMessage::tool_result(&call.id, &call.name, &result_text);
@@ -3682,6 +3673,23 @@ impl AgentLoop {
                         .sessions
                         .add_message(session_id.as_str(), turn, &tool_msg)?;
                     messages.push(tool_msg);
+
+                    // The call is answered; now the turn may end.
+                    if let Some(error) = hard_error {
+                        return Err(error);
+                    }
+                    if let Some((message, reason)) = stop {
+                        self.emit(LoopEvent::Error(message.clone()));
+                        return Ok(LoopOutcome {
+                            final_message: message,
+                            steps,
+                            tool_calls: tool_calls_count,
+                            stopped_reason: reason.into(),
+                            input_tokens,
+                            output_tokens,
+                            cache,
+                        });
+                    }
 
                     // A submitted plan is the end of planning and the start of
                     // the decision. Everything the operator needs to judge it

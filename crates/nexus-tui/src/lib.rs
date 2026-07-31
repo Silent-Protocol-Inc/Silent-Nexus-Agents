@@ -1207,6 +1207,10 @@ fn resolve_approval(st: &mut State, decision: ApprovalDecision) {
                 TimelineStatus::Completed
             };
             event.phase = LifecyclePhase::Completed;
+            // The summary moved on with the status. Leaving it at "awaiting
+            // approval" while the card said `✓ DONE` had the operator reading a
+            // request that had already been answered.
+            event.summary = format!("{label} · {}", req.action.tool);
             if let TimelineKind::Approval {
                 decision: stored,
                 edited,
