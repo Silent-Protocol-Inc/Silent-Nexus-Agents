@@ -103,11 +103,21 @@ or a keystore — so terminal actions are refused instead, after approval, with 
 count of the restricted paths.
 
 `.git` is restricted, which means this refusal applies in **every Git
-repository**, not only unusual workspaces. Two ways forward:
+repository**, not only unusual workspaces. Three ways forward:
 
 - use `fs.read_file` and `fs.search`, which are checked per file and are
   unaffected;
-- enable the container sandbox (`/sandbox`), which masks the paths for real.
+- enable the container sandbox (`/sandbox`), which masks the paths for real;
+- set `[sandbox].allow_unmasked_host_reads = true` to run host commands anyway.
+
+The last one is a real widening, not a formality: it lets a host command read
+paths that `fs.read_file` refuses individually. Every action is still approved
+one at a time, and the approval card states that the action is not isolated. Set
+it per workspace with:
+
+```sh
+snx config set sandbox.allow_unmasked_host_reads true --workspace
+```
 
 ## Web, memory, limits, and MCP
 

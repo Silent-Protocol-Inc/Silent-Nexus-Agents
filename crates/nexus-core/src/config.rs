@@ -611,6 +611,24 @@ pub struct SandboxConfig {
     pub network: String,
     /// Environment variables forwarded into sandboxed processes.
     pub env_allowlist: Vec<String>,
+    /// Run host commands even though restricted files cannot be masked from
+    /// them.
+    ///
+    /// Masking is implemented by bind-mounting `/dev/null` over each path, so
+    /// only the container backend can do it. Without a container, a host
+    /// command inherits the operator's own read access and nothing can stop it
+    /// reading `.git`, `.env`, or a keystore — which is why this defaults to
+    /// `false` and terminal actions are refused instead.
+    ///
+    /// The cost of that default is that **every** Git repository refuses host
+    /// execution, since `.git` is restricted. Setting this to `true` accepts
+    /// the exposure in exchange for a working terminal. It grants a host
+    /// command more reach than `fs.read_file`, which refuses those same paths
+    /// individually — so it is a real widening, not a formality. Each action is
+    /// still approved one at a time, and the approval card states that the
+    /// action is not isolated.
+    #[serde(default)]
+    pub allow_unmasked_host_reads: bool,
 }
 
 impl Default for SandboxConfig {
@@ -628,6 +646,7 @@ impl Default for SandboxConfig {
                 "LANG".into(),
                 "TERM".into(),
             ],
+            allow_unmasked_host_reads: false,
         }
     }
 }

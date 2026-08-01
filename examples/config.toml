@@ -108,6 +108,11 @@ timeout_secs = 60
 max_output_bytes = 1048576
 network = "off"                  # off | restricted | full
 env_allowlist = ["PATH", "LANG", "TERM"]
+# Only the container backend can mask restricted paths, so without one a host
+# command is refused — which includes every Git repository, since `.git` is
+# restricted. Set this to run them anyway, accepting that a host command can
+# then read paths `fs.read_file` refuses individually.
+allow_unmasked_host_reads = false
 
 [web]
 enabled = true

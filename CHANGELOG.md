@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.12.0] — 2026-08-02
+
+### Added
+
+- **`[sandbox].allow_unmasked_host_reads`** (default `false`), for running host
+  commands in a workspace whose restricted files cannot be masked.
+
+  Restricted paths are masked by bind-mounting `/dev/null` over them, so only
+  the container backend can mask anything. Without one, a host command inherits
+  your own read access and terminal actions are refused — which, because `.git`
+  is restricted, means refused in **every** Git repository. That default stands
+  and nothing changes for anyone who leaves this unset.
+
+  Setting it accepts the exposure in exchange for a working terminal without a
+  container. It is a genuine widening, not a formality: a host command can then
+  read paths `fs.read_file` refuses one at a time. Actions are still approved
+  individually, and the approval card still states that the action is not
+  isolated, so the consent is informed at the moment it is given rather than
+  buried in a config file. The refusal message now lists this alongside the
+  per-file tools and the container sandbox, so all three ways forward are
+  visible at the point of failure.
+
+  ```sh
+  snx config set sandbox.allow_unmasked_host_reads true --workspace
+  ```
+
 ## [2.11.1] — 2026-08-02
 
 ### Fixed
