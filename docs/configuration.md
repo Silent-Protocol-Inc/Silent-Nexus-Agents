@@ -63,14 +63,19 @@ Allowlisted commands apply only to proved structured argv. They never cover raw
 shell, interpreters, wrappers, unrecognized commands, destructive actions, or
 approval-only host execution.
 
-Built-in denials cannot be overridden: privilege escalation and generic
-terminal Git commit/push/remote/alias/unrecognized operations remain denied.
+Privilege escalation and generic terminal Git commit/push/remote/alias
+operations are the safety class: no configuration allows them outright, and
+every mode except full access refuses them. Under full access they are asked
+about once per session — see
+[Permission modes and refusals](#permission-modes-and-refusals).
 
 `[policy.read_formats]` maps stable format ids such as `rust`, `toml`,
 `silent`, and `other` to `allow`, `ask`, or `deny`. Workspace keys override
 global defaults. Sensitive environment files, credentials, private keys,
-`.git`, and `.nexus` are locked denials. Full Access overrides ordinary format
-rules only for the current attended session and never overrides locked paths.
+`.git`, and `.nexus` are locked denials, and the file tools refuse them by path
+before policy is consulted. Full Access permits ordinary format rules for the
+current attended session; a locked path is part of the safety class and is asked
+about rather than allowed silently.
 
 ## Sandbox
 
@@ -102,18 +107,16 @@ inherits your own read access, and nothing can stop it reading `.git`, `.env`,
 or a keystore — so terminal actions are refused instead, after approval, with a
 count of the restricted paths.
 
-Two things already count as the operator having decided, and neither needs the
-setting below:
+What the operator has already decided counts, and none of it needs the setting
+below:
 
 - **approving the action.** A host terminal action raises a prominent one-time
-  prompt that states the action is not isolated. Answering it runs that one
-  action; the next one asks again.
-- **full access.** `commands = "allow"` is the same answer given once instead of
-  per action, so a structured `program + argv` invocation runs and is audited
-  rather than prompting. Raw shell (`terminal.run`) still asks every time — an
-  arbitrary command line is worth reading before it runs, whatever the mode.
-  Full access applies only while someone is there to have chosen it: unattended
-  and background runs still cannot execute on a host backend.
+  prompt stating the action is not isolated. Answering it runs that one action;
+  the next one asks again.
+- **full access.** The mode is that same answer given once instead of per
+  action, so host terminal actions — including raw shell — run and are audited
+  rather than prompting. It applies only while someone is there to have chosen
+  it: unattended and background runs still cannot execute on a host backend.
 
 Otherwise `.git` is restricted, which means the refusal applies in **every Git
 repository**, not only unusual workspaces. Three ways forward:
@@ -124,13 +127,39 @@ repository**, not only unusual workspaces. Three ways forward:
 - set `[sandbox].allow_unmasked_host_reads = true` to run host commands anyway.
 
 The last one is a real widening, not a formality: it lets a host command read
-paths that `fs.read_file` refuses individually. Every action is still approved
-one at a time, and the approval card states that the action is not isolated. Set
-it per workspace with:
+paths that `fs.read_file` refuses individually. Set it per workspace with:
 
 ```sh
 snx config set sandbox.allow_unmasked_host_reads true --workspace
 ```
+
+## Permission modes and refusals
+
+The modes are a ladder of how much you want to be interrupted, and they decide
+what a refusal means rather than only what is asked about.
+
+| | default | auto-edit | full access |
+|---|---|---|---|
+| Configured refusal — agent role, scope, denied read format | deny | **ask** | **allow, audited** |
+| Ordinary, destructive, and external actions | ask | ask | **allow, audited** |
+| Raw shell and host terminal actions | ask | ask | **allow, audited** |
+| Safety class (below) | deny | deny | **ask once per session** |
+
+Every action goes through the audit log in every mode, so "without asking" never
+means "without a record" — read it with `snx audit`.
+
+The **safety class** is privilege escalation, the `denied_commands` list,
+terminal Git side effects (`push`, `commit`, `remote`), and reads of locked
+paths (`.git`, `.env`, keystores). These are not preferences to reconsider per
+action, so no mode absorbs them silently. Under full access they are asked about
+**once**, and the answer covers the rest of the session; it is held in the
+running process and never written down, so exiting, disconnecting, or crashing
+asks again.
+
+Full access is a standing answer from someone who is present. Unattended and
+background runs cannot answer a prompt, and a stored setting is not permitted to
+answer for them, so automatic and background terminal execution still requires
+strong container isolation.
 
 ## Web, memory, limits, and MCP
 
