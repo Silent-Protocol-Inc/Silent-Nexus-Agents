@@ -130,6 +130,7 @@ fn runtime_with_manager(
         config: config.clone(),
         store: store.clone(),
         session: None,
+        profile: None,
         authorization: nexus_tools::ExecutionAuthorization::default(),
     };
     let sessions = SessionStore::new(store.clone());

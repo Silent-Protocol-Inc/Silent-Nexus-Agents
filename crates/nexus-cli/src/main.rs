@@ -84,7 +84,10 @@ async fn dispatch(args: Cli) -> anyhow::Result<()> {
     // Default (no subcommand) and `chat` launch the interactive TUI.
     let command = args.command.unwrap_or(Command::Chat);
 
-    let app = App::bootstrap(no_color).await?;
+    // Reference-counted from the start: several paths already needed an owned
+    // handle, and the agent runtime now hands one to the profile tools so they
+    // can reach the control plane that owns identity state.
+    let app = Arc::new(App::bootstrap(no_color).await?);
 
     match command {
         Command::Chat => {
@@ -97,9 +100,9 @@ async fn dispatch(args: Cli) -> anyhow::Result<()> {
             // First run (no models) still opens the TUI — it greets the
             // operator and walks them through /setup interactively.
             if inline {
-                nexus_tui::run_inline(Arc::new(app)).await?;
+                nexus_tui::run_inline(app).await?;
             } else {
-                nexus_tui::run(Arc::new(app)).await?;
+                nexus_tui::run(app).await?;
             }
             Ok(())
         }
@@ -123,9 +126,9 @@ async fn dispatch(args: Cli) -> anyhow::Result<()> {
                 anyhow::bail!("`{id}` is neither a session nor a goal id");
             }
             if inline {
-                nexus_tui::run_resume_inline(Arc::new(app), id).await?;
+                nexus_tui::run_resume_inline(app, id).await?;
             } else {
-                nexus_tui::run_resume(Arc::new(app), id).await?;
+                nexus_tui::run_resume(app, id).await?;
             }
             Ok(())
         }
@@ -161,7 +164,7 @@ async fn dispatch(args: Cli) -> anyhow::Result<()> {
         Command::Doctor(args) => commands::doctor(&app, args, json).await,
         Command::Maintenance(command) => commands::maintenance(&app, command, json).await,
         Command::Worker { idle_secs } => {
-            nexus_app::worker::run(Arc::new(app), idle_secs).await?;
+            nexus_app::worker::run(app, idle_secs).await?;
             Ok(())
         }
         Command::About(_) | Command::Setup(_) | Command::Completion { .. } => {

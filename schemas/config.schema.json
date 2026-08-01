@@ -658,6 +658,28 @@
       },
       "type": "object"
     },
+    "ProfileConfig": {
+      "additionalProperties": false,
+      "description": "Automatic capture of durable facts about the operator.\n\nA profile is read into the prompt of every later turn, so a wrong entry is not a wrong answer once — it is a wrong premise indefinitely. These switches exist because that trade is not the same for everyone: a shared or recorded terminal may want nothing kept at all.",
+      "properties": {
+        "auto_capture": {
+          "default": true,
+          "description": "Detect durable facts the operator states outright and store them on the active profile card. Off means the profile only ever changes through `/profile` or an explicit `profile.*` tool call.",
+          "type": "boolean"
+        },
+        "capture_preferences": {
+          "default": true,
+          "description": "Include stated working preferences and tooling, not just identity.",
+          "type": "boolean"
+        },
+        "require_review_for_sensitive": {
+          "default": true,
+          "description": "Hold facts in sensitive categories — health, religion, politics, sexuality, finances — as candidates for a human to approve rather than storing them live. Mentioning something in conversation is not consent to keep it, so this defaults on.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "RetryConfig": {
       "additionalProperties": false,
       "description": "Waiting out a provider quota, within bounds.\n\nThe bounds are the point. A window that resets in twenty seconds is worth waiting for; one that resets in six hours is not something to block a terminal on, and neither is an unbounded sequence of short waits.",
@@ -1099,6 +1121,19 @@
         "reads": "allow",
         "writes": "ask"
       }
+    },
+    "profile": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ProfileConfig"
+        }
+      ],
+      "default": {
+        "auto_capture": true,
+        "capture_preferences": true,
+        "require_review_for_sensitive": true
+      },
+      "description": "What the harness may learn about the operator (`[profile]`)."
     },
     "routing": {
       "allOf": [

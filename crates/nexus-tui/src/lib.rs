@@ -2949,8 +2949,20 @@ fn profile_cards_for_menu(app: &App, session_id: Option<&str>) -> nexus_core::Re
         cards.push((profile, fact_count, memory_count));
     }
     let pending_conflicts = repository.identity_conflicts(true)?.len();
-    let mut menu =
-        menus::profile_cards_menu(&cards, context.profile_id.as_deref(), pending_conflicts);
+    let pending_facts: Vec<nexus_core::harness::ProfileFact> = match context.profile_id.as_deref() {
+        Some(profile_id) => repository
+            .profile_facts(profile_id, true)?
+            .into_iter()
+            .filter(|fact| fact.status == nexus_core::harness::ProfileFactStatus::Candidate)
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut menu = menus::profile_cards_menu(
+        &cards,
+        context.profile_id.as_deref(),
+        pending_conflicts,
+        &pending_facts,
+    );
     menu.on_refresh = Some(UiAction::Load(LoadRequest::Profile));
     Ok(menu)
 }
@@ -3587,21 +3599,29 @@ fn submit_objective(
                 let text = app
                     .redactor
                     .redact(&nexus_core::sanitize::sanitize_terminal(&notice));
-                let conflict = text.contains("IDENTITY CONFLICT");
+                // A card that says DONE over something still waiting on the
+                // operator, or over something that was refused, is the timeline
+                // asserting an outcome that did not happen. The notice already
+                // names which of the three it is.
+                let (status, severity) = if text.starts_with("PROFILE NOT STORED") {
+                    (TimelineStatus::Failed, "error")
+                } else if text.starts_with("PROFILE REVIEW")
+                    || text.starts_with("IDENTITY CONFLICT")
+                {
+                    (TimelineStatus::Waiting, "warning")
+                } else {
+                    (TimelineStatus::Completed, "info")
+                };
                 st.push_local_event_for_turn(
                     turn_id.clone(),
-                    if conflict {
-                        TimelineStatus::Waiting
-                    } else {
-                        TimelineStatus::Completed
-                    },
+                    status,
                     text.lines()
                         .next()
                         .unwrap_or("profile/memory update")
                         .to_string(),
                     TimelineKind::Notice {
                         text,
-                        severity: if conflict { "warning" } else { "info" }.into(),
+                        severity: severity.into(),
                     },
                 );
             }
@@ -3626,7 +3646,7 @@ fn submit_objective(
     }
 
     let runtime = match app.runtime(Some(session_id.clone())) {
-        Ok(r) => r,
+        Ok(r) => app.with_profile_tools(r),
         Err(e) => {
             st.system_sev(format!("cannot build runtime: {e}"), Sev::Err);
             return;

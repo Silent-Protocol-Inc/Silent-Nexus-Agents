@@ -63,7 +63,7 @@ fn confirm(ui: &Ui, prompt: &str, pre_authorized: bool) -> Result<bool> {
 
 // ----------------------------------------------------------------------- run
 
-pub async fn run(app: &App, args: RunArgs, json: bool) -> Result<()> {
+pub async fn run(app: &Arc<App>, args: RunArgs, json: bool) -> Result<()> {
     let ui = ui(app);
     let objective = args.objective.join(" ");
     if objective.trim().is_empty() {
@@ -96,7 +96,7 @@ pub async fn run(app: &App, args: RunArgs, json: bool) -> Result<()> {
         .resolve_agent(&role_name)
         .map_err(|_| anyhow!("unknown agent role `{role_name}`"))?;
 
-    let runtime = app.runtime(Some(session_id.clone()))?;
+    let runtime = app.with_profile_tools(app.runtime(Some(session_id.clone()))?);
 
     // Stream loop events to the terminal unless emitting JSON.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();

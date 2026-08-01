@@ -145,6 +145,15 @@ is reinterpreted. When the guard is reached with progress still being made, the
 turn compacts its history and continues rather than stopping; it pauses resumably
 only when nothing is left to compact or progress has stalled.
 
+`[profile]` controls what SNX records about you from what you say.
+`auto_capture` (default `true`) enables the deterministic pre-turn pass;
+`capture_preferences` (default `true`) additionally captures stated working
+preferences, not only identity; `require_review_for_sensitive` (default `true`)
+holds sensitive categories as candidates you approve in `/profile` rather than
+putting them into use. Turning `auto_capture` off does not disable profiles —
+the agent's `profile.*` tools still work, so facts are recorded only when you
+ask for them. See [memory-and-skills.md](memory-and-skills.md#profile-cards).
+
 `[tui.activity]` controls the live activity segments shown during a turn.
 `tool_icons` selects the glyph tier — `"geometric"` (default), `"emoji"`, or
 `"ascii"`; `SNX_ASCII`, `TERM=dumb`, and a `C`/`POSIX` locale force ASCII

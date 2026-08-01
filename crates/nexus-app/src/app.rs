@@ -240,7 +240,31 @@ impl App {
             store: self.store.clone(),
             session,
             authorization: nexus_tools::ExecutionAuthorization::default(),
+            // Attached by `with_profile_tools` on the paths that own a
+            // reference-counted handle. Absent here rather than faked: a
+            // `profile.*` call with no service behind it must say so, not
+            // report a success that stored nothing.
+            profile: None,
         }
+    }
+
+    /// Give this runtime's `profile.*` tools a way to reach the control plane.
+    ///
+    /// Separate from [`App::runtime`] because the port needs an owned handle and
+    /// the runtime builder only has a borrow. Every path that actually runs an
+    /// agent calls this; the ones that do not — a bare registry in a test —
+    /// leave the tools refusing with a reason.
+    pub fn with_profile_tools(self: &Arc<Self>, mut runtime: AgentRuntime) -> AgentRuntime {
+        let session = runtime
+            .tool_ctx
+            .session
+            .as_ref()
+            .map(|id| id.as_str().to_string());
+        runtime.tool_ctx.profile = Some(crate::profile_port::AppProfilePort::new(
+            self.clone(),
+            session,
+        ));
+        runtime
     }
 
     /// Construct the full agent runtime for a session.
@@ -302,6 +326,7 @@ impl App {
                 store: self.store.clone(),
                 session,
                 authorization: nexus_tools::ExecutionAuthorization::default(),
+                profile: None,
             },
             audit,
             sessions,

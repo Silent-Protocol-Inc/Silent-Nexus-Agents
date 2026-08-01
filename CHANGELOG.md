@@ -13,6 +13,29 @@
   the harness record *approval-gated* self-improvement proposals. The charter
   sits strictly below the immutable safety rules and cannot relax workspace
   confinement, approval, or evidence requirements.
+- **SNX can act on what you tell it about yourself.** Telling SNX "my name is
+  Sans" stored a fact in the canonical profile store — and then the agent
+  answered *"I don't have a profile-card management tool in this session."* That
+  answer was accurate: the storage layer was complete, but nothing above it was
+  reachable from a turn. There is now a `profile` tool category — `get_active`,
+  `list`, `create`, `select`, `update`, `add_fact`, `remove_fact`, `merge`,
+  `get_candidates`, `review_candidate` — granted to every role for reading and
+  to working roles for writing. Roles that work from external material
+  (researcher, and the read-only audit roles) can read the card and never write
+  it, so nothing SNX finds on the internet becomes something you said.
+  Capability gating is enforced in the agent loop, not merely declared.
+  Alongside it, a deterministic pre-turn pass captures durable statements —
+  preferred name, occupation, timezone, language, working preferences, stack —
+  from named, individually tested wordings. There is **no extra model call and
+  no per-message classification**: an ambiguous phrasing captures nothing and
+  the agent uses `profile.add_fact` deliberately instead, so every automatic
+  capture traces to a pattern with a test beside it. Repeating yourself is a
+  no-op rather than a duplicate row; a changed value supersedes the old one
+  without discarding it. Credentials are never turned into a profile fact, and
+  sensitive categories are held as candidates you approve in `/profile` — which
+  now shows what is waiting and says plainly that it is not in use yet. New
+  `[profile]` block: `auto_capture`, `capture_preferences`,
+  `require_review_for_sensitive`, all on by default.
 - **Recursive Self-Improvement is a first-class, visible default.** The
   post-turn analysis that mines finished turns for reusable workflows, repeated
   failures, and stated preferences (recording each as an approval-gated proposal
@@ -188,6 +211,55 @@
   early exit now records the tool result first and ends the turn after, so the
   refusal reaches the model as well as the operator. The same fix covers the
   repeated-malformed-arguments, no-progress, and failure-budget exits.
+- **A second checkout no longer greets you as a stranger.** Profile cards are
+  global but the active one is per-workspace, and a workspace that had never
+  chosen fell back to the anonymous `default` card — so a new clone of the same
+  project started as nobody and filed everything you told it onto the
+  placeholder. A workspace with no explicit choice now inherits your most
+  recently used card. An explicit choice is still never overwritten.
+- **Saying your name again does not add another row.** Repeating any fact was
+  supposed to be a no-op, and was — except along the identity path, which wrote
+  straight to the table without consulting the deduplication every other write
+  goes through. So the one sentence people actually repeat, "my name is …", was
+  the one that accumulated: found on a live card as three identical
+  `identity.name` rows. There is now a single way in, and a changed value still
+  supersedes the old one rather than sitting beside it. Existing duplicates are
+  left alone rather than migrated — they are harmless and yours to remove.
+- **ACTIVE CONTEXT no longer buries the timeline when a phone keyboard opens.**
+  On a narrow terminal the context panel was drawn as a full-body wipe painted
+  last, so when a software keyboard cut the viewport height the panel covered
+  the transcript, the composer, and any open approval prompt — and the work
+  itself became unreachable. The layout now states its priority explicitly:
+  the timeline and the composer are never what yields. `classify()` decides
+  from height as well as width and guarantees the timeline a floor of rows, the
+  panel is bounded to the body rect and drawn *before* modals rather than over
+  them, and when there is no room for it at all it is not drawn and the status
+  bar says `CTX hidden` instead of hiding silently. A panel the layout collapsed
+  comes back when the keyboard closes; a panel you closed yourself stays closed.
+  Resize is reconciled rather than ignored, so composer text, cursor, and scroll
+  survive the trip. The reason this shipped at all: every wide terminal size in
+  the test suite was also tall, and every short one also narrow — the
+  wide-and-short quadrant a phone in landscape lands in had no coverage
+  anywhere. It does now.
+- **An agent that cannot change your profile says so instead of claiming it
+  did.** Withholding the write tools from the researcher and the read-only audit
+  roles stopped the write but told the model nothing, and silence read as
+  permission: asked to record an occupation, the researcher answered *"I have
+  recorded that"* having stored nothing. The profile section now states whether
+  the role may write and that it must not claim otherwise. Refusing a write and
+  reporting the refusal are separate guarantees; only the first was in place.
+- **The status bar no longer offers to close a panel that is not on screen.**
+  The layout decided the context panel's placement from the terminal size, but
+  the welcome panel then took rows out of the body — so on a short, wide
+  terminal the composer read `context · Esc close` with nothing to close. The
+  geometry is now the single answer to whether the panel is showing, and the
+  composer and status bar both read it.
+- **The flagship agent describes itself.** `/agent` listed `nexus` as a bare row
+  with no subtitle while all twenty-one other roles had one, because
+  `output_contract()` — which is the *model's* contract, not a menu subtitle —
+  was an empty string for it. The two are now separate: `description()` is what
+  the picker renders, and it falls through to the contract for every other role,
+  so no other row changes by a character.
 - **The restricted-file refusal says what to do instead.** A workspace holding
   files classified as no-read — a password manager, a keystore, a repo with
   `.env` — cannot run host commands, because nothing can prove those files are

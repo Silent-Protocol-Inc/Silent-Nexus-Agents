@@ -238,7 +238,7 @@ pub enum ProfileFactStatus {
 }
 
 impl ProfileFactStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Candidate => "candidate",
             Self::Active => "active",
@@ -264,16 +264,26 @@ pub struct ProfileFact {
     pub created_at: String,
     pub updated_at: String,
     pub expires_at: Option<String>,
+    /// The fact that replaced this one, when it was superseded rather than
+    /// deleted. Absent on every record written before superseding existed,
+    /// which is why it is `default`ed rather than required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 impl ProfileFact {
     pub fn explicit_name(profile_id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::explicit(profile_id, "identity.name", Value::String(name.into()))
+    }
+
+    /// A fact the operator stated outright: full confidence, live immediately.
+    pub fn explicit(profile_id: impl Into<String>, key: impl Into<String>, value: Value) -> Self {
         let now = crate::now_rfc3339();
         Self {
             id: stable_id("pfact"),
             profile_id: profile_id.into(),
-            key: "identity.name".into(),
-            value: Value::String(name.into()),
+            key: key.into(),
+            value,
             source_type: ProfileFactSource::UserExplicit,
             source_ref: None,
             confidence: 1.0,
@@ -283,7 +293,50 @@ impl ProfileFact {
             created_at: now.clone(),
             updated_at: now,
             expires_at: None,
+            superseded_by: None,
         }
+    }
+}
+
+/// What recording a fact actually did to the card.
+///
+/// Distinct from "it worked", because the operator is told which one happened
+/// and the four cases are not interchangeable: creating a fact, replacing one,
+/// and finding the card already said it are three different answers to "did you
+/// remember that".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactOutcome {
+    Created {
+        fact_id: String,
+    },
+    Updated {
+        fact_id: String,
+        superseded: Vec<String>,
+    },
+    Unchanged {
+        fact_id: String,
+    },
+}
+
+impl FactOutcome {
+    pub fn fact_id(&self) -> &str {
+        match self {
+            FactOutcome::Created { fact_id }
+            | FactOutcome::Updated { fact_id, .. }
+            | FactOutcome::Unchanged { fact_id } => fact_id,
+        }
+    }
+}
+
+/// Whether two fact values say the same thing.
+///
+/// Strings are compared case- and whitespace-insensitively: "Sans" and "sans "
+/// are not two different answers to what the operator is called, and treating
+/// them as such is how a card ends up with a list of near-duplicates.
+fn same_value(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::String(a), Value::String(b)) => a.trim().eq_ignore_ascii_case(b.trim()),
+        _ => left == right,
     }
 }
 
@@ -2266,6 +2319,36 @@ impl HarnessRepository {
         self.update_profile(&profile)
     }
 
+    /// Record, on the card itself, that this is what the operator is called.
+    ///
+    /// The name already becomes an `identity.name` fact, but a fact is one row
+    /// in a list the model has to read past; `preferred_name` is the field the
+    /// profile section leads with. Existing cards were created before this was
+    /// set, so an operator who introduced himself once still had a card that
+    /// answered `null` to "what should I call you" — this fills it in on the
+    /// next mention rather than requiring a migration.
+    ///
+    /// It only ever fills a gap. A `preferred_name` already chosen — through
+    /// `/profile` or `profile.update` — is the operator's decision and is not
+    /// overwritten by a passing self-introduction.
+    fn adopt_preferred_name_conn(
+        conn: &rusqlite::Connection,
+        mut profile: UserProfile,
+        name: &str,
+    ) -> Result<UserProfile> {
+        if profile.preferred_name.is_some() || name.is_empty() {
+            return Ok(profile);
+        }
+        profile.preferred_name = Some(name.to_string());
+        profile.updated_at = crate::now_rfc3339();
+        let payload = checked_payload(&profile, "profile")?;
+        conn.execute(
+            "UPDATE harness_profiles SET payload_json=?1,updated_at=?2 WHERE id=?3",
+            params![payload, profile.updated_at, profile.id],
+        )?;
+        Ok(profile)
+    }
+
     fn insert_profile_conn(conn: &rusqlite::Connection, profile: &UserProfile) -> Result<()> {
         let payload = checked_payload(profile, "profile")?;
         conn.execute(
@@ -2319,14 +2402,98 @@ impl HarnessRepository {
         })
     }
 
+    /// [`record_profile_fact`](Self::record_profile_fact) for callers that do
+    /// not need the outcome. It used to append unconditionally, which is the
+    /// same trap the identity path fell into; there is now one door in.
     pub fn add_profile_fact(&self, fact: &ProfileFact) -> Result<()> {
+        self.record_profile_fact(fact).map(|_| ())
+    }
+
+    /// Record a fact, reconciling it against what the card already says.
+    ///
+    /// Appending unconditionally is wrong in both directions. Saying "my name
+    /// is Sans" twice must not leave two rows claiming the same thing — the
+    /// second is not new information. And saying "call me Erpan from now on"
+    /// must not leave two live answers to the same question, with no record of
+    /// which came first.
+    ///
+    /// So: an identical live fact is [`FactOutcome::Unchanged`] and writes
+    /// nothing; a different value for the same key supersedes the old one,
+    /// which stays on the card as history rather than being deleted. The whole
+    /// reconciliation happens inside one transaction, so two agents observing
+    /// the same statement cannot both decide theirs is the new one.
+    pub fn record_profile_fact(&self, fact: &ProfileFact) -> Result<FactOutcome> {
         if !(0.0..=1.0).contains(&fact.confidence) {
             return Err(NexusError::Config(
                 "profile fact confidence must be between 0 and 1".into(),
             ));
         }
-        self.store
-            .with_retry(|conn| Self::insert_profile_fact_conn(conn, fact))
+        self.store.with_retry(|conn| {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let result = Self::record_profile_fact_conn(conn, fact);
+            finish_transaction(conn, result)
+        })
+    }
+
+    /// Record one fact, already inside a transaction.
+    ///
+    /// This is the *only* way a fact should reach the table. Writing straight to
+    /// [`insert_profile_fact_conn`] skips the two rules that make a profile
+    /// stable: restating something already on the card must change nothing, and
+    /// changing it must retire the old value rather than sit beside it. The
+    /// identity path did write straight to the insert, and every repetition of
+    /// "my name is Sans" left another identical `identity.name` row behind.
+    fn record_profile_fact_conn(
+        conn: &rusqlite::Connection,
+        fact: &ProfileFact,
+    ) -> Result<FactOutcome> {
+        let mut stmt = conn.prepare(
+            "SELECT payload_json FROM harness_profile_facts
+             WHERE profile_id=?1 AND fact_key=?2 AND status IN ('active','candidate')
+             ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map(params![fact.profile_id, fact.key], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut existing = Vec::<ProfileFact>::new();
+        for row in rows {
+            existing.push(decode(row?)?);
+        }
+        drop(stmt);
+
+        if let Some(same) = existing
+            .iter()
+            .find(|candidate| same_value(&candidate.value, &fact.value))
+        {
+            return Ok(FactOutcome::Unchanged {
+                fact_id: same.id.clone(),
+            });
+        }
+
+        Self::insert_profile_fact_conn(conn, fact)?;
+        let superseded: Vec<String> = existing.iter().map(|prior| prior.id.clone()).collect();
+        for prior in &existing {
+            let mut prior = prior.clone();
+            prior.status = ProfileFactStatus::Superseded;
+            prior.updated_at = crate::now_rfc3339();
+            prior.superseded_by = Some(fact.id.clone());
+            let payload = checked_payload(&prior, "profile fact")?;
+            conn.execute(
+                "UPDATE harness_profile_facts
+                 SET status=?1,payload_json=?2,updated_at=?3 WHERE id=?4",
+                params![prior.status.as_str(), payload, prior.updated_at, prior.id],
+            )?;
+        }
+        if superseded.is_empty() {
+            Ok(FactOutcome::Created {
+                fact_id: fact.id.clone(),
+            })
+        } else {
+            Ok(FactOutcome::Updated {
+                fact_id: fact.id.clone(),
+                superseded,
+            })
+        }
     }
 
     fn insert_profile_fact_conn(conn: &rusqlite::Connection, fact: &ProfileFact) -> Result<()> {
@@ -2480,8 +2647,13 @@ impl HarnessRepository {
                         let mut fact =
                             ProfileFact::explicit_name(active.id.clone(), asserted_name.trim());
                         fact.source_ref = source_ref.map(str::to_string);
-                        Self::insert_profile_fact_conn(conn, &fact)?;
-                        return Ok(IdentityResolution::Activated(active.clone()));
+                        Self::record_profile_fact_conn(conn, &fact)?;
+                        let active = Self::adopt_preferred_name_conn(
+                            conn,
+                            active.clone(),
+                            asserted_name.trim(),
+                        )?;
+                        return Ok(IdentityResolution::Activated(active));
                     }
                     if !active.is_default() {
                         let conflict = Self::insert_identity_conflict_conn(
@@ -2501,16 +2673,27 @@ impl HarnessRepository {
                         let mut fact =
                             ProfileFact::explicit_name(profile.id.clone(), asserted_name.trim());
                         fact.source_ref = source_ref.map(str::to_string);
-                        Self::insert_profile_fact_conn(conn, &fact)?;
-                        Ok(IdentityResolution::Activated(profile.clone()))
+                        Self::record_profile_fact_conn(conn, &fact)?;
+                        let profile = Self::adopt_preferred_name_conn(
+                            conn,
+                            profile.clone(),
+                            asserted_name.trim(),
+                        )?;
+                        Ok(IdentityResolution::Activated(profile))
                     }
                     [] => {
-                        let profile = UserProfile::new(asserted_name.trim())?;
+                        let mut profile = UserProfile::new(asserted_name.trim())?;
+                        // The name the operator gave *is* what they want to be
+                        // called. Leaving this null meant the card carried the
+                        // name only as a fact buried in a list, and the profile
+                        // section handed to the model said `preferred_name:
+                        // null` about someone who had just introduced himself.
+                        profile.preferred_name = Some(asserted_name.trim().to_string());
                         Self::insert_profile_conn(conn, &profile)?;
                         let mut fact =
                             ProfileFact::explicit_name(profile.id.clone(), asserted_name.trim());
                         fact.source_ref = source_ref.map(str::to_string);
-                        Self::insert_profile_fact_conn(conn, &fact)?;
+                        Self::record_profile_fact_conn(conn, &fact)?;
                         Ok(IdentityResolution::Created(profile))
                     }
                     _ => Ok(IdentityResolution::Conflict(
@@ -2591,7 +2774,7 @@ impl HarnessRepository {
                             conflict.asserted_name.clone(),
                         );
                         fact.source_ref.clone_from(&conflict.source_ref);
-                        Self::insert_profile_fact_conn(conn, &fact)?;
+                        Self::record_profile_fact_conn(conn, &fact)?;
                         (
                             "create_separate".to_string(),
                             IdentityConflictStatus::Resolved,
@@ -4509,6 +4692,198 @@ mod tests {
         HarnessRepository::new(Store::open_in_memory().expect("in-memory store"))
     }
 
+    /// The card has to answer "what should I call you" in the field the prompt
+    /// leads with, not only as a row in a list of facts.
+    ///
+    /// It did not: the name became an `identity.name` fact and `preferred_name`
+    /// stayed null, so the profile section handed to the model said
+    /// `"preferred_name": null` about someone who had introduced himself by
+    /// name in his first message.
+    #[test]
+    fn introducing_yourself_fills_in_what_you_are_called() {
+        let repository = repository();
+        let sans = match repository
+            .resolve_explicit_identity(None, "Sans", Some("turn_1"))
+            .expect("resolve")
+        {
+            IdentityResolution::Created(profile) => profile,
+            other => panic!("expected creation, got {other:?}"),
+        };
+        assert_eq!(sans.preferred_name.as_deref(), Some("Sans"));
+        assert_eq!(
+            repository
+                .profile(&sans.id)
+                .expect("reload")
+                .preferred_name
+                .as_deref(),
+            Some("Sans"),
+            "the name must survive the round trip, not just the return value",
+        );
+    }
+
+    /// A card created before this existed still has a null `preferred_name`.
+    /// The next mention fills it in, so the fix reaches existing operators
+    /// without rewriting anyone's stored data.
+    #[test]
+    fn an_older_card_adopts_the_name_on_the_next_mention() {
+        let repository = repository();
+        let mut existing = UserProfile::new("Sans").expect("profile");
+        existing.preferred_name = None;
+        repository.create_profile(&existing).expect("save");
+
+        repository
+            .resolve_explicit_identity(Some(&existing.id), "Sans", Some("turn_2"))
+            .expect("resolve");
+        assert_eq!(
+            repository
+                .profile(&existing.id)
+                .expect("reload")
+                .preferred_name
+                .as_deref(),
+            Some("Sans")
+        );
+    }
+
+    /// Found on a live card, not here: three identical `identity.name` rows,
+    /// one per session in which the operator had said "my name is Sans".
+    ///
+    /// `record_profile_fact` deduplicates, but the identity path wrote straight
+    /// to the insert and never consulted it — so the one sentence people
+    /// actually repeat was the one sentence that accumulated. Saying your name
+    /// again is not new information.
+    #[test]
+    fn saying_your_name_again_does_not_add_another_row() {
+        let repository = repository();
+        let profile = match repository
+            .resolve_explicit_identity(None, "Sans", Some("turn_1"))
+            .expect("resolve")
+        {
+            IdentityResolution::Created(profile) => profile,
+            other => panic!("expected a new card, got {other:?}"),
+        };
+
+        for turn in ["turn_2", "turn_3"] {
+            repository
+                .resolve_explicit_identity(Some(&profile.id), "Sans", Some(turn))
+                .expect("resolve");
+        }
+
+        let names: Vec<_> = repository
+            .profile_facts(&profile.id, false)
+            .expect("facts")
+            .into_iter()
+            .filter(|fact| fact.key == "identity.name")
+            .collect();
+        assert_eq!(names.len(), 1, "one name, one row — got {names:#?}",);
+        assert_eq!(names[0].status, ProfileFactStatus::Active);
+    }
+
+    /// A name the operator chose is theirs. A passing self-introduction fills a
+    /// gap; it does not overrule a decision already made.
+    #[test]
+    fn a_chosen_name_is_not_overwritten_by_a_self_introduction() {
+        let repository = repository();
+        let mut existing = UserProfile::new("Sans").expect("profile");
+        existing.preferred_name = Some("Boss".into());
+        repository.create_profile(&existing).expect("save");
+
+        repository
+            .resolve_explicit_identity(Some(&existing.id), "Sans", Some("turn_2"))
+            .expect("resolve");
+        assert_eq!(
+            repository
+                .profile(&existing.id)
+                .expect("reload")
+                .preferred_name
+                .as_deref(),
+            Some("Boss")
+        );
+    }
+
+    /// Saying the same thing twice is not new information, and a card that
+    /// grows a duplicate row every time the operator repeats themselves has
+    /// stopped being a profile.
+    #[test]
+    fn recording_the_same_fact_twice_changes_nothing() {
+        let repository = repository();
+        let profile = UserProfile::new("Sans").expect("profile");
+        repository.create_profile(&profile).expect("save");
+
+        let first = ProfileFact::explicit(&profile.id, "identity.timezone", "GMT+7".into());
+        assert!(matches!(
+            repository.record_profile_fact(&first).expect("first"),
+            FactOutcome::Created { .. }
+        ));
+
+        // Same value, different casing and padding: still the same answer.
+        let again = ProfileFact::explicit(&profile.id, "identity.timezone", " gmt+7 ".into());
+        assert!(matches!(
+            repository.record_profile_fact(&again).expect("again"),
+            FactOutcome::Unchanged { .. }
+        ));
+        assert_eq!(
+            repository
+                .profile_facts(&profile.id, true)
+                .expect("facts")
+                .len(),
+            1,
+        );
+    }
+
+    /// A changed answer replaces the old one and keeps it. Two live facts for
+    /// one question is a card that contradicts itself; deleting the old one is
+    /// a card with no history.
+    #[test]
+    fn a_changed_fact_supersedes_the_old_one_without_losing_it() {
+        let repository = repository();
+        let profile = UserProfile::new("Sans").expect("profile");
+        repository.create_profile(&profile).expect("save");
+
+        let first = ProfileFact::explicit(&profile.id, "identity.timezone", "GMT+7".into());
+        repository.record_profile_fact(&first).expect("first");
+        let second = ProfileFact::explicit(&profile.id, "identity.timezone", "GMT+2".into());
+        let outcome = repository.record_profile_fact(&second).expect("second");
+        assert!(matches!(outcome, FactOutcome::Updated { .. }));
+
+        let live = repository.profile_facts(&profile.id, false).expect("live");
+        assert_eq!(live.len(), 1, "one question, one live answer");
+        assert_eq!(live[0].value, Value::String("GMT+2".into()));
+
+        let all = repository.profile_facts(&profile.id, true).expect("all");
+        let superseded = all
+            .iter()
+            .find(|fact| fact.status == ProfileFactStatus::Superseded)
+            .expect("the previous value is kept");
+        assert_eq!(superseded.value, Value::String("GMT+7".into()));
+        assert_eq!(
+            superseded.superseded_by.as_deref(),
+            Some(second.id.as_str())
+        );
+    }
+
+    /// Different questions do not supersede each other.
+    #[test]
+    fn a_fact_only_supersedes_the_same_key() {
+        let repository = repository();
+        let profile = UserProfile::new("Sans").expect("profile");
+        repository.create_profile(&profile).expect("save");
+
+        for (key, value) in [
+            ("identity.timezone", "GMT+7"),
+            ("identity.language", "Indonesian"),
+        ] {
+            let fact = ProfileFact::explicit(&profile.id, key, value.into());
+            repository.record_profile_fact(&fact).expect("record");
+        }
+        assert_eq!(
+            repository
+                .profile_facts(&profile.id, false)
+                .expect("live")
+                .len(),
+            2,
+        );
+    }
+
     #[test]
     fn explicit_identity_creates_profile_and_conflict_never_overwrites_active_person() {
         let repository = repository();
@@ -4603,6 +4978,7 @@ mod tests {
             created_at: now.clone(),
             updated_at: now,
             expires_at: None,
+            superseded_by: None,
         };
         repository.add_profile_fact(&fact).expect("save fact");
 

@@ -57,6 +57,16 @@ const MAX_PLAN_REVISIONS: u32 = 5;
 /// going to be rescued by another fold.
 const MAX_MID_TURN_COMPACTIONS: u32 = 3;
 
+/// Capabilities that [`AgentRole::capabilities`] decides, and that a tool
+/// declaring them will be withheld for.
+///
+/// An allowlist rather than "everything a tool declares", because
+/// `ToolMeta::required_capabilities` predates role capabilities and is mostly
+/// used to restate the tool's own category — `fs.read_file` requires
+/// `"filesystem"`, which no role grants by that name. Enforcing the field
+/// wholesale would leave every role with no tools at all.
+const GOVERNED_CAPABILITIES: &[&str] = &[nexus_tools::profile::WRITE_CAPABILITY];
+
 /// Per-turn safety limits.
 #[derive(Debug, Clone)]
 pub struct TurnLimits {
@@ -5103,6 +5113,7 @@ impl AgentLoop {
                 nexus_tools::ToolCategory::Memory,
                 nexus_tools::ToolCategory::Goal,
                 nexus_tools::ToolCategory::Mcp,
+                nexus_tools::ToolCategory::Profile,
             ]
         } else {
             self.agent_tool_categories()
@@ -5123,7 +5134,28 @@ impl AgentLoop {
                 cats.push(category);
             }
         }
-        self.runtime.tools.for_categories(&cats)
+        // A category says which surface a role works on; a capability says what
+        // it may do there. Full access removes prompts, not this — it is the
+        // difference between an agent that can read who the operator is and one
+        // that can rewrite it, and no permission mode should collapse the two.
+        //
+        // Only the capabilities the role system actually grants are enforced
+        // here. `required_capabilities` predates that system and mostly repeats
+        // the tool's own category ("filesystem", "repo"); treating those as
+        // grants would deny every role every tool.
+        let held = self.role.capabilities();
+        self.runtime
+            .tools
+            .for_categories(&cats)
+            .into_iter()
+            .filter(|tool| {
+                tool.meta()
+                    .required_capabilities
+                    .iter()
+                    .filter(|required| GOVERNED_CAPABILITIES.contains(&required.as_str()))
+                    .all(|required| held.iter().any(|granted| granted == required))
+            })
+            .collect()
     }
 
     fn build_initial_messages(
@@ -5548,7 +5580,19 @@ impl AgentLoop {
                 )));
             }
             let facts = global_harness.profile_facts(profile_id, false)?;
+            // Whether this role may change the card, said in the payload it
+            // reads the card from. Withholding the write tools stops the write
+            // but tells the model nothing, and a researcher asked to record an
+            // occupation answered "I have recorded that" with no tool to do it
+            // and nothing stored. A role that cannot write has to know it
+            // cannot, or it will report work it did not do.
+            let writable = self
+                .role
+                .capabilities()
+                .contains(&nexus_tools::profile::WRITE_CAPABILITY);
             let payload = serde_json::json!({
+                "writable": writable,
+                "note": profile_write_note(writable),
                 "id": profile.id,
                 "display_name": profile.display_name,
                 "preferred_name": profile.preferred_name,
@@ -6210,6 +6254,24 @@ fn compact_schema(schema: &Value) -> String {
     }
 }
 
+/// What the profile section tells the agent about its own write access.
+///
+/// Withholding the write tools stops the write but says nothing, and silence
+/// reads as permission: asked to record an occupation, a researcher — which
+/// holds no `profile.write` — answered "I have recorded that your occupation is
+/// cardiologist", having called only a read tool and stored nothing. Refusing
+/// and reporting the refusal are two different guarantees, and only the first
+/// was in place.
+fn profile_write_note(writable: bool) -> &'static str {
+    if writable {
+        "Use the profile.* tools to change this card. Report only what the tool result says happened."
+    } else {
+        "This agent can read this card but cannot change it, and has no tool that will. If asked to \
+         record something, say plainly that this agent cannot and that another agent can — never say \
+         it was recorded."
+    }
+}
+
 fn idempotency_key(session_scope: &str, tool: &str, args: &Value) -> String {
     use nexus_core::sanitize;
     let raw = format!("{session_scope}::{tool}::{args}");
@@ -6227,6 +6289,31 @@ fn idempotency_key(session_scope: &str, tool: &str, args: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every role that reads a profile card is told whether it may change it,
+    /// and a role that may not is told in words that it must not claim it did.
+    /// Refusing a write and reporting the refusal are separate guarantees; the
+    /// second is what stops "I have recorded that" from being said over a
+    /// profile nothing touched.
+    #[test]
+    fn a_role_that_cannot_write_the_profile_is_told_not_to_claim_it_did() {
+        let denied = profile_write_note(false);
+        assert!(denied.contains("cannot"), "{denied}");
+        assert!(denied.contains("never say"), "{denied}");
+        assert!(profile_write_note(true).contains("profile.*"));
+
+        for role in AgentRole::all() {
+            let writable = role
+                .capabilities()
+                .contains(&nexus_tools::profile::WRITE_CAPABILITY);
+            assert_eq!(
+                profile_write_note(writable) == denied,
+                !writable,
+                "`{}` is told the wrong thing about its own access",
+                role.as_str()
+            );
+        }
+    }
 
     /// The refinement asks for `1. Step`, and models answer in every list
     /// dialect there is. The marker is formatting; the sentence is the content.

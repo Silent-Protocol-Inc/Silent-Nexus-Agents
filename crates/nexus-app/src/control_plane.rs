@@ -7,7 +7,7 @@
 
 use crate::app::App;
 use nexus_core::harness::{
-    ActiveHarnessContext, EvidenceReference, Goal, GoalStatus as HarnessGoalStatus,
+    ActiveHarnessContext, EvidenceReference, FactOutcome, Goal, GoalStatus as HarnessGoalStatus,
     HarnessRepository, IdentityConflictDecision, IdentityConflictResolution, IdentityResolution,
     MemoryRecord, MemoryScope, MemorySourceType, MemoryStatus, MemoryType, PersonaAssignment,
     PersonaSource, PersonaStatus, PersonaVersion, Plan, PlanAssumption, PlanPhase, PlanRisk,
@@ -251,6 +251,11 @@ impl<'a> HarnessControlPlane<'a> {
         Ok(profile.id)
     }
 
+    /// The most recently updated real profile card, if the operator has one.
+    fn most_recently_used_profile(&self) -> Result<Option<UserProfile>> {
+        Ok(most_recent_real_card(self.global.profiles(false)?))
+    }
+
     pub fn ensure_context(&self, session_id: Option<&str>) -> Result<ActiveHarnessContext> {
         if let Some(context) = self
             .workspace
@@ -260,23 +265,43 @@ impl<'a> HarnessControlPlane<'a> {
         }
 
         let legacy_profile = self.app.read_ui_state(|state| state.profile_name.clone());
-        let profile = match self
-            .global
-            .profiles_named(&legacy_profile)?
-            .first()
-            .cloned()
-        {
+        // `"default"` is the *absence* of a choice, not a choice, so it is
+        // handled before any name lookup. Matching it by name first — which is
+        // what this did — meant the inheritance below could only ever run on an
+        // installation that had no default card at all, i.e. never after the
+        // first launch. A second checkout therefore still started as nobody, and
+        // wrote the operator's facts onto the anonymous card.
+        //
+        // An explicit choice is any other name, and is matched below.
+        let unchosen = legacy_profile.eq_ignore_ascii_case("default");
+        let inherited = if unchosen {
+            self.most_recently_used_profile()?
+        } else {
+            None
+        };
+        let profile = match inherited {
+            // Whoever the operator most recently was. Cards are global, and
+            // being greeted by name in one directory and not the next reads as
+            // the harness having forgotten.
             Some(profile) => profile,
-            None => {
-                let mut profile = UserProfile::new(&legacy_profile)?;
-                if legacy_profile.eq_ignore_ascii_case("default") {
+            None => match self
+                .global
+                .profiles_named(&legacy_profile)?
+                .first()
+                .cloned()
+            {
+                Some(profile) => profile,
+                None => {
+                    let mut profile = UserProfile::new(&legacy_profile)?;
+                    if unchosen {
+                        profile
+                            .metadata
+                            .insert("is_default".into(), serde_json::Value::Bool(true));
+                    }
+                    self.global.create_profile(&profile)?;
                     profile
-                        .metadata
-                        .insert("is_default".into(), serde_json::Value::Bool(true));
                 }
-                self.global.create_profile(&profile)?;
-                profile
-            }
+            },
         };
 
         let mut context = ActiveHarnessContext::new(
@@ -323,10 +348,13 @@ impl<'a> HarnessControlPlane<'a> {
                         memory.source_refs.push(source_ref.clone());
                         let memory_id = self.global.save_memory(&memory)?;
                         outcome.memory_ids.push(memory_id);
-                        outcome.notices.push(format!(
-                            "PROFILE DETECTED · active profile: {} · source: explicit user statement",
-                            profile.display_name
-                        ));
+                        outcome.notices.push(match &resolution {
+                            IdentityResolution::Created(_) => format!(
+                                "PROFILE CREATED · {} · selected as active",
+                                profile.display_name
+                            ),
+                            _ => format!("PROFILE SELECTED · {}", profile.display_name),
+                        });
                     }
                     IdentityResolution::Conflict(conflict) => outcome.notices.push(format!(
                         "IDENTITY CONFLICT · kept current profile unchanged · resolution {} is pending",
@@ -334,6 +362,54 @@ impl<'a> HarnessControlPlane<'a> {
                     )),
                 }
                 outcome.identity = Some(resolution);
+            }
+        }
+
+        // Durable attributes beyond the name: occupation, timezone, language,
+        // stated preferences, tooling. These used to have no capture path at
+        // all — the only automatic extractor wrote them to the legacy trait
+        // table, which the prompt stopped reading once a canonical card
+        // existed, so everything SNX "learned" was invisible to the model.
+        if self.app.config.profile.auto_capture {
+            for candidate in crate::profile_capture::detect(text, &self.app.redactor) {
+                if !self.app.config.profile.capture_preferences
+                    && candidate.key.starts_with("preferences.")
+                {
+                    continue;
+                }
+                let sensitive = candidate.sensitivity != "normal";
+                if sensitive && !self.app.config.profile.require_review_for_sensitive {
+                    continue;
+                }
+                match self.record_profile_fact(
+                    Some(session_id),
+                    context.profile_id.as_deref(),
+                    candidate.key,
+                    &candidate.value,
+                    candidate.explicit,
+                    candidate.sensitivity,
+                ) {
+                    Ok((_, FactOutcome::Unchanged { .. })) => {}
+                    Ok((_, FactOutcome::Created { .. })) if sensitive => {
+                        outcome.notices.push(format!(
+                            "PROFILE REVIEW · {} · awaiting your approval",
+                            candidate.key
+                        ));
+                    }
+                    Ok((_, FactOutcome::Created { .. })) => outcome
+                        .notices
+                        .push(format!("PROFILE UPDATED · {} recorded", candidate.key)),
+                    Ok((_, FactOutcome::Updated { .. })) => outcome.notices.push(format!(
+                        "PROFILE UPDATED · {} replaces the previous value",
+                        candidate.key
+                    )),
+                    // A fact that cannot be stored is not worth failing the
+                    // turn over — the operator asked a question, not for a
+                    // profile write. It is reported, never swallowed.
+                    Err(error) => outcome
+                        .notices
+                        .push(format!("PROFILE NOT STORED · {} · {error}", candidate.key)),
+                }
             }
         }
 
@@ -1062,16 +1138,44 @@ impl<'a> HarnessControlPlane<'a> {
         value: &str,
         explicit: bool,
     ) -> Result<ProfileFact> {
-        let context = self.ensure_context(session_id)?;
-        let profile_id = context
-            .profile_id
-            .ok_or_else(|| NexusError::NotFound("no active profile".into()))?;
+        self.record_profile_fact(session_id, None, key, value, explicit, "normal")
+            .map(|(fact, _)| fact)
+    }
+
+    /// Store one fact on the active card, reconciled against what it already
+    /// says.
+    ///
+    /// Returns the fact together with what recording it actually did, because
+    /// "stored", "replaced an older answer", and "the card already said that"
+    /// are three different things to tell the operator, and claiming the first
+    /// when the third happened is the kind of quiet inaccuracy that makes the
+    /// whole feature untrustworthy.
+    pub fn record_profile_fact(
+        &self,
+        session_id: Option<&str>,
+        profile_id: Option<&str>,
+        key: &str,
+        value: &str,
+        explicit: bool,
+        sensitivity: &str,
+    ) -> Result<(ProfileFact, nexus_core::harness::FactOutcome)> {
+        let profile_id = match profile_id {
+            Some(id) => id.to_string(),
+            None => self
+                .ensure_context(session_id)?
+                .profile_id
+                .ok_or_else(|| NexusError::NotFound("no active profile".into()))?,
+        };
         if self.app.redactor.redact(value) != value {
             return Err(NexusError::PolicyDenied(
                 "refusing to store profile fact: value appears to contain a secret".into(),
             ));
         }
         let now = nexus_core::now_rfc3339();
+        // Anything the operator did not state outright, or that falls in a
+        // sensitive category, lands as a candidate: visible in `/profile`
+        // immediately, and not handed to the model until a human approves it.
+        let reviewed = !explicit || sensitivity != "normal";
         let fact = ProfileFact {
             id: format!("pfact_{}", uuid::Uuid::new_v4().simple()),
             profile_id,
@@ -1084,19 +1188,20 @@ impl<'a> HarnessControlPlane<'a> {
             },
             source_ref: session_id.map(|id| format!("session:{id}")),
             confidence: if explicit { 1.0 } else { 0.6 },
-            sensitivity: "normal".into(),
-            status: if explicit {
-                ProfileFactStatus::Active
-            } else {
+            sensitivity: sensitivity.to_string(),
+            status: if reviewed {
                 ProfileFactStatus::Candidate
+            } else {
+                ProfileFactStatus::Active
             },
             schema_version: nexus_core::harness::HARNESS_SCHEMA_VERSION,
             created_at: now.clone(),
             updated_at: now,
             expires_at: None,
+            superseded_by: None,
         };
-        self.global.add_profile_fact(&fact)?;
-        Ok(fact)
+        let outcome = self.global.record_profile_fact(&fact)?;
+        Ok((fact, outcome))
     }
 
     pub fn resolve_identity_conflict(
@@ -1219,9 +1324,30 @@ fn explicit_name(text: &str) -> Option<&str> {
     None
 }
 
+/// The card a workspace that has never chosen one should inherit.
+///
+/// The default card is excluded: it is a placeholder for nobody in particular,
+/// and inheriting it is exactly the behaviour this replaces — a second
+/// workspace would greet an operator SNX already knows as a stranger.
+/// `last_seen_at` is the ordering key, falling back to `updated_at` for cards
+/// old enough to predate it.
+fn most_recent_real_card(profiles: Vec<UserProfile>) -> Option<UserProfile> {
+    let mut real: Vec<UserProfile> = profiles
+        .into_iter()
+        .filter(|profile| !profile.is_default())
+        .collect();
+    real.sort_by(|a, b| {
+        b.last_seen_at
+            .as_deref()
+            .unwrap_or(&b.updated_at)
+            .cmp(a.last_seen_at.as_deref().unwrap_or(&a.updated_at))
+    });
+    real.into_iter().next()
+}
+
 /// The text following `marker`'s first occurrence at a word boundary (message
 /// start, or preceded by a non-alphanumeric character), sliced from `orig`.
-fn after_marker<'a>(orig: &'a str, lower: &str, marker: &str) -> Option<&'a str> {
+pub(crate) fn after_marker<'a>(orig: &'a str, lower: &str, marker: &str) -> Option<&'a str> {
     let mut from = 0;
     while let Some(rel) = lower[from..].find(marker) {
         let idx = from + rel;
@@ -1352,6 +1478,44 @@ mod tests {
         assert_eq!(explicit_name("this is a test"), None);
         // Strong forms still work mid-sentence.
         assert_eq!(explicit_name("ok, my name is Sans"), Some("Sans"));
+    }
+
+    /// A workspace that has never chosen a card inherits the operator's most
+    /// recent one instead of starting over as "default" — the reason a second
+    /// checkout used to greet someone SNX already knew as a stranger.
+    #[test]
+    fn a_fresh_workspace_inherits_the_operators_latest_card_not_the_placeholder() {
+        let card = |name: &str, seen: Option<&str>, default: bool| {
+            let mut profile = UserProfile::new(name).expect("valid card");
+            profile.updated_at = "2026-01-01T00:00:00Z".into();
+            profile.last_seen_at = seen.map(str::to_owned);
+            if default {
+                profile
+                    .metadata
+                    .insert("is_default".into(), serde_json::Value::Bool(true));
+            }
+            profile
+        };
+
+        let picked = most_recent_real_card(vec![
+            card("default", Some("2026-07-31T00:00:00Z"), true),
+            card("Erpan", Some("2026-07-01T00:00:00Z"), false),
+            card("Sans", Some("2026-07-30T00:00:00Z"), false),
+        ])
+        .expect("a real card exists");
+        assert_eq!(picked.display_name, "Sans", "the placeholder must not win");
+
+        // A card too old to carry `last_seen_at` still orders, by `updated_at`.
+        let mut older = card("Erpan", None, false);
+        older.updated_at = "2025-01-01T00:00:00Z".into();
+        let picked = most_recent_real_card(vec![older, card("Sans", None, false)])
+            .expect("a real card exists");
+        assert_eq!(picked.display_name, "Sans");
+
+        // With nothing but the placeholder there is nothing to inherit, and
+        // the caller falls back to creating the default card as before.
+        assert!(most_recent_real_card(vec![card("default", None, true)]).is_none());
+        assert!(most_recent_real_card(Vec::new()).is_none());
     }
 
     #[test]

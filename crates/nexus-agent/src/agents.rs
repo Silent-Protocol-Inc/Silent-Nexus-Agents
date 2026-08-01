@@ -177,7 +177,48 @@ impl AgentRole {
         if !cats.contains(&Memory) {
             cats.push(Memory);
         }
+        // Every role may *read* who it is talking to. A reviewer that cannot
+        // learn the operator's language or how they want findings written is
+        // worse at its job for no safety gain — changing the profile is what
+        // needs gating, and that is a capability, not a category.
+        if !cats.contains(&Profile) {
+            cats.push(Profile);
+        }
         cats
+    }
+
+    /// Named capabilities this role holds, checked against each tool's
+    /// [`ToolMeta::required_capabilities`].
+    ///
+    /// A second axis alongside categories, because "may see the profile" and
+    /// "may change the profile" are different questions and a category can only
+    /// answer one. Withholding the category entirely would take reading away
+    /// too; leaving mutation ungated would let a researcher write down an
+    /// identity it inferred from a web page as though the operator had said it.
+    pub fn capabilities(&self) -> Vec<&'static str> {
+        let mut capabilities = Vec::new();
+        if self.may_capture_profile() {
+            capabilities.push(nexus_tools::profile::WRITE_CAPABILITY);
+        }
+        capabilities
+    }
+
+    /// Whether this role may record what the operator says about themselves.
+    ///
+    /// Granted to the roles that work *with* the operator and will be told
+    /// things directly. Withheld from the roles whose material is external or
+    /// adversarial — a researcher's sources and an auditor's findings are about
+    /// the world, not about the person, and a fact drawn from them would be an
+    /// inference wearing the operator's own voice.
+    pub fn may_capture_profile(&self) -> bool {
+        !matches!(
+            self,
+            AgentRole::Researcher
+                | AgentRole::SecurityReviewer
+                | AgentRole::DependencyAuditor
+                | AgentRole::AccessibilityReviewer
+                | AgentRole::UiUxReviewer
+        )
     }
 
     /// Whether this role may mutate the workspace at all.
@@ -434,6 +475,78 @@ mod tests {
         assert!(!charter.is_empty());
         assert!(charter.contains("approval-gated"), "{charter}");
         assert!(charter.contains("cannot be relaxed by it"), "{charter}");
+    }
+
+    /// Reading who you are talking to is not a privilege. A role that cannot
+    /// see the operator's language or how they want to be addressed is worse at
+    /// its job for no safety gain.
+    #[test]
+    fn every_role_can_read_the_operators_profile() {
+        for role in AgentRole::all() {
+            assert!(
+                role.tool_categories().contains(&ToolCategory::Profile),
+                "`{}` cannot see who it is working for",
+                role.as_str()
+            );
+        }
+    }
+
+    /// Writing to it is. The roles whose material is external or adversarial
+    /// must not be able to turn something they read on a web page into a fact
+    /// stated in the operator's own voice.
+    #[test]
+    fn roles_that_work_from_external_material_cannot_write_the_profile() {
+        for role in [
+            AgentRole::Researcher,
+            AgentRole::SecurityReviewer,
+            AgentRole::DependencyAuditor,
+        ] {
+            assert!(
+                !role
+                    .capabilities()
+                    .contains(&nexus_tools::profile::WRITE_CAPABILITY),
+                "`{}` may invent identity facts",
+                role.as_str()
+            );
+        }
+        for role in [
+            AgentRole::Nexus,
+            AgentRole::Orchestrator,
+            AgentRole::Implementer,
+            AgentRole::Planner,
+            AgentRole::Reviewer,
+            AgentRole::Debugger,
+        ] {
+            assert!(
+                role.capabilities()
+                    .contains(&nexus_tools::profile::WRITE_CAPABILITY),
+                "`{}` cannot record what the operator tells it",
+                role.as_str()
+            );
+        }
+    }
+
+    /// A granted category that resolves to no tool is indistinguishable, to the
+    /// operator, from the feature not existing — which is exactly how the
+    /// profile capability came to be reported as missing.
+    #[test]
+    fn no_granted_category_resolves_to_an_empty_tool_set() {
+        let registry = nexus_tools::ToolRegistry::with_builtins();
+        for role in AgentRole::all() {
+            for category in role.tool_categories() {
+                // MCP tools are registered at runtime from configured servers,
+                // so an empty set there is an unconfigured host, not a gap.
+                if category == ToolCategory::Mcp {
+                    continue;
+                }
+                assert!(
+                    !registry.for_categories(&[category]).is_empty(),
+                    "`{}` is granted `{}`, which carries no tool",
+                    role.as_str(),
+                    category.as_str(),
+                );
+            }
+        }
     }
 
     #[test]

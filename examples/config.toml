@@ -124,6 +124,11 @@ enabled = true
 global_enabled = false           # cross-workspace memories require this
 default_ttl_days = 90
 
+[profile]
+auto_capture = true              # record durable facts you state about yourself
+capture_preferences = true       # …including stated working preferences
+require_review_for_sensitive = true  # sensitive categories wait for /profile
+
 [limits]
 max_steps_per_turn = 24
 max_retries = 3

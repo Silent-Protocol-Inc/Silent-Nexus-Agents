@@ -182,18 +182,24 @@ pub fn draw(f: &mut Frame, st: &mut State) {
         draw_transcript(f, rows[2], st, &t, &rl);
     }
 
+    // Decided once, from the body rect the transcript actually got, and read by
+    // the composer title and the status bar as well — so nothing can announce a
+    // panel that is not on screen.
+    let context_overlay = context_overlay_rect(rows[2], st, &rl);
+
     if plan_rows > 0 {
         draw_plan_panel(f, rows[3], st, &t);
     }
-    draw_input(f, rows[4], st, &t, &rl);
-    draw_footer(f, rows[5], st, &t, &rl);
+    draw_input(f, rows[4], st, &t, &rl, context_overlay.is_some());
+    draw_footer(f, rows[5], st, &t, &rl, context_overlay.is_some());
 
     // Drawn against the conversation region only, and *before* the modal stack.
     // It used to be painted last over the whole frame, which put it on top of
     // the composer, every overlay, and the approval prompt — so a panel of
     // read-only metadata could cover the controls you needed to answer.
-    if context_overlay_visible(st, &rl) {
-        draw_context_overlay(f, rows[2], st, &t, &rl);
+    if let Some(overlay) = context_overlay {
+        f.render_widget(Clear, overlay);
+        draw_context_rail(f, overlay, st, &t);
     }
 
     // Overlay stack: render every overlay, topmost last.
@@ -212,17 +218,57 @@ pub fn draw(f: &mut Frame, st: &mut State) {
     draw_toasts(f, area, st, &t);
 }
 
-/// Whether the ACTIVE CONTEXT overlay should be drawn this frame.
+/// Where the ACTIVE CONTEXT overlay goes this frame, or `None` if it does not
+/// fit and is therefore not drawn.
 ///
-/// Three things have to agree: the rail is not already showing it, the layout
-/// can afford to draw it beside a usable conversation, and the operator asked
-/// for it. The middle condition is the one that was missing — the panel used to
-/// appear the moment the rail went away, whether or not anything could still be
-/// read behind it.
-pub(crate) fn context_overlay_visible(st: &State, rl: &crate::layout::ResponsiveLayout) -> bool {
-    !rl.show_sidebar
-        && rl.context_placement == crate::layout::ContextPlacement::Overlay
-        && st.context_pane.is_open()
+/// This is deliberately the *only* answer to "is the panel showing": returning
+/// the geometry rather than a boolean is what keeps the decision and the drawing
+/// from disagreeing. They did. [`classify`](crate::layout::classify) sizes the
+/// body from the terminal alone, but the welcome panel takes rows out of it
+/// afterwards, so on a short-and-wide terminal the layout said *overlay* while
+/// the body had no room — leaving the composer titled `context · Esc close` with
+/// nothing on screen to close.
+///
+/// `body` is the conversation's rect, not the frame. Three things must hold: the
+/// rail is not already showing this, the operator asked for it, and what is left
+/// keeps `min_timeline_rows` and enough columns to read a line of prose.
+pub(crate) fn context_overlay_rect(
+    body: Rect,
+    st: &State,
+    rl: &crate::layout::ResponsiveLayout,
+) -> Option<Rect> {
+    if rl.show_sidebar
+        || rl.context_placement != crate::layout::ContextPlacement::Overlay
+        || !st.context_pane.is_open()
+    {
+        return None;
+    }
+    // Floated inside the conversation's own frame rather than over it, so the
+    // transcript keeps its border and the panel reads as sitting in the corner
+    // of the conversation instead of replacing it.
+    let inner = body.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    // Leave the conversation its floor; spend at most half the remaining rows
+    // so the panel reads as secondary even when there is room to be generous.
+    let height = inner
+        .height
+        .saturating_sub(rl.min_timeline_rows)
+        .min(inner.height / 2);
+    // Two thirds, but never so wide that the timeline behind it is reduced to a
+    // column of broken words.
+    let width =
+        (inner.width.saturating_mul(2) / 3).min(inner.width.saturating_sub(MIN_TIMELINE_COLS));
+    if height < MIN_OVERLAY_ROWS || width < MIN_OVERLAY_COLS {
+        return None;
+    }
+    Some(Rect::new(
+        inner.right().saturating_sub(width),
+        inner.bottom().saturating_sub(height),
+        width,
+        height,
+    ))
 }
 
 /// Rows to reserve for the welcome panel.
@@ -270,6 +316,11 @@ const MIN_PANEL_ROWS: u16 = 6;
 /// than this and the text still visible beside the panel is broken words rather
 /// than readable prose, which is no better than hiding the conversation.
 const MIN_TIMELINE_COLS: u16 = 24;
+/// Smallest overlay worth drawing: a border plus a line of content, and wide
+/// enough for a `label value` pair. Under either, it is not drawn at all and the
+/// status bar says so — half a panel is worse than none.
+const MIN_OVERLAY_ROWS: u16 = 3;
+const MIN_OVERLAY_COLS: u16 = 24;
 
 fn draw_welcome(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     let Some(snapshot) = &st.boot_snapshot else {
@@ -1719,51 +1770,6 @@ fn draw_context_rail(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     );
 }
 
-/// ACTIVE CONTEXT as a bounded overlay over the conversation region.
-///
-/// `body` is the transcript's rect, not the whole frame. The overlay is
-/// right-aligned inside it and never takes more than it can spare: the
-/// conversation keeps `min_timeline_rows` and enough columns to read a line of
-/// prose, so what is behind the panel stays legible and the composer below is
-/// never touched. Content that does not fit is scrolled, not silently clipped.
-fn draw_context_overlay(
-    f: &mut Frame,
-    body: Rect,
-    st: &State,
-    t: &Theme,
-    rl: &crate::layout::ResponsiveLayout,
-) {
-    // Floated inside the conversation's own frame rather than over it, so the
-    // transcript keeps its border and the panel reads as sitting in the corner
-    // of the conversation instead of replacing it.
-    let inner = body.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    // Leave the conversation its floor; spend at most half the remaining rows
-    // so the panel reads as secondary even when there is room to be generous.
-    let spare_rows = inner.height.saturating_sub(rl.min_timeline_rows);
-    let height = spare_rows.min(inner.height / 2);
-    if height < 3 {
-        return;
-    }
-    // Two thirds, but never so wide that the timeline behind it is reduced to a
-    // column of broken words.
-    let max_width = inner.width.saturating_sub(MIN_TIMELINE_COLS);
-    let width = (inner.width.saturating_mul(2) / 3).min(max_width);
-    if width < 24 {
-        return;
-    }
-    let overlay = Rect::new(
-        inner.right().saturating_sub(width),
-        inner.bottom().saturating_sub(height),
-        width,
-        height,
-    );
-    f.render_widget(Clear, overlay);
-    draw_context_rail(f, overlay, st, t);
-}
-
 fn draw_agent_drawer(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     let width = area.width.saturating_mul(2) / 3;
     let drawer = Rect::new(area.x, area.y + 1, width, area.height.saturating_sub(2));
@@ -1837,6 +1843,7 @@ fn draw_input(
     st: &State,
     t: &Theme,
     rl: &crate::layout::ResponsiveLayout,
+    context_visible: bool,
 ) {
     use crate::layout::WidthClass;
     let searching = st.search_edit.is_some();
@@ -1850,12 +1857,12 @@ fn draw_input(
             " running — input queued after turn ".to_string(),
             t.warning(),
         )
-    } else if st.focus == Focus::Context && context_overlay_visible(st, rl) {
+    } else if st.focus == Focus::Context && context_visible {
         (" context · ↑/↓ scroll · Esc close ".to_string(), t.muted())
     } else if st.focus != Focus::Input {
         (" F6 focus · input inactive ".to_string(), t.muted())
     } else if rl.context_placement == crate::layout::ContextPlacement::Overlay
-        && !context_overlay_visible(st, rl)
+        && !context_visible
         && st.input.is_empty()
     {
         // The only way to reach the panel is an arrow key on an empty composer,
@@ -1935,6 +1942,7 @@ fn draw_footer(
     st: &State,
     t: &Theme,
     rl: &crate::layout::ResponsiveLayout,
+    context_visible: bool,
 ) {
     use crate::layout::{pack_status, sandbox_short, SegColor, StatusSegment, WidthClass};
     if st.pending.is_some() {
@@ -2007,16 +2015,19 @@ fn draw_footer(
             true,
         ));
     }
-    // Say so in words when the panel was open and the terminal took it away —
-    // the one case where something the operator was looking at has vanished and
-    // nothing else on screen would explain why. Not whenever the rail happens
-    // to be absent: on every terminal under ninety columns that is permanent
-    // noise, and it costs a row segment that says something changeable.
+    // Say so in words whenever the operator wants the panel and it is not on
+    // screen — whether the layout collapsed it or the body simply had no room
+    // for it after the welcome panel took its rows. That is the one case where
+    // something asked for has silently not happened. Not whenever the rail
+    // happens to be absent: on every terminal under ninety columns that is
+    // permanent noise, and it costs a row segment that says something
+    // changeable.
     //
     // Text, not an icon, so it survives NO_COLOR and a terminal that cannot draw
     // Unicode; ahead of the static segments because packing is by insertion
     // order.
-    if st.context_pane == crate::state::ContextPane::Collapsed {
+    if st.context_pane != crate::state::ContextPane::Closed && !rl.show_sidebar && !context_visible
+    {
         segs.push(mk(
             "CONTEXT",
             "CTX",
@@ -5103,6 +5114,36 @@ mod tests {
         assert!(!quiet.contains("CTX"), "{quiet}");
     }
 
+    /// Found on a real terminal, not here: at 100x20 the composer read
+    /// `context · ↑/↓ scroll · Esc close` with no panel anywhere on screen.
+    ///
+    /// `classify` sizes the body from the terminal alone, so it said *overlay*;
+    /// the welcome panel then took those rows and the overlay could not be
+    /// drawn. Two answers to one question. There is now one — the geometry —
+    /// and this pins that every surface reads it: if the panel is not on
+    /// screen, the composer must not offer to close it and the status bar must
+    /// say it is hidden.
+    #[test]
+    fn nothing_announces_a_context_panel_that_is_not_on_screen() {
+        for (width, height) in [(100, 14), (100, 16), (100, 20), (120, 16), (45, 20)] {
+            let mut state = representative_state();
+            state.context_pane = crate::state::ContextPane::Open;
+            state.focus = Focus::Context;
+            let frame = render_state_text(&mut state, width, height);
+            if frame.contains("ACTIVE CONTEXT") {
+                continue;
+            }
+            assert!(
+                !frame.contains("Esc close"),
+                "{width}x{height} offers to close a panel it never drew:\n{frame}"
+            );
+            assert!(
+                frame.contains("hidden"),
+                "{width}x{height} dropped the panel without saying so:\n{frame}"
+            );
+        }
+    }
+
     #[test]
     fn timeline_and_context_snapshots_match_required_terminal_sizes() {
         let actual: Vec<(u16, u16, u64)> = [
@@ -5142,14 +5183,23 @@ mod tests {
         // the check that this changed nothing on a desktop. Hashes reproduced
         // across three consecutive runs; the 80×24, 100×14, and 120×16 frames
         // were read before this was touched.
+        // Rebaselined a fourth time when the status bar started telling the
+        // truth about a panel that was asked for and did not fit. `CTX hidden`
+        // used to fire only on a layout-collapsed pane, which missed the case
+        // found on a real terminal: the layout says there is room, the welcome
+        // panel then takes those rows, and the panel silently does not appear.
+        // The six sizes that now carry the segment moved; 80×24, which shows
+        // the panel, and the three wide-and-tall sizes, which show the rail,
+        // are byte-identical. Hashes reproduced across three consecutive runs;
+        // the 45×20, 80×24, 100×14, and 120×16 frames were read first.
         let expected = [
-            (36, 20, 4_351_588_217_425_948_340),
-            (45, 20, 4_289_674_712_219_105_336),
-            (60, 18, 13_885_034_368_332_492_784),
-            (60, 20, 13_558_350_723_918_432_176),
+            (36, 20, 10_993_650_595_741_144_642),
+            (45, 20, 17_384_499_503_187_027_622),
+            (60, 18, 11_558_688_284_225_948_033),
+            (60, 20, 1_455_096_483_603_950_913),
             (80, 24, 17_843_421_910_808_649_627),
-            (100, 14, 14_620_921_273_542_532_800),
-            (120, 16, 5_444_808_203_645_058_180),
+            (100, 14, 4_202_616_081_264_061_873),
+            (120, 16, 6_383_065_140_103_738_961),
             (100, 30, 11_649_898_669_383_203_317),
             (120, 40, 10_496_186_880_083_422_686),
             (160, 50, 10_700_549_245_251_536_142),

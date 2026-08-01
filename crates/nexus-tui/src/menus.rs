@@ -1092,6 +1092,7 @@ pub fn profile_cards_menu(
     profiles: &[(nexus_core::harness::UserProfile, usize, usize)],
     active_profile_id: Option<&str>,
     pending_conflicts: usize,
+    pending_facts: &[nexus_core::harness::ProfileFact],
 ) -> Menu {
     let mut items = vec![MenuItem::new(
         "Create profile card…",
@@ -1100,6 +1101,27 @@ pub fn profile_cards_menu(
     .id("profile:create")
     .category("actions")
     .detail("creates a separate profile; existing people are never silently merged")];
+    // Facts captured automatically but held back — sensitive categories, and
+    // anything not stated outright. They are recorded and not in use, and this
+    // is the only place that says so; without it, "SNX remembered that" and
+    // "SNX is waiting to be told whether it may" look identical.
+    items.extend(pending_facts.iter().map(|fact| {
+        MenuItem::new(
+            format!("◇ {}", fact.key),
+            UiAction::InsertInput(format!("/profile approve {}", fact.id)),
+        )
+        .id(fact.id.clone())
+        .category("pending review")
+        .badge("awaiting review".to_string())
+        .detail(format!(
+            "{} · {} · not in use until you approve it",
+            match &fact.value {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            },
+            fact.sensitivity
+        ))
+    }));
     items.extend(profiles.iter().map(|(profile, fact_count, memory_count)| {
         let selected = active_profile_id == Some(profile.id.as_str());
         MenuItem::new(
@@ -2077,6 +2099,42 @@ mod tests {
             .expect("custom row");
         assert!(row.detail.contains("no description"), "{}", row.detail);
         assert!(!row.detail.trim_end().ends_with('·'), "{}", row.detail);
+    }
+
+    /// A fact captured automatically but held back is recorded and *not in
+    /// use*. Without a row saying so, "SNX remembered that" and "SNX is
+    /// waiting to be told whether it may" are indistinguishable from here.
+    #[test]
+    fn a_fact_awaiting_review_is_visible_without_a_restart() {
+        let profile = nexus_core::harness::UserProfile::new("Sans").expect("valid card");
+        let mut held = nexus_core::harness::ProfileFact::explicit(
+            &profile.id,
+            "identity.occupation",
+            serde_json::Value::String("cardiologist".into()),
+        );
+        held.sensitivity = "sensitive".into();
+        held.status = nexus_core::harness::ProfileFactStatus::Candidate;
+
+        let menu = profile_cards_menu(
+            &[(profile.clone(), 1, 0)],
+            Some(profile.id.as_str()),
+            0,
+            std::slice::from_ref(&held),
+        );
+        let row = menu
+            .items
+            .iter()
+            .find(|item| item.id == held.id)
+            .expect("the held fact has no row");
+        assert_eq!(row.category, "pending review");
+        assert!(row.detail.contains("not in use"), "{}", row.detail);
+        assert!(row.detail.contains("cardiologist"), "{}", row.detail);
+        // …and it does not appear at all once nothing is pending.
+        let clean = profile_cards_menu(&[(profile, 1, 0)], None, 0, &[]);
+        assert!(clean
+            .items
+            .iter()
+            .all(|item| item.category != "pending review"));
     }
 
     #[test]

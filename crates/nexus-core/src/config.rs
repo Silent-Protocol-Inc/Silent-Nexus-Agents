@@ -46,6 +46,40 @@ pub struct Config {
     pub self_improvement: SelfImprovementConfig,
     /// How much the agent narrates its own work (`[narration]`).
     pub narration: NarrationConfig,
+    /// What the harness may learn about the operator (`[profile]`).
+    pub profile: ProfileConfig,
+}
+
+/// Automatic capture of durable facts about the operator.
+///
+/// A profile is read into the prompt of every later turn, so a wrong entry is
+/// not a wrong answer once — it is a wrong premise indefinitely. These switches
+/// exist because that trade is not the same for everyone: a shared or recorded
+/// terminal may want nothing kept at all.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProfileConfig {
+    /// Detect durable facts the operator states outright and store them on the
+    /// active profile card. Off means the profile only ever changes through
+    /// `/profile` or an explicit `profile.*` tool call.
+    pub auto_capture: bool,
+    /// Include stated working preferences and tooling, not just identity.
+    pub capture_preferences: bool,
+    /// Hold facts in sensitive categories — health, religion, politics,
+    /// sexuality, finances — as candidates for a human to approve rather than
+    /// storing them live. Mentioning something in conversation is not consent
+    /// to keep it, so this defaults on.
+    pub require_review_for_sensitive: bool,
+}
+
+impl Default for ProfileConfig {
+    fn default() -> Self {
+        Self {
+            auto_capture: true,
+            capture_preferences: true,
+            require_review_for_sensitive: true,
+        }
+    }
 }
 
 /// What the agent says about its own work while it does it.
