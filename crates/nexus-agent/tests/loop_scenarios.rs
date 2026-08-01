@@ -153,6 +153,7 @@ fn runtime_with_manager(
         .create(&dir.to_string_lossy(), "orchestrator", initial_model)
         .expect("session");
     let runtime = AgentRuntime {
+        full_access_safety: None,
         models,
         tools: Arc::new(ToolRegistry::with_builtins()),
         policy: Arc::new(PolicyEngine::new(config.policy.clone())),

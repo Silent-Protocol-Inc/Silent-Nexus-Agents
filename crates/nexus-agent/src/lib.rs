@@ -48,6 +48,11 @@ pub struct AgentRuntime {
     pub audit: AuditLog,
     pub sessions: SessionStore,
     pub redactor: Arc<Redactor>,
+    /// Set when the operator answers full access's one question about the
+    /// safety class. Shared with the owning application so the answer covers
+    /// the session rather than the turn, and dies with the process rather than
+    /// being written down. `None` where nothing owns a session.
+    pub full_access_safety: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Profile cards, profile-only memory, and explicitly enabled global
     /// harness patterns live outside any one workspace database.
     pub global_store: Store,

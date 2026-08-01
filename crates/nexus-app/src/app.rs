@@ -52,6 +52,16 @@ pub struct App {
     /// Attended-process-only Full Access override. It is never serialized and
     /// is reset at bootstrap and whenever a session is attached/resumed.
     session_full_access: AtomicBool,
+    /// Whether the operator has answered full access's one question about the
+    /// safety class — privilege escalation, denied commands, locked reads.
+    ///
+    /// Deliberately process state and never written down. The answer covers
+    /// the session, so it has to outlive a single turn (each turn builds a
+    /// fresh policy engine); it must not outlive the session, so persisting it
+    /// beside the ordinary approval grants would be wrong — resuming later
+    /// would silently inherit it. Leaving — exit, disconnect, crash — asks
+    /// again, which is what makes the answer mean "this sitting".
+    full_access_safety_granted: Arc<AtomicBool>,
 }
 
 impl App {
@@ -207,6 +217,7 @@ impl App {
             ui_state: Mutex::new(ui_state),
             pinned_model,
             session_full_access: AtomicBool::new(false),
+            full_access_safety_granted: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -218,7 +229,20 @@ impl App {
         self.session_full_access.load(Ordering::Acquire)
     }
 
+    /// Record that full access's safety question has been answered for this
+    /// session. Replayed into every later turn's policy engine.
+    pub fn grant_full_access_safety(&self) {
+        self.full_access_safety_granted
+            .store(true, Ordering::Release);
+    }
+
+    pub fn full_access_safety_granted(&self) -> bool {
+        self.full_access_safety_granted.load(Ordering::Acquire)
+    }
+
     pub fn reset_session_full_access(&self) {
+        self.full_access_safety_granted
+            .store(false, Ordering::Release);
         self.set_session_full_access(false);
     }
 
@@ -304,6 +328,12 @@ impl App {
                 nexus_policy::PolicyScope::plan_mode(),
             );
         }
+        // The safety answer covers the session but is not written down, so it
+        // is replayed here rather than loaded with the persisted grants below.
+        if self.full_access_safety_granted() {
+            policy.grant_session(nexus_policy::PolicyEngine::FULL_ACCESS_SAFETY_GRANT);
+        }
+        let full_access_safety = self.full_access_safety_granted.clone();
         let audit = self.audit();
         let sessions = SessionStore::new(self.store.clone());
         if let Some(session_id) = session.as_ref() {
@@ -316,6 +346,7 @@ impl App {
             }
         }
         Ok(AgentRuntime {
+            full_access_safety: Some(full_access_safety),
             models,
             tools,
             policy,

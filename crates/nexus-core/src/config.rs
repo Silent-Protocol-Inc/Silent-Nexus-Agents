@@ -584,6 +584,16 @@ impl PolicyConfig {
             && self.network == "allow"
             && self.downloads == "allow"
     }
+
+    /// Whether the operator has put this workspace in auto-edit: edits apply
+    /// without asking, commands and downloads still ask.
+    pub fn is_auto_edit(&self) -> bool {
+        self.reads == "allow"
+            && self.writes == "allow"
+            && self.commands == "ask"
+            && self.network == "allow"
+            && self.downloads == "ask"
+    }
 }
 
 #[cfg(test)]

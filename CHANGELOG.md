@@ -2,6 +2,33 @@
 
 ## [2.12.1] — 2026-08-02
 
+### Changed
+
+- **The permission modes now decide what a refusal means.** They are a ladder of
+  how much the operator wants to be interrupted, and the layers below did not
+  know which rung they were on — so a read-only agent role, a narrowed scope, or
+  a denied read format refused outright even in the mode chosen precisely so the
+  operator could decide. Now: **auto-edit** turns a configured refusal into a
+  question, and **full access** permits it and records it. Every action still
+  goes through the audit log, so "without asking" never means "without a
+  record".
+
+  Under full access this covers raw shell and host terminal actions too: they
+  used to force a prominent one-time prompt whatever the mode, and now run
+  unprompted while the operator is present to have chosen the mode.
+
+  Four refusals are not preferences and no mode absorbs them silently:
+  privilege escalation, the denied-command list, terminal Git side effects, and
+  reads of locked paths (`.git`, `.env`, keystores). Under full access these are
+  **asked once**, and the answer stands for the rest of the session. It is
+  process state and is never written down, so leaving — exit, disconnect,
+  crash — asks again. In every other mode they still refuse.
+
+  Unattended and background runs cannot answer a prompt, so a stored setting is
+  not allowed to answer for them: full access never becomes "background agents
+  may run host commands", and `automatic/background terminal execution requires
+  strong container isolation` still holds.
+
 ### Fixed
 
 - **Approving a terminal action did nothing.** A host terminal action raises a

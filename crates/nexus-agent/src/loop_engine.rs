@@ -4567,14 +4567,21 @@ impl AgentLoop {
         // reading of it that was never chosen deliberately.
         let full_access_attended =
             self.runtime.tool_ctx.config.policy.is_full_access() && approver.interactive();
-        let weak_host_terminal = needs_terminal_isolation
-            && !self.runtime.tool_ctx.sandbox.strong_isolation()
-            && !full_access_attended;
+        let weak_host_terminal =
+            needs_terminal_isolation && !self.runtime.tool_ctx.sandbox.strong_isolation();
         let one_time_only = action_req
             .command_analysis
             .as_ref()
             .is_some_and(|analysis| analysis.one_time_only);
-        let forced_one_time = weak_host_terminal || one_time_only;
+        // Raw shell and a host backend each normally earn one prominent
+        // confirmation, whatever the configured decision. Full access is the
+        // operator saying they do not want to be interrupted — so while they
+        // are present to have chosen it, these run and are recorded instead.
+        //
+        // Attended only. An unattended or background run cannot answer a
+        // prompt, so leaving this forced there is what keeps a stored setting
+        // from speaking for an absent operator.
+        let forced_one_time = (weak_host_terminal || one_time_only) && !full_access_attended;
         let mut effective_decision = outcome.decision;
         let mut effective_reason = outcome.reason.clone();
         if outcome.decision != Decision::Deny && forced_one_time {
@@ -4727,6 +4734,25 @@ impl AgentLoop {
                     }
                     ApprovalDecision::Approve => {
                         unsafe_host_authorized = weak_host_terminal;
+                        // Full access asks about the safety class once. The
+                        // question posed was whether this session may do
+                        // privileged things at all, so the answer is recorded
+                        // for the session rather than for this one command —
+                        // otherwise the operator is asked the same question
+                        // repeatedly and the mode's promise is empty. It lives
+                        // in the process only, so leaving the session asks
+                        // again.
+                        if outcome.layer == nexus_policy::PolicyEngine::FULL_ACCESS_SAFETY_LAYER {
+                            self.runtime.policy.grant_session(
+                                nexus_policy::PolicyEngine::FULL_ACCESS_SAFETY_GRANT,
+                            );
+                            // This engine lasts one turn. The answer covers the
+                            // session, so it is also recorded where the session
+                            // lives — in the process, never on disk.
+                            if let Some(flag) = &self.runtime.full_access_safety {
+                                flag.store(true, std::sync::atomic::Ordering::Release);
+                            }
+                        }
                         repository.resolve_approval_request(
                             &canonical_approval.id,
                             ApprovalStatus::ApprovedOnce,

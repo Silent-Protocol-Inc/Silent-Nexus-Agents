@@ -180,8 +180,103 @@ impl PolicyEngine {
         }
     }
 
+    /// Refusals that are safety rules rather than operator preferences.
+    ///
+    /// Privilege escalation, the denied-command list, terminal Git side
+    /// effects, and reads of locked paths (`.git`, `.env`, keystores). These
+    /// are not positions to reconsider per action, so no permission mode
+    /// converts them — a mode is how much the operator wants to be asked, not
+    /// a way to leave the security model.
+    const IMMUTABLE_REFUSALS: &'static [&'static str] = &["builtin", "hard_safety"];
+
+    fn is_immutable(outcome: &PolicyOutcome) -> bool {
+        outcome.decision == Decision::Deny
+            && Self::IMMUTABLE_REFUSALS.contains(&outcome.layer.as_str())
+    }
+
+    /// Session grant that stands in for the safety class under full access.
+    ///
+    /// One token for the whole class rather than one per action: the operator
+    /// is answering "yes, this session may do privileged things", not
+    /// re-deciding it per command. It lives only in this process, so leaving
+    /// the session — exit, disconnect, crash — asks again next time.
+    pub const FULL_ACCESS_SAFETY_GRANT: &'static str = "full-access:safety";
+
+    /// Layer reported when full access turns a safety refusal into the one
+    /// prompt that covers the session.
+    pub const FULL_ACCESS_SAFETY_LAYER: &str = "full_access_safety";
+
+    fn holds_full_access_safety_grant(&self) -> bool {
+        self.session_grants
+            .read()
+            .is_ok_and(|grants| grants.contains(Self::FULL_ACCESS_SAFETY_GRANT))
+    }
+
+    /// Apply what the permission mode means to an evaluated outcome.
+    ///
+    /// The modes are a ladder of how much the operator wants to be interrupted,
+    /// and the layers below did not know which rung they were on — so a role
+    /// that narrows the tool set refused outright even in the mode whose whole
+    /// point is that the operator decides.
+    ///
+    /// * **auto-edit** — a configured refusal becomes a question. The operator
+    ///   is still asked; they are no longer told no.
+    /// * **full access** — it is permitted, and recorded. Every action still
+    ///   goes through the audit log, so "without asking" never means "without
+    ///   a record".
+    ///
+    /// Neither touches [`IMMUTABLE_REFUSALS`](Self::IMMUTABLE_REFUSALS).
+    fn apply_permission_mode(&self, outcome: PolicyOutcome) -> PolicyOutcome {
+        if Self::is_immutable(&outcome) {
+            // Under full access the safety class is asked about once and then
+            // stands for the session. Every other mode keeps refusing: a mode
+            // is how much the operator wants to be asked, and only the most
+            // permissive one puts this on the table at all.
+            if !self.config.is_full_access() {
+                return outcome;
+            }
+            if self.holds_full_access_safety_grant() {
+                return PolicyOutcome::new(
+                    Decision::Allow,
+                    Self::FULL_ACCESS_SAFETY_LAYER,
+                    format!("{} — approved for this session", outcome.reason),
+                );
+            }
+            return PolicyOutcome::new(
+                Decision::Ask,
+                Self::FULL_ACCESS_SAFETY_LAYER,
+                format!(
+                    "{} — approving permits privileged actions for the rest of this session",
+                    outcome.reason
+                ),
+            );
+        }
+        if self.config.is_full_access() {
+            if outcome.decision == Decision::Allow {
+                return outcome;
+            }
+            return PolicyOutcome::new(
+                Decision::Allow,
+                &outcome.layer.clone(),
+                format!("{} — full access permits and records it", outcome.reason),
+            );
+        }
+        if outcome.decision == Decision::Deny && self.config.is_auto_edit() {
+            return PolicyOutcome::new(
+                Decision::Ask,
+                &outcome.layer.clone(),
+                format!("{} — auto-edit asks instead of refusing", outcome.reason),
+            );
+        }
+        outcome
+    }
+
     /// Evaluate an action against every layer.
     pub fn evaluate(&self, action: &ActionRequest) -> PolicyOutcome {
+        self.apply_permission_mode(self.evaluate_inner(action))
+    }
+
+    fn evaluate_inner(&self, action: &ActionRequest) -> PolicyOutcome {
         // 1. Hard built-in denials that no configuration can override.
         if action.risk == RiskLevel::Privileged {
             return PolicyOutcome::new(
@@ -405,6 +500,143 @@ mod tests {
 
     fn engine() -> PolicyEngine {
         PolicyEngine::new(PolicyConfig::default())
+    }
+
+    fn full_access_engine() -> PolicyEngine {
+        PolicyEngine::new(PolicyConfig {
+            writes: "allow".into(),
+            commands: "allow".into(),
+            downloads: "allow".into(),
+            ..PolicyConfig::default()
+        })
+    }
+
+    fn auto_edit_engine() -> PolicyEngine {
+        PolicyEngine::new(PolicyConfig {
+            writes: "allow".into(),
+            ..PolicyConfig::default()
+        })
+    }
+
+    /// The modes are a ladder of how much the operator wants to be interrupted,
+    /// and the layers below did not know which rung they were on. A read-only
+    /// role installs a scope denying the tools it may not use, and that refusal
+    /// reached the operator as a dead end in every mode — including the ones
+    /// chosen precisely so they could decide.
+    #[test]
+    fn each_permission_mode_decides_what_a_configured_refusal_means() {
+        let scope = PolicyScope {
+            denied_tools: vec!["fs.write_file".into()],
+            ..Default::default()
+        };
+        let request = action("fs.write_file", RiskLevel::Write);
+
+        // default: still refused.
+        let strict = engine();
+        strict.push_scope("reviewer", scope.clone());
+        assert_eq!(strict.evaluate(&request).decision, Decision::Deny);
+
+        // auto-edit: asked, not refused.
+        let auto = auto_edit_engine();
+        auto.push_scope("reviewer", scope.clone());
+        let outcome = auto.evaluate(&request);
+        assert_eq!(outcome.decision, Decision::Ask, "{}", outcome.reason);
+        assert!(outcome.reason.contains("auto-edit"), "{}", outcome.reason);
+
+        // full access: permitted, and recorded.
+        let full = full_access_engine();
+        full.push_scope("reviewer", scope);
+        let outcome = full.evaluate(&request);
+        assert_eq!(outcome.decision, Decision::Allow, "{}", outcome.reason);
+        assert!(outcome.reason.contains("full access"), "{}", outcome.reason);
+    }
+
+    /// Full access asks about nothing, including the categories configuration
+    /// alone can never resolve better than `ask`.
+    #[test]
+    fn full_access_does_not_ask() {
+        let full = full_access_engine();
+        for risk in [
+            RiskLevel::Read,
+            RiskLevel::Network,
+            RiskLevel::Write,
+            RiskLevel::Destructive,
+            RiskLevel::ExternalSideEffect,
+        ] {
+            let outcome = full.evaluate(&action("fs.write_file", risk));
+            assert_eq!(
+                outcome.decision,
+                Decision::Allow,
+                "{risk:?} still interrupts: {}",
+                outcome.reason
+            );
+        }
+    }
+
+    /// The safety class is not an ordinary preference, so the permissive modes
+    /// do not silently absorb it. Default and auto-edit still refuse outright.
+    #[test]
+    fn only_full_access_puts_the_safety_class_on_the_table() {
+        for engine in [engine(), auto_edit_engine()] {
+            for request in safety_class() {
+                assert_eq!(
+                    engine.evaluate(&request).decision,
+                    Decision::Deny,
+                    "{} escaped the safety class",
+                    request.tool
+                );
+            }
+        }
+    }
+
+    /// Under full access it is asked once and the answer stands for the
+    /// session. Asking per command would make the mode's promise empty; never
+    /// asking would remove the last boundary. The grant lives in this process
+    /// only, so leaving the session asks again.
+    #[test]
+    fn full_access_asks_once_for_the_safety_class_then_holds_it_for_the_session() {
+        let full = full_access_engine();
+        for request in safety_class() {
+            let outcome = full.evaluate(&request);
+            assert_eq!(
+                outcome.decision,
+                Decision::Ask,
+                "{} did not ask: {}",
+                request.tool,
+                outcome.reason
+            );
+            assert_eq!(outcome.layer, PolicyEngine::FULL_ACCESS_SAFETY_LAYER);
+            assert!(outcome.reason.contains("rest of this session"));
+        }
+
+        full.grant_session(PolicyEngine::FULL_ACCESS_SAFETY_GRANT);
+        for request in safety_class() {
+            let outcome = full.evaluate(&request);
+            assert_eq!(
+                outcome.decision,
+                Decision::Allow,
+                "{} asked again after the session was approved",
+                request.tool
+            );
+        }
+
+        // A fresh process is a fresh session: grants are in-memory only.
+        let restarted = full_access_engine();
+        assert_eq!(
+            restarted.evaluate(&safety_class()[0]).decision,
+            Decision::Ask,
+            "the grant survived the session it belonged to"
+        );
+    }
+
+    /// The actions the safety class covers.
+    fn safety_class() -> Vec<ActionRequest> {
+        let privileged = action("terminal.run", RiskLevel::Privileged);
+        let mut sudo = action("terminal.run", RiskLevel::Write);
+        sudo.command = Some("sudo rm -rf /".into());
+        let mut locked = action("fs.read_file", RiskLevel::Read);
+        locked.paths = vec![".env".into()];
+        vec![privileged, sudo, locked]
     }
 
     fn action(tool: &str, risk: RiskLevel) -> ActionRequest {
