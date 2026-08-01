@@ -94,6 +94,21 @@ available locally; Silent Nexus does not pull it. Otherwise it selects the
 approval-only host guardrail. Automatic/background terminal execution is
 permitted only with strong container isolation.
 
+### Restricted files and host commands
+
+Restricted paths are masked by bind-mounting `/dev/null` over them, so **only
+the container backend can mask anything**. Without a container, a host command
+inherits your own read access, and nothing can stop it reading `.git`, `.env`,
+or a keystore — so terminal actions are refused instead, after approval, with a
+count of the restricted paths.
+
+`.git` is restricted, which means this refusal applies in **every Git
+repository**, not only unusual workspaces. Two ways forward:
+
+- use `fs.read_file` and `fs.search`, which are checked per file and are
+  unaffected;
+- enable the container sandbox (`/sandbox`), which masks the paths for real.
+
 ## Web, memory, limits, and MCP
 
 `[web]` controls enablement, search provider, fetch size, host allow/deny lists,

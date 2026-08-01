@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.11.1] — 2026-08-02
+
+### Fixed
+
+- **The restricted-file refusal counted a repository's insides and never said
+  so.** Host commands are refused when restricted paths cannot be masked, which
+  is deliberate: masking works by bind-mounting `/dev/null` over each path, only
+  the container backend can do it, and without one a host command inherits your
+  own read access and could read `.git`, `.env`, or a keystore. What was wrong
+  is what the refusal *said*. The scan walks into `.git` on purpose and every
+  path under it is restricted, so each object, ref, and hook sample was counted
+  separately — a fresh `git init` holding one file reported **24 restricted
+  files**. Masks apply to directories, so those children never contributed any
+  enforcement; they only made a routine refusal read as a discovery about your
+  workspace. A path already covered by a directory mask is no longer counted,
+  and that same repository now reports 2. The message also now says the thing
+  that actually explains it: `.git` is restricted, so this applies in **every**
+  Git repository, not just unusual ones.
+
 ## [2.11.0] — 2026-08-02
 
 ### Added

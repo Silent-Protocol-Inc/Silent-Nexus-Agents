@@ -130,7 +130,20 @@ fn build_spec(
         };
         if decision == "deny" {
             if let Ok(relative) = entry.path().strip_prefix(ctx.workspace.root()) {
-                sensitive_path_masks.push(relative.to_path_buf());
+                // Skip anything already covered by a directory mask. The walk
+                // descends into `.git` and `.nexus` deliberately, and every path
+                // under them classifies as denied — so a repository with one
+                // `.git` was reporting one mask per object, ref, and hook
+                // sample. A fresh `git init` with a single file counted 24.
+                // Masking is by directory, so the children add nothing to
+                // enforcement and only make the refusal sound like a discovery
+                // about the operator's files.
+                if !sensitive_path_masks
+                    .iter()
+                    .any(|mask| relative.starts_with(mask))
+                {
+                    sensitive_path_masks.push(relative.to_path_buf());
+                }
             }
         }
     }
@@ -171,17 +184,29 @@ fn build_spec(
     if !ctx.sandbox.strong_isolation() && !sensitive_path_masks.is_empty() && !proved_write_only {
         // Name the constraint and both ways past it. The old message stated the
         // rule and stopped, so an operator whose workspace holds restricted
-        // files — a password manager, a keystore, a repo with `.env` — saw the
-        // agent give up with no idea which files caused it or what still works.
-        // Counts only: the paths are the thing being protected.
+        // files saw the agent give up with no idea what caused it or what still
+        // works. It also read as a discovery about their files, when the usual
+        // cause is simply that the directory is a Git repository — `.git` is
+        // restricted, so this refuses in every repo. Say that outright rather
+        // than leaving a count to imply something rarer.
+        //
+        // Counts and categories only: the paths are the thing being protected.
         let blocked = sensitive_path_masks.len();
+        let git = sensitive_path_masks
+            .iter()
+            .any(|mask| mask.components().any(|part| part.as_os_str() == ".git"));
         return Err(NexusError::PolicyDenied(format!(
-            "host execution cannot prove restricted-file masking for {blocked} file{} in this \
-             workspace, so a host command could read {}. Use the per-file tools (`fs.read_file`, \
-             `fs.search`), which are checked individually, or enable the container sandbox \
-             (`/sandbox`) to run commands with those paths masked.",
+            "host execution cannot prove restricted-file masking for {blocked} path{} in this \
+             workspace, so a host command could read {}.{} Use the per-file tools \
+             (`fs.read_file`, `fs.search`), which are checked individually, or enable the \
+             container sandbox (`/sandbox`) — the only backend that can mask a path.",
             if blocked == 1 { "" } else { "s" },
             if blocked == 1 { "it" } else { "them" },
+            if git {
+                " `.git` is one of them, so this applies to every Git repository."
+            } else {
+                ""
+            },
         )));
     }
     Ok(ExecSpec {
@@ -426,6 +451,52 @@ mod tests {
         )
         .expect("spec");
         assert_eq!(spec.output_hard_cap, ctx.config.sandbox.max_output_bytes);
+    }
+
+    /// A repository is one mask, not one per object.
+    ///
+    /// The walk descends into `.git` on purpose, and every path under it
+    /// classifies as denied — so the refusal counted a fresh `git init` with a
+    /// single file as 24 restricted files. The number is what the operator
+    /// reads, and at that size it sounds like a finding about their workspace
+    /// rather than the presence of a `.git` directory. Directory masks already
+    /// cover their contents, so the children never added enforcement.
+    #[tokio::test]
+    async fn a_repository_counts_as_one_restricted_path_not_one_per_object() {
+        let directory = tempfile::tempdir().expect("directory");
+        let root = directory.path();
+        for relative in [".git/objects/ab", ".git/refs/heads", ".git/hooks", "src"] {
+            std::fs::create_dir_all(root.join(relative)).expect("mkdir");
+        }
+        for relative in [
+            ".git/config",
+            ".git/HEAD",
+            ".git/objects/ab/cdef",
+            ".git/refs/heads/main",
+            ".git/hooks/pre-commit.sample",
+            "src/main.rs",
+        ] {
+            std::fs::write(root.join(relative), "x").expect("write");
+        }
+        let ctx = context(root);
+        let mut registry = ToolRegistry::new();
+        register(&mut registry);
+        let error = registry
+            .get("terminal.run_program")
+            .expect("tool")
+            .execute(&ctx, json!({"program": "echo", "args": ["blocked"]}))
+            .await
+            .expect_err("a repository still refuses host execution")
+            .to_string();
+
+        // `.git` and the test harness's own `.nexus`, and nothing underneath
+        // either of them.
+        assert!(
+            error.contains("for 2 paths"),
+            "the count still includes covered children: {error}"
+        );
+        // …and it says why, so the operator is not left inferring it.
+        assert!(error.contains("every Git repository"), "{error}");
     }
 
     #[tokio::test]
