@@ -88,7 +88,7 @@ pub struct ShadowObservation {
     pub succeeded: bool,
     /// Redacted final output, used only for agreement comparison.
     pub output: String,
-    /// Independent quality score in [0,1] from the objective stages — not the
+    /// Independent quality score in `[0,1]` from the objective stages — not the
     /// candidate's own opinion of itself.
     pub quality: f64,
     pub tokens: u64,

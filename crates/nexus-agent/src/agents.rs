@@ -188,7 +188,7 @@ impl AgentRole {
     }
 
     /// Named capabilities this role holds, checked against each tool's
-    /// [`ToolMeta::required_capabilities`].
+    /// `ToolMeta::required_capabilities`.
     ///
     /// A second axis alongside categories, because "may see the profile" and
     /// "may change the profile" are different questions and a category can only

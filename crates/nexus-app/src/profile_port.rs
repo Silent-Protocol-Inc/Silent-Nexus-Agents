@@ -1,7 +1,7 @@
 //! The application's implementation of [`nexus_tools::profile::ProfilePort`].
 //!
 //! Every `profile.*` tool call lands here and is immediately handed to
-//! [`HarnessControlPlane`], which already knows how to keep the three places
+//! `HarnessControlPlane`, which already knows how to keep the three places
 //! that record identity in step: the canonical card in the global store, the
 //! active context in the workspace store, and the UI state and session row that
 //! survive a restart. Reimplementing any of that closer to the tool would mean
