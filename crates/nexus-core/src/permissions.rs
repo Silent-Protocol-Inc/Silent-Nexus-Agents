@@ -42,7 +42,8 @@ fn is_shared(path: &Path) -> bool {
 }
 
 /// Create and repair a private tree: directories `0700`, regular files `0600`.
-/// Symlinks are rejected rather than followed, except under [`SHARED_SUBTREES`].
+/// Symlinks are rejected rather than followed, except inside a subtree NEXUS
+/// shares with another program — see `SHARED_SUBTREES`.
 pub fn repair_private_tree(root: &Path) -> Result<Vec<PermissionIssue>> {
     crate::atomic::ensure_directory_tree(root, 0o700)?;
     let mut repaired = Vec::new();
