@@ -14,7 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-pub const HARNESS_SCHEMA_VERSION: u32 = 1;
+pub const HARNESS_SCHEMA_VERSION: u32 = 2;
 
 fn stable_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
@@ -238,7 +238,7 @@ pub enum ProfileFactStatus {
 }
 
 impl ProfileFactStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Candidate => "candidate",
             Self::Active => "active",
@@ -264,16 +264,26 @@ pub struct ProfileFact {
     pub created_at: String,
     pub updated_at: String,
     pub expires_at: Option<String>,
+    /// The fact that replaced this one, when it was superseded rather than
+    /// deleted. Absent on every record written before superseding existed,
+    /// which is why it is `default`ed rather than required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 impl ProfileFact {
     pub fn explicit_name(profile_id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::explicit(profile_id, "identity.name", Value::String(name.into()))
+    }
+
+    /// A fact the operator stated outright: full confidence, live immediately.
+    pub fn explicit(profile_id: impl Into<String>, key: impl Into<String>, value: Value) -> Self {
         let now = crate::now_rfc3339();
         Self {
             id: stable_id("pfact"),
             profile_id: profile_id.into(),
-            key: "identity.name".into(),
-            value: Value::String(name.into()),
+            key: key.into(),
+            value,
             source_type: ProfileFactSource::UserExplicit,
             source_ref: None,
             confidence: 1.0,
@@ -283,7 +293,50 @@ impl ProfileFact {
             created_at: now.clone(),
             updated_at: now,
             expires_at: None,
+            superseded_by: None,
         }
+    }
+}
+
+/// What recording a fact actually did to the card.
+///
+/// Distinct from "it worked", because the operator is told which one happened
+/// and the four cases are not interchangeable: creating a fact, replacing one,
+/// and finding the card already said it are three different answers to "did you
+/// remember that".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactOutcome {
+    Created {
+        fact_id: String,
+    },
+    Updated {
+        fact_id: String,
+        superseded: Vec<String>,
+    },
+    Unchanged {
+        fact_id: String,
+    },
+}
+
+impl FactOutcome {
+    pub fn fact_id(&self) -> &str {
+        match self {
+            FactOutcome::Created { fact_id }
+            | FactOutcome::Updated { fact_id, .. }
+            | FactOutcome::Unchanged { fact_id } => fact_id,
+        }
+    }
+}
+
+/// Whether two fact values say the same thing.
+///
+/// Strings are compared case- and whitespace-insensitively: "Sans" and "sans "
+/// are not two different answers to what the operator is called, and treating
+/// them as such is how a card ends up with a list of near-duplicates.
+fn same_value(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::String(a), Value::String(b)) => a.trim().eq_ignore_ascii_case(b.trim()),
+        _ => left == right,
     }
 }
 
@@ -1605,28 +1658,160 @@ impl ImprovementCategory {
     }
 }
 
+/// The typed subject of an improvement. `plane()` separates **data-plane**
+/// targets (config/data the running harness can self-apply after WARP) from the
+/// **code-plane** `HarnessComponent` (Rust source — validated in a worktree but
+/// shipped only through a human-approved release, never a live hot-swap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImprovementTarget {
+    Memory,
+    Skill,
+    Prompt,
+    ContextRouter,
+    RetrievalPolicy,
+    ToolRouter,
+    PlannerPolicy,
+    AgentRole,
+    RetryPolicy,
+    ErrorRecovery,
+    TimelinePresentation,
+    TokenBudgetPolicy,
+    EvaluationPolicy,
+    /// Rust harness source. Conservative default for un-annotated legacy rows.
+    #[default]
+    HarnessComponent,
+}
+
+/// Whether an improvement changes data the running process can apply, or Rust
+/// source that requires a rebuild + human-approved release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImprovementPlane {
+    Data,
+    Code,
+}
+
+impl ImprovementTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Skill => "skill",
+            Self::Prompt => "prompt",
+            Self::ContextRouter => "context_router",
+            Self::RetrievalPolicy => "retrieval_policy",
+            Self::ToolRouter => "tool_router",
+            Self::PlannerPolicy => "planner_policy",
+            Self::AgentRole => "agent_role",
+            Self::RetryPolicy => "retry_policy",
+            Self::ErrorRecovery => "error_recovery",
+            Self::TimelinePresentation => "timeline_presentation",
+            Self::TokenBudgetPolicy => "token_budget_policy",
+            Self::EvaluationPolicy => "evaluation_policy",
+            Self::HarnessComponent => "harness_component",
+        }
+    }
+
+    /// Code-plane iff the target is Rust harness source; everything else is data.
+    pub fn plane(self) -> ImprovementPlane {
+        match self {
+            Self::HarnessComponent => ImprovementPlane::Code,
+            _ => ImprovementPlane::Data,
+        }
+    }
+}
+
+/// Governed risk tier. Higher tiers demand stricter gates; `Prohibited` is
+/// auto-rejected by WARP. Defaults to `High` so an un-annotated candidate is
+/// treated conservatively (human approval) rather than auto-promotable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskTier {
+    /// Tier 0 — observation only (telemetry, lessons, reports).
+    Observation,
+    /// Tier 1 — low risk; auto-promote only after all WARP gates pass.
+    Low,
+    /// Tier 2 — moderate; shadow required before promotion.
+    Moderate,
+    /// Tier 3 — high; explicit human approval required.
+    #[default]
+    High,
+    /// Tier 4 — prohibited autonomous change; WARP auto-rejects.
+    Prohibited,
+}
+
+impl RiskTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observation => "observation",
+            Self::Low => "low",
+            Self::Moderate => "moderate",
+            Self::High => "high",
+            Self::Prohibited => "prohibited",
+        }
+    }
+
+    /// Numeric tier 0–4.
+    pub fn level(self) -> u8 {
+        match self {
+            Self::Observation => 0,
+            Self::Low => 1,
+            Self::Moderate => 2,
+            Self::High => 3,
+            Self::Prohibited => 4,
+        }
+    }
+}
+
+/// A machine-checkable success criterion for a candidate. `hard_constraint`
+/// criteria are vetoes: WARP cannot average them away against soft gains.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SuccessMetric {
+    pub id: String,
+    pub description: String,
+    /// Measured baseline value, when known.
+    pub baseline: Option<f64>,
+    /// Target the candidate must reach (direction is described in `description`).
+    pub target: Option<f64>,
+    /// When true, a miss is a hard failure regardless of other gains.
+    pub hard_constraint: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImprovementStatus {
+    Observed,
     Draft,
     Proposed,
     Approved,
+    NeedsRevision,
     Rejected,
     Testing,
+    Validated,
+    Shadow,
+    Canary,
     Applied,
+    Promoted,
     RolledBack,
+    Deprecated,
 }
 
 impl ImprovementStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
+            Self::Observed => "observed",
             Self::Draft => "draft",
             Self::Proposed => "proposed",
             Self::Approved => "approved",
+            Self::NeedsRevision => "needs_revision",
             Self::Rejected => "rejected",
             Self::Testing => "testing",
+            Self::Validated => "validated",
+            Self::Shadow => "shadow",
+            Self::Canary => "canary",
             Self::Applied => "applied",
+            Self::Promoted => "promoted",
             Self::RolledBack => "rolled_back",
+            Self::Deprecated => "deprecated",
         }
     }
 }
@@ -1646,6 +1831,29 @@ pub struct ImprovementProposal {
     pub status: ImprovementStatus,
     pub approval_required: bool,
     pub measurements: BTreeMap<String, Value>,
+    /// Typed subject of the change. Defaults conservatively (`HarnessComponent`)
+    /// for rows written before schema v2.
+    #[serde(default)]
+    pub target: ImprovementTarget,
+    /// Where the change applies (workspace/project/session/…).
+    #[serde(default)]
+    pub scope: MemoryScope,
+    /// Governed risk tier. Defaults to `High` (human approval) when absent.
+    #[serde(default)]
+    pub risk_tier: RiskTier,
+    #[serde(default)]
+    pub root_cause_hypothesis: String,
+    #[serde(default)]
+    pub success_metrics: Vec<SuccessMetric>,
+    #[serde(default)]
+    pub affected_components: Vec<String>,
+    #[serde(default)]
+    pub baseline_version: String,
+    #[serde(default)]
+    pub candidate_version: String,
+    /// Role/agent that authored the candidate (never the promoting authority).
+    #[serde(default)]
+    pub created_by: String,
     pub schema_version: u32,
     pub created_at: String,
     pub updated_at: String,
@@ -1680,6 +1888,15 @@ impl ImprovementProposal {
             status: ImprovementStatus::Draft,
             approval_required: true,
             measurements: BTreeMap::new(),
+            target: ImprovementTarget::default(),
+            scope: MemoryScope::default(),
+            risk_tier: RiskTier::default(),
+            root_cause_hypothesis: String::new(),
+            success_metrics: Vec::new(),
+            affected_components: Vec::new(),
+            baseline_version: String::new(),
+            candidate_version: String::new(),
+            created_by: String::new(),
             schema_version: HARNESS_SCHEMA_VERSION,
             created_at: now.clone(),
             updated_at: now,
@@ -1905,10 +2122,25 @@ pub struct HarnessEvent {
     pub agent_id: Option<String>,
     pub subagent_id: Option<String>,
     pub run_id: Option<String>,
+    /// Severity for RSI triage: `info` | `notice` | `warning` | `error`.
+    #[serde(default = "default_event_severity")]
+    pub severity: String,
+    /// Provider/model in effect when the event was observed, when known.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Improvement candidate this event is evidence for, when applicable.
+    #[serde(default)]
+    pub candidate_id: Option<String>,
     pub summary: String,
     pub metadata: BTreeMap<String, Value>,
     pub sensitivity: String,
     pub schema_version: u32,
+}
+
+fn default_event_severity() -> String {
+    "info".to_string()
 }
 
 impl HarnessEvent {
@@ -1925,6 +2157,10 @@ impl HarnessEvent {
             agent_id: None,
             subagent_id: None,
             run_id: None,
+            severity: default_event_severity(),
+            provider: None,
+            model: None,
+            candidate_id: None,
             summary: summary.into(),
             metadata: BTreeMap::new(),
             sensitivity: "normal".into(),
@@ -2083,6 +2319,36 @@ impl HarnessRepository {
         self.update_profile(&profile)
     }
 
+    /// Record, on the card itself, that this is what the operator is called.
+    ///
+    /// The name already becomes an `identity.name` fact, but a fact is one row
+    /// in a list the model has to read past; `preferred_name` is the field the
+    /// profile section leads with. Existing cards were created before this was
+    /// set, so an operator who introduced himself once still had a card that
+    /// answered `null` to "what should I call you" — this fills it in on the
+    /// next mention rather than requiring a migration.
+    ///
+    /// It only ever fills a gap. A `preferred_name` already chosen — through
+    /// `/profile` or `profile.update` — is the operator's decision and is not
+    /// overwritten by a passing self-introduction.
+    fn adopt_preferred_name_conn(
+        conn: &rusqlite::Connection,
+        mut profile: UserProfile,
+        name: &str,
+    ) -> Result<UserProfile> {
+        if profile.preferred_name.is_some() || name.is_empty() {
+            return Ok(profile);
+        }
+        profile.preferred_name = Some(name.to_string());
+        profile.updated_at = crate::now_rfc3339();
+        let payload = checked_payload(&profile, "profile")?;
+        conn.execute(
+            "UPDATE harness_profiles SET payload_json=?1,updated_at=?2 WHERE id=?3",
+            params![payload, profile.updated_at, profile.id],
+        )?;
+        Ok(profile)
+    }
+
     fn insert_profile_conn(conn: &rusqlite::Connection, profile: &UserProfile) -> Result<()> {
         let payload = checked_payload(profile, "profile")?;
         conn.execute(
@@ -2136,14 +2402,98 @@ impl HarnessRepository {
         })
     }
 
+    /// [`record_profile_fact`](Self::record_profile_fact) for callers that do
+    /// not need the outcome. It used to append unconditionally, which is the
+    /// same trap the identity path fell into; there is now one door in.
     pub fn add_profile_fact(&self, fact: &ProfileFact) -> Result<()> {
+        self.record_profile_fact(fact).map(|_| ())
+    }
+
+    /// Record a fact, reconciling it against what the card already says.
+    ///
+    /// Appending unconditionally is wrong in both directions. Saying "my name
+    /// is Sans" twice must not leave two rows claiming the same thing — the
+    /// second is not new information. And saying "call me Erpan from now on"
+    /// must not leave two live answers to the same question, with no record of
+    /// which came first.
+    ///
+    /// So: an identical live fact is [`FactOutcome::Unchanged`] and writes
+    /// nothing; a different value for the same key supersedes the old one,
+    /// which stays on the card as history rather than being deleted. The whole
+    /// reconciliation happens inside one transaction, so two agents observing
+    /// the same statement cannot both decide theirs is the new one.
+    pub fn record_profile_fact(&self, fact: &ProfileFact) -> Result<FactOutcome> {
         if !(0.0..=1.0).contains(&fact.confidence) {
             return Err(NexusError::Config(
                 "profile fact confidence must be between 0 and 1".into(),
             ));
         }
-        self.store
-            .with_retry(|conn| Self::insert_profile_fact_conn(conn, fact))
+        self.store.with_retry(|conn| {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let result = Self::record_profile_fact_conn(conn, fact);
+            finish_transaction(conn, result)
+        })
+    }
+
+    /// Record one fact, already inside a transaction.
+    ///
+    /// This is the *only* way a fact should reach the table. Writing straight to
+    /// [`insert_profile_fact_conn`] skips the two rules that make a profile
+    /// stable: restating something already on the card must change nothing, and
+    /// changing it must retire the old value rather than sit beside it. The
+    /// identity path did write straight to the insert, and every repetition of
+    /// "my name is Sans" left another identical `identity.name` row behind.
+    fn record_profile_fact_conn(
+        conn: &rusqlite::Connection,
+        fact: &ProfileFact,
+    ) -> Result<FactOutcome> {
+        let mut stmt = conn.prepare(
+            "SELECT payload_json FROM harness_profile_facts
+             WHERE profile_id=?1 AND fact_key=?2 AND status IN ('active','candidate')
+             ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map(params![fact.profile_id, fact.key], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut existing = Vec::<ProfileFact>::new();
+        for row in rows {
+            existing.push(decode(row?)?);
+        }
+        drop(stmt);
+
+        if let Some(same) = existing
+            .iter()
+            .find(|candidate| same_value(&candidate.value, &fact.value))
+        {
+            return Ok(FactOutcome::Unchanged {
+                fact_id: same.id.clone(),
+            });
+        }
+
+        Self::insert_profile_fact_conn(conn, fact)?;
+        let superseded: Vec<String> = existing.iter().map(|prior| prior.id.clone()).collect();
+        for prior in &existing {
+            let mut prior = prior.clone();
+            prior.status = ProfileFactStatus::Superseded;
+            prior.updated_at = crate::now_rfc3339();
+            prior.superseded_by = Some(fact.id.clone());
+            let payload = checked_payload(&prior, "profile fact")?;
+            conn.execute(
+                "UPDATE harness_profile_facts
+                 SET status=?1,payload_json=?2,updated_at=?3 WHERE id=?4",
+                params![prior.status.as_str(), payload, prior.updated_at, prior.id],
+            )?;
+        }
+        if superseded.is_empty() {
+            Ok(FactOutcome::Created {
+                fact_id: fact.id.clone(),
+            })
+        } else {
+            Ok(FactOutcome::Updated {
+                fact_id: fact.id.clone(),
+                superseded,
+            })
+        }
     }
 
     fn insert_profile_fact_conn(conn: &rusqlite::Connection, fact: &ProfileFact) -> Result<()> {
@@ -2297,8 +2647,13 @@ impl HarnessRepository {
                         let mut fact =
                             ProfileFact::explicit_name(active.id.clone(), asserted_name.trim());
                         fact.source_ref = source_ref.map(str::to_string);
-                        Self::insert_profile_fact_conn(conn, &fact)?;
-                        return Ok(IdentityResolution::Activated(active.clone()));
+                        Self::record_profile_fact_conn(conn, &fact)?;
+                        let active = Self::adopt_preferred_name_conn(
+                            conn,
+                            active.clone(),
+                            asserted_name.trim(),
+                        )?;
+                        return Ok(IdentityResolution::Activated(active));
                     }
                     if !active.is_default() {
                         let conflict = Self::insert_identity_conflict_conn(
@@ -2318,16 +2673,27 @@ impl HarnessRepository {
                         let mut fact =
                             ProfileFact::explicit_name(profile.id.clone(), asserted_name.trim());
                         fact.source_ref = source_ref.map(str::to_string);
-                        Self::insert_profile_fact_conn(conn, &fact)?;
-                        Ok(IdentityResolution::Activated(profile.clone()))
+                        Self::record_profile_fact_conn(conn, &fact)?;
+                        let profile = Self::adopt_preferred_name_conn(
+                            conn,
+                            profile.clone(),
+                            asserted_name.trim(),
+                        )?;
+                        Ok(IdentityResolution::Activated(profile))
                     }
                     [] => {
-                        let profile = UserProfile::new(asserted_name.trim())?;
+                        let mut profile = UserProfile::new(asserted_name.trim())?;
+                        // The name the operator gave *is* what they want to be
+                        // called. Leaving this null meant the card carried the
+                        // name only as a fact buried in a list, and the profile
+                        // section handed to the model said `preferred_name:
+                        // null` about someone who had just introduced himself.
+                        profile.preferred_name = Some(asserted_name.trim().to_string());
                         Self::insert_profile_conn(conn, &profile)?;
                         let mut fact =
                             ProfileFact::explicit_name(profile.id.clone(), asserted_name.trim());
                         fact.source_ref = source_ref.map(str::to_string);
-                        Self::insert_profile_fact_conn(conn, &fact)?;
+                        Self::record_profile_fact_conn(conn, &fact)?;
                         Ok(IdentityResolution::Created(profile))
                     }
                     _ => Ok(IdentityResolution::Conflict(
@@ -2408,7 +2774,7 @@ impl HarnessRepository {
                             conflict.asserted_name.clone(),
                         );
                         fact.source_ref.clone_from(&conflict.source_ref);
-                        Self::insert_profile_fact_conn(conn, &fact)?;
+                        Self::record_profile_fact_conn(conn, &fact)?;
                         (
                             "create_separate".to_string(),
                             IdentityConflictStatus::Resolved,
@@ -3544,21 +3910,73 @@ impl HarnessRepository {
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let result = (|| -> Result<()> {
                 let mut proposal = Self::improvement_conn(conn, proposal_id)?;
+                use ImprovementStatus::*;
                 let allowed = matches!(
                     (proposal.status, next),
-                    (ImprovementStatus::Draft, ImprovementStatus::Proposed)
-                        | (ImprovementStatus::Proposed, ImprovementStatus::Approved)
-                        | (ImprovementStatus::Proposed, ImprovementStatus::Rejected)
-                        | (ImprovementStatus::Approved, ImprovementStatus::Testing)
-                        | (ImprovementStatus::Testing, ImprovementStatus::Applied)
-                        | (ImprovementStatus::Testing, ImprovementStatus::Rejected)
-                        | (ImprovementStatus::Applied, ImprovementStatus::RolledBack)
+                    // Discovery → drafting.
+                    (Observed, Draft)
+                        // Drafting → review.
+                        | (Draft, Proposed)
+                        | (Proposed, Approved)
+                        | (Proposed, Rejected)
+                        | (Proposed, NeedsRevision)
+                        // Revision loop.
+                        | (NeedsRevision, Draft)
+                        | (NeedsRevision, Proposed)
+                        | (NeedsRevision, Rejected)
+                        // Experiment / WARP validation.
+                        | (Approved, Testing)
+                        | (Approved, Rejected)
+                        | (Testing, Validated)
+                        | (Testing, Rejected)
+                        | (Testing, NeedsRevision)
+                        // Validated → promote directly (low tier) or via shadow/canary.
+                        | (Validated, Shadow)
+                        | (Validated, Promoted)
+                        | (Validated, Rejected)
+                        | (Shadow, Canary)
+                        | (Shadow, Promoted)
+                        | (Shadow, Rejected)
+                        | (Shadow, NeedsRevision)
+                        | (Canary, Promoted)
+                        | (Canary, RolledBack)
+                        | (Canary, Rejected)
+                        // Post-promotion.
+                        | (Promoted, RolledBack)
+                        | (Promoted, Deprecated)
+                        | (RolledBack, Deprecated)
+                        // Legacy compatibility (pre-v2 flow).
+                        | (Approved, Applied)
+                        | (Testing, Applied)
+                        | (Applied, RolledBack)
+                        | (Applied, Deprecated)
                 );
                 if !allowed {
                     return Err(NexusError::PolicyDenied(format!(
                         "invalid improvement transition {:?} -> {next:?}",
                         proposal.status
                     )));
+                }
+                if next == ImprovementStatus::Promoted {
+                    if proposal.risk_tier == RiskTier::Prohibited {
+                        return Err(NexusError::PolicyDenied(
+                            "prohibited improvements can never be promoted".into(),
+                        ));
+                    }
+                    if proposal.risk_tier >= RiskTier::Moderate
+                        && !matches!(proposal.status, Shadow | Canary)
+                    {
+                        return Err(NexusError::PolicyDenied(format!(
+                            "{:?} improvements require shadow/canary validation before promotion",
+                            proposal.risk_tier
+                        )));
+                    }
+                    if proposal.risk_tier >= RiskTier::High && proposal.reviewed_at.is_none() {
+                        return Err(NexusError::PolicyDenied(
+                            "high-risk improvements require explicit review before promotion"
+                                .into(),
+                        ));
+                    }
                 }
                 let now = crate::now_rfc3339();
                 proposal.status = next;
@@ -4274,6 +4692,198 @@ mod tests {
         HarnessRepository::new(Store::open_in_memory().expect("in-memory store"))
     }
 
+    /// The card has to answer "what should I call you" in the field the prompt
+    /// leads with, not only as a row in a list of facts.
+    ///
+    /// It did not: the name became an `identity.name` fact and `preferred_name`
+    /// stayed null, so the profile section handed to the model said
+    /// `"preferred_name": null` about someone who had introduced himself by
+    /// name in his first message.
+    #[test]
+    fn introducing_yourself_fills_in_what_you_are_called() {
+        let repository = repository();
+        let sans = match repository
+            .resolve_explicit_identity(None, "Sans", Some("turn_1"))
+            .expect("resolve")
+        {
+            IdentityResolution::Created(profile) => profile,
+            other => panic!("expected creation, got {other:?}"),
+        };
+        assert_eq!(sans.preferred_name.as_deref(), Some("Sans"));
+        assert_eq!(
+            repository
+                .profile(&sans.id)
+                .expect("reload")
+                .preferred_name
+                .as_deref(),
+            Some("Sans"),
+            "the name must survive the round trip, not just the return value",
+        );
+    }
+
+    /// A card created before this existed still has a null `preferred_name`.
+    /// The next mention fills it in, so the fix reaches existing operators
+    /// without rewriting anyone's stored data.
+    #[test]
+    fn an_older_card_adopts_the_name_on_the_next_mention() {
+        let repository = repository();
+        let mut existing = UserProfile::new("Sans").expect("profile");
+        existing.preferred_name = None;
+        repository.create_profile(&existing).expect("save");
+
+        repository
+            .resolve_explicit_identity(Some(&existing.id), "Sans", Some("turn_2"))
+            .expect("resolve");
+        assert_eq!(
+            repository
+                .profile(&existing.id)
+                .expect("reload")
+                .preferred_name
+                .as_deref(),
+            Some("Sans")
+        );
+    }
+
+    /// Found on a live card, not here: three identical `identity.name` rows,
+    /// one per session in which the operator had said "my name is Sans".
+    ///
+    /// `record_profile_fact` deduplicates, but the identity path wrote straight
+    /// to the insert and never consulted it — so the one sentence people
+    /// actually repeat was the one sentence that accumulated. Saying your name
+    /// again is not new information.
+    #[test]
+    fn saying_your_name_again_does_not_add_another_row() {
+        let repository = repository();
+        let profile = match repository
+            .resolve_explicit_identity(None, "Sans", Some("turn_1"))
+            .expect("resolve")
+        {
+            IdentityResolution::Created(profile) => profile,
+            other => panic!("expected a new card, got {other:?}"),
+        };
+
+        for turn in ["turn_2", "turn_3"] {
+            repository
+                .resolve_explicit_identity(Some(&profile.id), "Sans", Some(turn))
+                .expect("resolve");
+        }
+
+        let names: Vec<_> = repository
+            .profile_facts(&profile.id, false)
+            .expect("facts")
+            .into_iter()
+            .filter(|fact| fact.key == "identity.name")
+            .collect();
+        assert_eq!(names.len(), 1, "one name, one row — got {names:#?}",);
+        assert_eq!(names[0].status, ProfileFactStatus::Active);
+    }
+
+    /// A name the operator chose is theirs. A passing self-introduction fills a
+    /// gap; it does not overrule a decision already made.
+    #[test]
+    fn a_chosen_name_is_not_overwritten_by_a_self_introduction() {
+        let repository = repository();
+        let mut existing = UserProfile::new("Sans").expect("profile");
+        existing.preferred_name = Some("Boss".into());
+        repository.create_profile(&existing).expect("save");
+
+        repository
+            .resolve_explicit_identity(Some(&existing.id), "Sans", Some("turn_2"))
+            .expect("resolve");
+        assert_eq!(
+            repository
+                .profile(&existing.id)
+                .expect("reload")
+                .preferred_name
+                .as_deref(),
+            Some("Boss")
+        );
+    }
+
+    /// Saying the same thing twice is not new information, and a card that
+    /// grows a duplicate row every time the operator repeats themselves has
+    /// stopped being a profile.
+    #[test]
+    fn recording_the_same_fact_twice_changes_nothing() {
+        let repository = repository();
+        let profile = UserProfile::new("Sans").expect("profile");
+        repository.create_profile(&profile).expect("save");
+
+        let first = ProfileFact::explicit(&profile.id, "identity.timezone", "GMT+7".into());
+        assert!(matches!(
+            repository.record_profile_fact(&first).expect("first"),
+            FactOutcome::Created { .. }
+        ));
+
+        // Same value, different casing and padding: still the same answer.
+        let again = ProfileFact::explicit(&profile.id, "identity.timezone", " gmt+7 ".into());
+        assert!(matches!(
+            repository.record_profile_fact(&again).expect("again"),
+            FactOutcome::Unchanged { .. }
+        ));
+        assert_eq!(
+            repository
+                .profile_facts(&profile.id, true)
+                .expect("facts")
+                .len(),
+            1,
+        );
+    }
+
+    /// A changed answer replaces the old one and keeps it. Two live facts for
+    /// one question is a card that contradicts itself; deleting the old one is
+    /// a card with no history.
+    #[test]
+    fn a_changed_fact_supersedes_the_old_one_without_losing_it() {
+        let repository = repository();
+        let profile = UserProfile::new("Sans").expect("profile");
+        repository.create_profile(&profile).expect("save");
+
+        let first = ProfileFact::explicit(&profile.id, "identity.timezone", "GMT+7".into());
+        repository.record_profile_fact(&first).expect("first");
+        let second = ProfileFact::explicit(&profile.id, "identity.timezone", "GMT+2".into());
+        let outcome = repository.record_profile_fact(&second).expect("second");
+        assert!(matches!(outcome, FactOutcome::Updated { .. }));
+
+        let live = repository.profile_facts(&profile.id, false).expect("live");
+        assert_eq!(live.len(), 1, "one question, one live answer");
+        assert_eq!(live[0].value, Value::String("GMT+2".into()));
+
+        let all = repository.profile_facts(&profile.id, true).expect("all");
+        let superseded = all
+            .iter()
+            .find(|fact| fact.status == ProfileFactStatus::Superseded)
+            .expect("the previous value is kept");
+        assert_eq!(superseded.value, Value::String("GMT+7".into()));
+        assert_eq!(
+            superseded.superseded_by.as_deref(),
+            Some(second.id.as_str())
+        );
+    }
+
+    /// Different questions do not supersede each other.
+    #[test]
+    fn a_fact_only_supersedes_the_same_key() {
+        let repository = repository();
+        let profile = UserProfile::new("Sans").expect("profile");
+        repository.create_profile(&profile).expect("save");
+
+        for (key, value) in [
+            ("identity.timezone", "GMT+7"),
+            ("identity.language", "Indonesian"),
+        ] {
+            let fact = ProfileFact::explicit(&profile.id, key, value.into());
+            repository.record_profile_fact(&fact).expect("record");
+        }
+        assert_eq!(
+            repository
+                .profile_facts(&profile.id, false)
+                .expect("live")
+                .len(),
+            2,
+        );
+    }
+
     #[test]
     fn explicit_identity_creates_profile_and_conflict_never_overwrites_active_person() {
         let repository = repository();
@@ -4368,6 +4978,7 @@ mod tests {
             created_at: now.clone(),
             updated_at: now,
             expires_at: None,
+            superseded_by: None,
         };
         repository.add_profile_fact(&fact).expect("save fact");
 
@@ -4751,6 +5362,58 @@ mod tests {
     }
 
     #[test]
+    fn governed_candidate_walks_the_full_rsi_state_machine() {
+        let repository = repository();
+        let mut proposal = ImprovementProposal::new(
+            ImprovementCategory::Context,
+            "Duplicate repository retrieval during planning",
+            "Add a cache-invalidation policy to the context router",
+        )
+        .expect("proposal");
+        // Typed RSI fields default conservatively for un-annotated candidates.
+        assert_eq!(proposal.target, ImprovementTarget::HarnessComponent);
+        assert_eq!(proposal.risk_tier, RiskTier::High);
+        proposal.target = ImprovementTarget::ContextRouter;
+        proposal.risk_tier = RiskTier::Moderate;
+        proposal.created_by = "improvement_planner".into();
+        proposal.status = ImprovementStatus::Observed;
+        repository.save_improvement(&proposal).expect("save");
+
+        // The moderate-tier path must pass through shadow before promotion.
+        for status in [
+            ImprovementStatus::Draft,
+            ImprovementStatus::Proposed,
+            ImprovementStatus::Approved,
+            ImprovementStatus::Testing,
+            ImprovementStatus::Validated,
+            ImprovementStatus::Shadow,
+            ImprovementStatus::Canary,
+            ImprovementStatus::Promoted,
+        ] {
+            repository
+                .transition_improvement(&proposal.id, status)
+                .expect("valid transition");
+        }
+        // Validated cannot leap straight to Canary (must shadow first, already past).
+        assert!(repository
+            .transition_improvement(&proposal.id, ImprovementStatus::Validated)
+            .is_err());
+
+        // Typed fields survive the JSON payload round-trip.
+        let loaded = repository.improvement(&proposal.id).expect("load");
+        assert_eq!(loaded.status, ImprovementStatus::Promoted);
+        assert_eq!(loaded.target, ImprovementTarget::ContextRouter);
+        assert_eq!(loaded.target.plane(), ImprovementPlane::Data);
+        assert_eq!(loaded.risk_tier, RiskTier::Moderate);
+        assert_eq!(loaded.created_by, "improvement_planner");
+        assert_eq!(
+            ImprovementTarget::HarnessComponent.plane(),
+            ImprovementPlane::Code
+        );
+        assert!(RiskTier::Prohibited > RiskTier::High);
+    }
+
+    #[test]
     fn canonical_text_writes_reject_secrets_without_persisting_or_echoing_them() {
         let repository = repository();
         let secret = "sk-abcdefghijklmnopqrstuvwx";
@@ -4955,5 +5618,107 @@ mod tests {
             repository.claim_resource(&ghost).is_err(),
             "claims from unknown task ids are rejected"
         );
+    }
+    /// A row written before schema v2 has none of the RSI fields. It must still
+    /// load — and it must land on the *conservative* defaults, not the
+    /// permissive ones: an un-annotated candidate is code-plane and tier 3, so
+    /// an upgrade can never turn old rows into auto-promotable ones.
+    #[test]
+    fn a_pre_v2_proposal_row_loads_with_conservative_defaults() {
+        let repository = repository();
+        let legacy = serde_json::json!({
+            "id": "imp_legacy",
+            "category": "tool",
+            "problem": "repeated failures",
+            "evidence": [],
+            "proposed_change": "retry with backoff",
+            "expected_benefit": "fewer failures",
+            "risks": [],
+            "required_permissions": [],
+            "validation_plan": [],
+            "rollback_plan": [],
+            "status": "proposed",
+            "approval_required": true,
+            "measurements": {},
+            "schema_version": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "reviewed_at": null
+        })
+        .to_string();
+        repository
+            .store
+            .with(|conn| {
+                conn.execute(
+                    "INSERT INTO harness_improvement_proposals
+                     (id,category,status,approval_required,schema_version,payload_json,
+                      created_at,updated_at,reviewed_at)
+                     VALUES ('imp_legacy','tool','proposed',1,1,?1,
+                             '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',NULL)",
+                    params![legacy],
+                )?;
+                Ok(())
+            })
+            .expect("insert legacy row");
+
+        let loaded = repository.improvement("imp_legacy").expect("load legacy");
+        assert_eq!(loaded.target, ImprovementTarget::HarnessComponent);
+        assert_eq!(loaded.target.plane(), ImprovementPlane::Code);
+        assert_eq!(loaded.risk_tier, RiskTier::High);
+        assert!(loaded.success_metrics.is_empty());
+        assert!(loaded.created_by.is_empty());
+        assert!(loaded.affected_components.is_empty());
+    }
+
+    /// Same direction for events: an old row has no severity, and absent
+    /// severity means `info` rather than a missing field or a panic.
+    #[test]
+    fn a_pre_v2_event_row_loads_with_default_severity() {
+        let legacy = serde_json::json!({
+            "id": "evt_legacy",
+            "event_type": "turn.completed",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "session_id": "sess_1",
+            "profile_id": null,
+            "goal_id": null,
+            "plan_id": null,
+            "task_id": null,
+            "agent_id": null,
+            "subagent_id": null,
+            "run_id": null,
+            "summary": "turn finished",
+            "metadata": {},
+            "sensitivity": "normal",
+            "schema_version": 1
+        })
+        .to_string();
+        let event: HarnessEvent = serde_json::from_str(&legacy).expect("decode legacy event");
+        assert_eq!(event.severity, "info");
+        assert!(event.provider.is_none());
+        assert!(event.candidate_id.is_none());
+    }
+    /// The downgrade direction: a payload written by 2.11.0 must still decode
+    /// under an older binary's narrower struct. `ImprovementProposal` therefore
+    /// must not be `deny_unknown_fields` — this test is what keeps that true.
+    #[test]
+    fn a_v2_payload_still_decodes_under_a_pre_v2_struct() {
+        #[derive(serde::Deserialize)]
+        struct LegacyProposal {
+            id: String,
+            status: ImprovementStatus,
+            problem: String,
+        }
+
+        let mut proposal = ImprovementProposal::new(ImprovementCategory::Tool, "problem", "change")
+            .expect("proposal");
+        proposal.target = ImprovementTarget::ToolRouter;
+        proposal.risk_tier = RiskTier::Moderate;
+        proposal.created_by = "improvement_planner".into();
+        let payload = serde_json::to_string(&proposal).expect("encode");
+
+        let legacy: LegacyProposal = serde_json::from_str(&payload).expect("old binary decode");
+        assert_eq!(legacy.id, proposal.id);
+        assert_eq!(legacy.status, ImprovementStatus::Draft);
+        assert_eq!(legacy.problem, "problem");
     }
 }

@@ -57,6 +57,44 @@ snx profile add validation "run targeted tests before the full suite"
 snx profile list --all
 ```
 
+### Profile cards
+
+A profile card is who SNX is talking to: a preferred name and a set of facts
+with provenance, confidence, sensitivity, and review state. One card is active
+per workspace, and a workspace that has never chosen one inherits your most
+recent card rather than starting again as a stranger. An explicit choice is
+never overwritten.
+
+Cards fill in two ways, and both are visible in `/profile`.
+
+**You say something durable.** A deterministic pre-turn pass reads named
+wordings — `my name is …`, `call me …`, `I work as …`, `my timezone is …`,
+`reply in …`, `I prefer …`, `I use …` — and records what they state. There is no
+model call and no per-message classification: a wording that is not one of these
+records nothing. Statements about right now (`I'm tired`), about other people
+(`his name is …`), inside quotes or fences, or too long to be a fact are refused.
+
+**The agent records it.** `profile.add_fact` lets an agent write down what you
+told it in a wording the pass does not cover. It is documented as being for
+what you *stated*, not what the agent inferred about you.
+
+Either way: repeating yourself changes nothing rather than adding a duplicate,
+and a changed value supersedes the previous one without discarding it — the old
+fact stays on the card, marked superseded.
+
+**What is never stored.** Passwords, API keys, tokens, private keys, auth
+cookies, passphrases, payment-card numbers, and recovery codes are refused
+outright and redacted from logs — the value is not held for review, it is not
+held at all. Sensitive categories — health, religion, race or ethnicity,
+political affiliation, sexuality, a precise home address, criminal history,
+financial account data — are recorded as candidates and are *not in use* until
+you approve them in `/profile`, which says so on the row.
+
+Reading the card needs no permission; every role can. Writing it is gated on
+the `profile.write` capability, which roles that work from external material —
+the researcher and the read-only audit roles — do not hold, so nothing SNX finds
+elsewhere can be filed as something you said.
+
 ## Skills
 
 A skill (`nexus-skills`) is a **declarative workflow description**, never hidden

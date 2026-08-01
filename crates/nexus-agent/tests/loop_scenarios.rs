@@ -130,6 +130,7 @@ fn runtime_with_manager(
         config: config.clone(),
         store: store.clone(),
         session: None,
+        profile: None,
         authorization: nexus_tools::ExecutionAuthorization::default(),
     };
     let sessions = SessionStore::new(store.clone());
@@ -159,6 +160,11 @@ fn runtime_with_manager(
         thinking: nexus_core::thinking::ThinkingMode::Auto,
         deep_planning: true,
         plan_mode: false,
+        // Narration is presentation: these scenarios assert loop behavior, so
+        // they run on the shipped default and must be unaffected by it.
+        narration: nexus_core::timeline::NarrationMode::default(),
+        narration_max_steps: 5,
+        narration_refine: false,
     };
     (runtime, session_id)
 }
@@ -1614,5 +1620,335 @@ fn every_stop_reason_classifies_and_nothing_incomplete_reads_as_success() {
         if reason != "finished" {
             assert!(!outcome.is_success(), "{reason} reported as success");
         }
+    }
+}
+
+/// Run one scripted turn in a given narration mode and return its loop events.
+///
+/// The scenarios below assert what the *operator* ends up reading, which is the
+/// one thing unit tests of the translation layer cannot check: they can prove a
+/// sentence is clean, not that the sentence is the one the loop actually
+/// produced for a real tool, a real failure, and a real refusal.
+async fn narrated_turn(
+    mode: nexus_core::timeline::NarrationMode,
+    script: Vec<MockScript>,
+    objective: &str,
+) -> Vec<LoopEvent> {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("hello.txt"), "world").expect("write");
+    let (mut runtime, session) = runtime_with(script, dir.path());
+    runtime.narration = mode;
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+    AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .with_events(events_tx)
+        .run(&session, objective, Arc::new(AutoApprove))
+        .await
+        .expect("run");
+    let mut events = Vec::new();
+    while let Ok(event) = events_rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+/// A turn that reads a file, fails a read, and finishes.
+fn three_tool_script() -> Vec<MockScript> {
+    vec![
+        MockScript::ToolCall {
+            name: "fs.read_file".into(),
+            arguments: json!({"path": "hello.txt"}).to_string(),
+        },
+        MockScript::ToolCall {
+            name: "fs.read_file".into(),
+            arguments: json!({"path": "does-not-exist.txt"}).to_string(),
+        },
+        MockScript::ToolCall {
+            name: "fs.create_file".into(),
+            arguments: json!({"path": "out.txt", "content": "done\n", "overwrite": true})
+                .to_string(),
+        },
+        MockScript::Text("Wrote out.txt.".into()),
+    ]
+}
+
+fn narration_texts(events: &[LoopEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            LoopEvent::AgentActivity { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **The layer boundary, end to end.** The unit tests prove `present()` never
+/// writes a tool name; this proves the loop never routes around it.
+#[tokio::test]
+async fn no_tool_name_reaches_the_narration_of_a_real_turn() {
+    let registry = ToolRegistry::with_builtins();
+    let names = registry.names();
+    for mode in [
+        nexus_core::timeline::NarrationMode::Off,
+        nexus_core::timeline::NarrationMode::Compact,
+        nexus_core::timeline::NarrationMode::Auto,
+        nexus_core::timeline::NarrationMode::Verbose,
+    ] {
+        let events = narrated_turn(
+            mode,
+            three_tool_script(),
+            "update out.txt from hello.txt and verify the result",
+        )
+        .await;
+        for text in narration_texts(&events) {
+            for name in &names {
+                assert!(
+                    !text.contains(name.as_str()),
+                    "{mode:?} leaked `{name}`: {text}"
+                );
+            }
+        }
+        for event in &events {
+            if let LoopEvent::IntentPlanned { steps, .. } = event {
+                for step in steps {
+                    for name in &names {
+                        assert!(
+                            !step.contains(name.as_str()),
+                            "intent leaked `{name}`: {step}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `off` is the rollback path: no intent, and nothing the narration layer
+/// would have added. The tool rows the timeline stores are untouched.
+#[tokio::test]
+async fn narration_off_emits_no_intent_and_no_milestones() {
+    let events = narrated_turn(
+        nexus_core::timeline::NarrationMode::Off,
+        three_tool_script(),
+        "update out.txt from hello.txt and verify the result",
+    )
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, LoopEvent::IntentPlanned { .. })),
+        "off emitted an intent plan"
+    );
+    // The failure milestone is the loudest thing narration adds; in `off` the
+    // operator reads the raw tool row instead, which is exactly the pre-2.11.0
+    // timeline.
+    assert!(
+        !narration_texts(&events)
+            .iter()
+            .any(|text| text.contains("failed")),
+        "off narrated a failure milestone"
+    );
+    // The tool calls still happened and are still recorded as tool events.
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, LoopEvent::ToolExecutionFinished { .. })));
+}
+
+/// A task-shaped turn opens with an intention: 2–5 steps, stated once, and
+/// never ticked off from the plan alone.
+#[tokio::test]
+async fn a_task_turn_opens_with_two_to_five_steps_stated_once() {
+    let events = narrated_turn(
+        nexus_core::timeline::NarrationMode::Auto,
+        three_tool_script(),
+        "update out.txt from hello.txt and verify the result",
+    )
+    .await;
+    let plans: Vec<&Vec<String>> = events
+        .iter()
+        .filter_map(|event| match event {
+            LoopEvent::IntentPlanned { steps, .. } => Some(steps),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(plans.len(), 1, "the intent is stated exactly once");
+    assert!(
+        (2..=5).contains(&plans[0].len()),
+        "plan was {} steps: {:?}",
+        plans[0].len(),
+        plans[0]
+    );
+    // The skeleton is the source of truth and the refinement pass is off in
+    // these scenarios, so the turn must not claim model-authored wording.
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, LoopEvent::IntentPlanned { refined, .. } if !refined)));
+}
+
+/// A greeting is not a task: no intent, no milestones, in the default mode.
+#[tokio::test]
+async fn a_greeting_gets_no_intent_and_no_milestones() {
+    let events = narrated_turn(
+        nexus_core::timeline::NarrationMode::Auto,
+        vec![MockScript::Text("Hello.".into())],
+        "hi",
+    )
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, LoopEvent::IntentPlanned { .. })),
+        "a greeting was given a plan"
+    );
+}
+
+/// The failure is the line the operator needs, and every narrating mode says
+/// it — a quieter mode lowers the noise floor, never the alarm.
+#[tokio::test]
+async fn a_failure_is_narrated_in_every_mode_that_narrates() {
+    for mode in [
+        nexus_core::timeline::NarrationMode::Compact,
+        nexus_core::timeline::NarrationMode::Auto,
+        nexus_core::timeline::NarrationMode::Verbose,
+    ] {
+        let events = narrated_turn(
+            mode,
+            three_tool_script(),
+            "update out.txt from hello.txt and verify the result",
+        )
+        .await;
+        assert!(
+            narration_texts(&events)
+                .iter()
+                .any(|text| text.contains("failed")),
+            "{mode:?} swallowed the failure"
+        );
+    }
+}
+
+/// `compact` promises failures, approvals, and check results — and approvals
+/// were the half that never arrived: the fact existed and was unit-tested, but
+/// nothing in the loop ever constructed one, so the quietest narrating mode
+/// was quieter than documented.
+#[tokio::test]
+async fn compact_narrates_the_approval_it_promises() {
+    let events = narrated_turn(
+        nexus_core::timeline::NarrationMode::Compact,
+        three_tool_script(),
+        "update out.txt from hello.txt and verify the result",
+    )
+    .await;
+    let texts = narration_texts(&events);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, LoopEvent::ApprovalRequested { .. })),
+        "the scenario did not actually reach an approval: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("approved")),
+        "compact swallowed the approval: {texts:?}"
+    );
+}
+
+/// **Every function call in the persisted history has an answer.**
+///
+/// The bug this pins wedged a session permanently. A tool refused by policy
+/// ended the turn with an early `return`, *after* the assistant message
+/// carrying the `function_call` had already been persisted — so the stored
+/// conversation held a call with no `function_call_output`. Providers that
+/// speak the Responses API validate that pairing, so every subsequent turn came
+/// back `HTTP 400 … No tool output found for function call call_…` and no
+/// amount of retrying could clear it: the session was dead.
+///
+/// The refusal itself is correct and stays. What must also happen is that the
+/// call is answered before the turn ends.
+#[tokio::test]
+async fn a_policy_refusal_still_answers_the_function_call() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(dir.path().join("victim.txt"), "data").expect("write");
+    let (runtime, session) = runtime_with(
+        vec![MockScript::ToolCall {
+            name: "fs.delete".into(),
+            arguments: json!({"path": "victim.txt"}).to_string(),
+        }],
+        dir.path(),
+    );
+    let sessions = runtime.sessions.clone();
+    let outcome = AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .run(&session, "delete victim.txt", Arc::new(AutoDeny))
+        .await
+        .expect("run");
+    assert_eq!(outcome.stopped_reason, "policy_stop");
+    assert!(
+        dir.path().join("victim.txt").exists(),
+        "deletion was denied"
+    );
+
+    let messages = sessions.messages(session.as_str()).expect("messages");
+    let calls: Vec<&str> = messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .map(|call| call.id.as_str())
+        .collect();
+    assert!(!calls.is_empty(), "the scenario made no tool call");
+    for id in &calls {
+        assert!(
+            messages.iter().any(|message| {
+                message.role == nexus_models::types::Role::Tool
+                    && message.tool_call_id.as_deref() == Some(*id)
+            }),
+            "no tool result for `{id}` — this history would 400 on the next turn: {messages:#?}"
+        );
+    }
+    // And the refusal is stated to the model, not silently dropped.
+    assert!(
+        messages.iter().any(|message| {
+            message.role == nexus_models::types::Role::Tool && message.content.contains("ERROR:")
+        }),
+        "the refusal never reached the transcript"
+    );
+}
+
+/// The same invariant for the other early exits: a repeated malformed call and
+/// an exhausted failure budget both end the turn after a tool call.
+#[tokio::test]
+async fn every_early_stop_leaves_a_well_formed_history() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (runtime, session) = runtime_with(
+        vec![
+            MockScript::ToolCall {
+                name: "fs.read_file".into(),
+                arguments: json!({"nope": 1}).to_string(),
+            },
+            MockScript::ToolCall {
+                name: "fs.read_file".into(),
+                arguments: json!({"nope": 2}).to_string(),
+            },
+            MockScript::ToolCall {
+                name: "fs.read_file".into(),
+                arguments: json!({"nope": 3}).to_string(),
+            },
+            MockScript::Text("done".into()),
+        ],
+        dir.path(),
+    );
+    let sessions = runtime.sessions.clone();
+    let _ = AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .run(&session, "read something", Arc::new(AutoApprove))
+        .await
+        .expect("run");
+    let messages = sessions.messages(session.as_str()).expect("messages");
+    for call in messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+    {
+        assert!(
+            messages.iter().any(|message| {
+                message.role == nexus_models::types::Role::Tool
+                    && message.tool_call_id.as_deref() == Some(call.id.as_str())
+            }),
+            "unanswered call `{}`: {messages:#?}",
+            call.id
+        );
     }
 }

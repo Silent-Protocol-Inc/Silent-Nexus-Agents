@@ -34,22 +34,6 @@ pub enum ThinkingState {
 }
 
 impl ThinkingState {
-    /// Heading text.
-    ///
-    /// `Understanding` and `Finalizing` deliberately collapse onto the shipped
-    /// `PROCESSING` label: the six strings this can return are exactly the six
-    /// that 2.3.0 returned, so adding phases changed no existing output.
-    pub fn title(&self) -> &'static str {
-        match self {
-            ThinkingState::Waiting => "WAITING",
-            ThinkingState::Searching => "SEARCHING",
-            ThinkingState::Executing => "EXECUTING",
-            ThinkingState::Verifying => "VERIFYING",
-            ThinkingState::Planning => "PLANNING",
-            ThinkingState::Understanding | ThinkingState::Finalizing => "PROCESSING",
-        }
-    }
-
     /// Action-oriented fallback used when no richer structured detail exists.
     pub fn summary(&self) -> &'static str {
         match self {
@@ -63,10 +47,23 @@ impl ThinkingState {
         }
     }
 
-    /// Waiting is the one phase that wants the operator's attention, so it is
-    /// the one phase that colors its heading differently.
-    pub fn is_blocked(&self) -> bool {
-        matches!(self, ThinkingState::Waiting)
+    /// The design-language action state this phase maps onto.
+    ///
+    /// `waiting_on_operator` splits the one phase that is ambiguous: "waiting
+    /// on you" and "waiting on them" are different situations for the operator,
+    /// and only the caller knows which one this is.
+    pub fn action_state(&self, waiting_on_operator: bool) -> nexus_core::brand::ActionState {
+        use nexus_core::brand::ActionState;
+        match self {
+            ThinkingState::Understanding => ActionState::TracingIntent,
+            ThinkingState::Planning => ActionState::ShapingApproach,
+            ThinkingState::Searching => ActionState::Scanning,
+            ThinkingState::Executing => ActionState::Applying,
+            ThinkingState::Verifying => ActionState::RunningChecks,
+            ThinkingState::Waiting if waiting_on_operator => ActionState::WaitingOnYou,
+            ThinkingState::Waiting => ActionState::WaitingOnProvider,
+            ThinkingState::Finalizing => ActionState::Composing,
+        }
     }
 }
 
@@ -268,17 +265,12 @@ fn provider_summary(st: &State) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The live vocabulary belongs to the design language, not to this module.
+    /// Two sets of words for the same states is how they drift apart, so this
+    /// replaces the old "headings stay within the shipped set" guard: the set
+    /// now lives in `nexus_core::brand::design`.
     #[test]
-    fn every_phase_title_is_one_of_the_shipped_labels() {
-        // The no-regression guard: adding phases must not add new headings.
-        let shipped = [
-            "WAITING",
-            "SEARCHING",
-            "EXECUTING",
-            "VERIFYING",
-            "PLANNING",
-            "PROCESSING",
-        ];
+    fn every_phase_maps_onto_an_action_state_with_a_verb() {
         for phase in [
             ThinkingState::Understanding,
             ThinkingState::Planning,
@@ -288,25 +280,26 @@ mod tests {
             ThinkingState::Verifying,
             ThinkingState::Finalizing,
         ] {
-            assert!(
-                shipped.contains(&phase.title()),
-                "{phase:?} introduced a new heading `{}`",
-                phase.title()
-            );
+            for waiting_on_operator in [true, false] {
+                let verb = phase.action_state(waiting_on_operator).verb();
+                assert!(!verb.is_empty(), "{phase:?} has no verb");
+            }
         }
     }
 
+    /// "Waiting on you" and "waiting on them" are different situations, and
+    /// only one of them is the operator's to act on.
     #[test]
-    fn new_phases_collapse_onto_processing() {
-        assert_eq!(ThinkingState::Understanding.title(), "PROCESSING");
-        assert_eq!(ThinkingState::Finalizing.title(), "PROCESSING");
-    }
-
-    #[test]
-    fn only_waiting_asks_for_the_operators_attention() {
-        // Phase precedence itself is asserted by the transition-table test in
-        // `state.rs`; here we only pin which phase is treated as blocked.
-        assert!(ThinkingState::Waiting.is_blocked());
+    fn waiting_splits_on_who_is_actually_blocking() {
+        use nexus_core::brand::ActionState;
+        assert_eq!(
+            ThinkingState::Waiting.action_state(true),
+            ActionState::WaitingOnYou
+        );
+        assert_eq!(
+            ThinkingState::Waiting.action_state(false),
+            ActionState::WaitingOnProvider
+        );
         for phase in [
             ThinkingState::Searching,
             ThinkingState::Executing,
@@ -315,7 +308,10 @@ mod tests {
             ThinkingState::Finalizing,
             ThinkingState::Understanding,
         ] {
-            assert!(!phase.is_blocked(), "{phase:?} must not be blocked");
+            assert!(
+                !phase.action_state(false).is_blocked_on_operator(),
+                "{phase:?} must not block on the operator"
+            );
         }
     }
 

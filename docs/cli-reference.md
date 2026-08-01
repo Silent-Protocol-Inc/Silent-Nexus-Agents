@@ -44,6 +44,18 @@ details. Global flags include `--json`, `--no-color`, `--inline`, and
 Generic terminal Git commit, push, remote, aliases, and unrecognized operations
 are denied; use the typed repository commands.
 
+## Presentation and self-improvement
+
+- `snx thinking on|off|auto|status`: how much deliberation is shown. `auto` is
+  the default and decides per turn.
+- `snx narrate off|compact|auto|verbose`: whether a turn opens with an intent
+  card and reports milestones as it works. Independent of `thinking`; see
+  [presentation.md](presentation.md).
+- `snx rsi status|candidates|show|observations|outcomes|promotions|rollbacks|governance`:
+  read-only views of governed self-improvement — what was proposed, what WARP
+  decided, what was promoted, and the compile-time ruleset. Nothing here
+  promotes a candidate; see [rsi.md](rsi.md).
+
 ## Diagnostics and maintenance
 
 - `snx about`: identity and embedded version/target/profile/commit/epoch.
@@ -54,9 +66,12 @@ are denied; use the typed repository commands.
 - `snx maintenance optimize [--vacuum]`: optimize/checkpoint, refusing active
   foreground/background work.
 - `snx audit [--kind KIND] [--limit N]`, `logs`: audit/log locations.
-- `snx config show|path|schema`: redacted effective config and schema. The TUI
-  `/config` hub writes typed workspace/global managed overrides and supports
-  explicit inheritance/reset; credentials remain in `/login` and `/connect`.
+- `snx config show|path|schema|budgets`: redacted effective config, file
+  locations, JSON schema, and the effective turn/token/cost/delegation budgets.
+- `snx config set <path> <value> [--workspace]`, `snx config reset <path>
+  [--workspace]`: write and drop typed managed overrides. The TUI `/config` hub
+  edits the same values interactively; credentials stay in `/login` and
+  `/connect`.
 - `snx completion <shell>`: generate shell completions.
 
 Maintenance commands never prune transcripts, tasks, plans, goals, memories, or

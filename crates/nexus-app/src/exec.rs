@@ -49,11 +49,14 @@ pub enum View {
     Profile,
     Tools,
     Memory,
+    Rsi,
     Skills,
     Mcp,
     Connector,
     Theme,
     Thinking,
+    Narrate,
+    Activity,
     Details,
     Transcript,
     Welcome,
@@ -98,6 +101,7 @@ fn bare_interactive_view(def: &registry::CommandDef) -> Option<View> {
         CommandId::Details => View::Details,
         CommandId::Transcript => View::Transcript,
         CommandId::Memory => View::Memory,
+        CommandId::Rsi => View::Rsi,
         CommandId::Connector => View::Connector,
         CommandId::Permissions => View::Permissions,
         CommandId::Sandbox => View::Sandbox,
@@ -106,6 +110,8 @@ fn bare_interactive_view(def: &registry::CommandDef) -> Option<View> {
         CommandId::Config => View::Config,
         CommandId::Theme => View::Theme,
         CommandId::Thinking => View::Thinking,
+        CommandId::Narrate => View::Narrate,
+        CommandId::View => View::Activity,
         _ => View::CommandMenu(def.name.to_string()),
     })
 }
@@ -321,6 +327,10 @@ pub enum Effect {
     SetTheme(String),
     /// Set the deliberation mode. Independent of [`Effect::SetActivityMode`].
     SetThinking(nexus_core::ThinkingMode),
+    /// Set how much the agent narrates. A third axis: independent of both
+    /// [`Effect::SetThinking`] (how much it deliberates) and
+    /// [`Effect::SetActivityMode`] (which stored events render).
+    SetNarration(nexus_core::timeline::NarrationMode),
     /// Enter or leave plan mode. The flag is already persisted to UI state by
     /// the time this is emitted; the TUI reflects it and the next turn reads
     /// it back when the runtime is built.
@@ -1045,7 +1055,8 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                     app.update_ui_state(|s| s.activity_mode = mode.as_str().into())?;
                     Effect::SetActivityMode(mode)
                 }
-                None => Effect::Report(
+                None => view_or(
+                    View::Activity,
                     Report::new("view")
                         .field("mode", current(app).as_str())
                         .line("default — essential activity only")
@@ -1141,6 +1152,18 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             ["reject", id] => Effect::Report(services::rsi_review(app, id, false)?),
             ["apply", id] => Effect::Report(services::improve_set_applied(app, id, true)?),
             ["rollback", id] => Effect::Report(services::improve_set_applied(app, id, false)?),
+            _ => usage(def),
+        },
+        CommandId::Rsi => match args.as_slice() {
+            [] => view_or(View::Rsi, crate::rsi::status_report(app)?),
+            ["status"] => Effect::Report(crate::rsi::status_report(app)?),
+            ["candidates"] | ["list"] => Effect::Report(crate::rsi::candidates_report(app)?),
+            ["show", id] => Effect::Report(crate::rsi::candidate_show_report(app, id)?),
+            ["observations"] => Effect::Report(crate::rsi::observations_report(app)?),
+            ["outcomes"] => Effect::Report(crate::rsi::outcomes_report(app)?),
+            ["promotions"] => Effect::Report(crate::rsi::promotions_report(app)?),
+            ["rollbacks"] => Effect::Report(crate::rsi::rollbacks_report(app)?),
+            ["governance"] => Effect::Report(crate::rsi::governance_report()),
             _ => usage(def),
         },
         CommandId::Skills => match args.as_slice() {
@@ -1385,6 +1408,23 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                 Err(_) => usage(def),
             },
             None => view_or(View::Thinking, services::thinking_report(app)),
+        },
+
+        CommandId::Narrate => match args.first().copied() {
+            Some("status") => Effect::Report(services::narration_report(app)),
+            Some("cycle") | Some("next") => {
+                let next = app.narration_mode().cycle();
+                services::set_narration(app, next)?;
+                Effect::SetNarration(next)
+            }
+            Some(word) => match nexus_core::timeline::NarrationMode::parse(word) {
+                Some(mode) => {
+                    services::set_narration(app, mode)?;
+                    Effect::SetNarration(mode)
+                }
+                None => usage(def),
+            },
+            None => view_or(View::Narrate, services::narration_report(app)),
         },
 
         CommandId::Btw => {

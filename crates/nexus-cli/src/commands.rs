@@ -63,7 +63,7 @@ fn confirm(ui: &Ui, prompt: &str, pre_authorized: bool) -> Result<bool> {
 
 // ----------------------------------------------------------------------- run
 
-pub async fn run(app: &App, args: RunArgs, json: bool) -> Result<()> {
+pub async fn run(app: &Arc<App>, args: RunArgs, json: bool) -> Result<()> {
     let ui = ui(app);
     let objective = args.objective.join(" ");
     if objective.trim().is_empty() {
@@ -96,7 +96,7 @@ pub async fn run(app: &App, args: RunArgs, json: bool) -> Result<()> {
         .resolve_agent(&role_name)
         .map_err(|_| anyhow!("unknown agent role `{role_name}`"))?;
 
-    let runtime = app.runtime(Some(session_id.clone()))?;
+    let runtime = app.with_profile_tools(app.runtime(Some(session_id.clone()))?);
 
     // Stream loop events to the terminal unless emitting JSON.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();
@@ -201,6 +201,22 @@ fn print_event(ui: &Ui, ev: &LoopEvent) {
         // transitions as they happen instead, so echoing the whole list here
         // would say the same thing twice.
         LoopEvent::WorkPlanned { .. } => {}
+        // What the turn intends to do, before it does anything. Printed once,
+        // as an intention — no step is ever ticked off here.
+        LoopEvent::IntentPlanned { steps, .. } => {
+            let skin = nexus_core::brand::Skin::nexus();
+            println!(
+                "{}",
+                ui.dim(&format!(
+                    "{} intent · {} steps",
+                    skin.icon(nexus_core::brand::ActionState::ShapingApproach),
+                    steps.len()
+                ))
+            );
+            for (index, step) in steps.iter().enumerate() {
+                println!("{}", ui.dim(&format!("    {}. {step}", index + 1)));
+            }
+        }
         LoopEvent::AgentActivity {
             role,
             step,
@@ -727,6 +743,24 @@ pub async fn theme(app: &App, name: Option<String>) -> Result<()> {
 
 // ------------------------------------------------------------------ thinking
 
+/// How much the agent says about its own work. A different axis from
+/// `snx thinking` (how much it deliberates) and from `/view` (which stored
+/// events render), so the report names all three.
+pub async fn narrate(app: &App, mode: Option<String>) -> Result<()> {
+    let ui = ui(app);
+    match mode.as_deref() {
+        None | Some("status") => ui.render_report(&nexus_app::services::narration_report(app)),
+        Some(word) => {
+            let mode = nexus_core::timeline::NarrationMode::parse(word).ok_or_else(|| {
+                anyhow!("unknown mode `{word}` — one of: off, compact, auto, verbose")
+            })?;
+            nexus_app::services::set_narration(app, mode)?;
+            ui.ok(&format!("narration set to `{}`", mode.as_str()));
+        }
+    }
+    Ok(())
+}
+
 pub async fn thinking(app: &App, mode: Option<String>) -> Result<()> {
     let ui = ui(app);
     match mode.as_deref() {
@@ -1015,6 +1049,26 @@ pub async fn profile(app: &App, cmd: ProfileCmd, json: bool) -> Result<()> {
             ui.render_report(&services::rsi_review(app, &id, false)?)
         }
     }
+    Ok(())
+}
+
+// ----------------------------------------------------------------------- rsi
+
+/// Read-only views of the governed self-improvement loop. State changes go
+/// through the WARP pipeline and the promotion gate, never through this command.
+pub async fn rsi(app: &App, cmd: RsiCmd) -> Result<()> {
+    let ui = ui(app);
+    let report = match cmd {
+        RsiCmd::Status => nexus_app::rsi::status_report(app)?,
+        RsiCmd::Candidates => nexus_app::rsi::candidates_report(app)?,
+        RsiCmd::Show { id } => nexus_app::rsi::candidate_show_report(app, &id)?,
+        RsiCmd::Observations => nexus_app::rsi::observations_report(app)?,
+        RsiCmd::Outcomes => nexus_app::rsi::outcomes_report(app)?,
+        RsiCmd::Promotions => nexus_app::rsi::promotions_report(app)?,
+        RsiCmd::Rollbacks => nexus_app::rsi::rollbacks_report(app)?,
+        RsiCmd::Governance => nexus_app::rsi::governance_report(),
+    };
+    ui.render_report(&report);
     Ok(())
 }
 

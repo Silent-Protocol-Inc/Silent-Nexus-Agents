@@ -90,6 +90,31 @@ malicious model still cannot escape the boundary.
   connectors, and proposed skills can shape behavior, but immutable safety,
   project policy, sandbox restrictions, and provider-required instructions always
   take precedence.
+- **Flagship agent: `nexus`, a Recursive Self-Improvement (RSI) generalist.** The
+  default agent on a fresh install plans, implements, verifies, and delegates, and
+  it improves over time: finished turns are mined for reusable workflows, repeated
+  failures, and stated preferences, each recorded as an *approval-gated* proposal
+  you review with `snx profile`. Nothing is ever applied without your approval.
+  Tune or disable the analysis under `[self_improvement]`
+  (`enabled = false` turns it off); `snx status` shows any pending proposals.
+  Candidates are classified into risk tiers and validated by **WARP** — an
+  independent layer that can reject but never author a change — with a
+  compile-time governance ruleset the pipeline cannot edit. `/rsi` shows the
+  queue, the evidence, and the rules; see
+  [`docs/rsi.md`](docs/rsi.md).
+- **A product surface, not a machine log.** What NEXUS shows you is organized
+  into four strict layers — one welcome panel at startup, a live status line, a
+  user-level timeline, and debug. Startup facts are not timeline events, so a
+  session no longer opens with a stack of completed-looking notices. A task turn opens with a 2–5 step intent and
+  then reports milestones as they actually happen; a greeting stays a greeting.
+  In the TUI, tool names, arguments, and raw output belong to `/view debug`: the
+  product layers can only render what the translation layer emitted, which
+  carries no field to put a tool name in. (`snx run` is a log, so it renders at
+  the debug layer throughout.) Nothing is presented before it happened, no
+  percentage or ETA is ever shown, and animation is cosmetic. One
+  design language (`nexus-core::brand::design`) owns every icon, separator, and
+  timing — no emoji anywhere. See
+  [`docs/presentation.md`](docs/presentation.md).
 - **Web content is data, never instructions.** Fetched pages are wrapped as
   untrusted input; SSRF, private-range, cloud-metadata, and DNS-rebinding
   protections are enforced in the harness.
@@ -195,7 +220,7 @@ snx run "summarize the architecture of this repo" --agent researcher
 | `snx session …` | Inspect sessions or persist a title |
 | `snx persona …` | Create, inherit, clone, select, and review persona definitions |
 | `snx profile …` | Select profiles and review explicit/inferred workflow traits or RSI proposals |
-| `snx memory …` | Approval-gated, secret-refusing long-term memory |
+| `snx memory …` | Secret-refusing long-term memory; review queue optional (`[memory].require_approval`) |
 | `snx skill …` | Versioned, inspectable skills |
 | `snx mcp …` | MCP client (register/connect) and server (`serve`) |
 | `snx connector …` | Discover/preview/import Codex MCP and Agent Skill definitions, disabled/untrusted |
@@ -224,6 +249,12 @@ Inside the TUI, `/details compact|expanded|raw` controls card density;
 `n`/`N` navigate matches, Enter expands a card or lazily opens its artifact, F6
 cycles input/timeline/context/agent focus, and the arrow drawers expose live
 context and agent/session activity on smaller terminals.
+
+`/narrate off|compact|auto|verbose` sets how much the agent says about its own
+work; `/view default|detailed|debug` sets which stored events render. The two
+compose in one sentence — **narration folds; `/view` reveals** — so turning
+narration up never hides machine detail, and `/view debug` always shows it. See
+[`docs/presentation.md`](docs/presentation.md).
 
 Argumentless configuration commands open menus, including `/model`, `/agent`,
 `/permissions`, `/persona`, `/profile`, `/connector`, `/theme`, and `/thinking`.
@@ -313,7 +344,8 @@ See the [`CHANGELOG`](CHANGELOG.md) for release-by-release detail.
 | [`docs/configuration.md`](docs/configuration.md) | Precedence and configuration groups |
 | [`docs/cli-reference.md`](docs/cli-reference.md) | Public CLI surface |
 | [`docs/operator-guide.md`](docs/operator-guide.md) | Safe daily operation |
-| [`docs/goals.md`](docs/goals.md) · [`docs/memory-and-skills.md`](docs/memory-and-skills.md) · [`docs/mcp.md`](docs/mcp.md) | Feature deep-dives |
+| [`docs/presentation.md`](docs/presentation.md) | Boot, status, timeline, debug — the four layers and the design language |
+| [`docs/goals.md`](docs/goals.md) · [`docs/memory-and-skills.md`](docs/memory-and-skills.md) · [`docs/mcp.md`](docs/mcp.md) · [`docs/rsi.md`](docs/rsi.md) | Feature deep-dives |
 | [`docs/data-management.md`](docs/data-management.md) | State, backup, restore, retention |
 | [`docs/compatibility.md`](docs/compatibility.md) | The 1.x compatibility contract |
 | [`docs/upgrade-0.2-to-1.0.md`](docs/upgrade-0.2-to-1.0.md) | Migration checklist |

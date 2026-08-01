@@ -17,12 +17,14 @@ mod glyphs;
 mod input;
 mod intro;
 mod layout;
+mod markdown;
 mod menus;
 mod render;
 mod state;
 mod theme;
 mod thinking;
 mod views;
+mod welcome;
 
 use approver::{ApprovalRequest, TuiApprover};
 use crossterm::event::{
@@ -45,7 +47,7 @@ use nexus_core::{SessionId, SpanId, TraceId, TurnId};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
-use state::{Focus, Mode, State, StatusBar, TimelineEventUpdate};
+use state::{ContextPane, Focus, Mode, State, StatusBar, TimelineEventUpdate};
 use std::io::Stdout;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -288,6 +290,9 @@ async fn event_loop(
     )
     .or_else(|| nexus_core::timeline::ActivityMode::parse(&app.config.tui.activity.mode))
     .unwrap_or_default();
+    // The third axis: how much the agent says about its own work. An explicit
+    // `/narrate` choice outranks config, exactly as `/view` does for its own.
+    st.narration_mode = app.narration_mode();
     // Behavioral half of the deliberation settings. The presentation half
     // (preview lines, animation, reduced motion) stays in `[tui.activity]`.
     st.thinking_min_duration =
@@ -304,6 +309,18 @@ async fn event_loop(
     st.reduced_motion = st.reduced_motion || activity.reduced_motion;
     glyphs::configure(&activity.tool_icons);
     st.active_work = nexus_app::services::active_work_snapshot(&app, None, "idle");
+    // Startup facts go to the welcome panel, not the timeline. The panel owns
+    // identity, the restored session, memory, one changelog headline, and the
+    // tips — the five things that used to be emitted from three files as
+    // completed `Notice` events.
+    st.boot(nexus_app::boot::BootSnapshot::gather(
+        &app,
+        st.bar.model_label.clone(),
+    ));
+    // "What's new" has now been shown for this version.
+    let _ = app.update_ui_state(|state| {
+        state.last_seen_version = nexus_core::brand::VERSION.to_string();
+    });
 
     // Channels.
     let (turn_tx, mut turn_rx) = mpsc::unbounded_channel::<TurnMessage>();
@@ -332,31 +349,13 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut last_background_poll = std::time::Instant::now();
 
-    // What the operator sees on opening, in three cases. The point is to give
-    // a real next step when one exists and stay quiet when none does.
+    // The orientation line itself was written by the wake flow above, which is
+    // the single owner of startup text. What is left here is the one case that
+    // needs more than a line: an unconfigured install gets the setup menu put
+    // in front of it, because there is nothing else it can usefully do.
     let first_run = app.read_ui_state(|state| !state.first_run_completed);
     if app.config.models.is_empty() {
-        // Nothing configured: onboarding is the only useful next step.
-        st.system_sev(
-            "FIRST RUN :: no models configured yet — /setup gets you talking to an agent",
-            Sev::Warn,
-        );
         push_menu(&mut st, &app, menus::welcome_menu());
-    } else if first_run {
-        // Configured but never opened interactively (inherited config, or
-        // `snx setup` run headless). Orient rather than nag.
-        st.system_sev(
-            format!(
-                "{} READY :: {}",
-                nexus_core::brand::MARK,
-                st.bar.model_label
-            ),
-            Sev::Ok,
-        );
-        st.system("New here? /help lists the keys, Ctrl+K opens the palette, or just describe what you want to change.");
-    } else if let Some(hint) = nexus_app::services::next_step_hint(&app) {
-        // Returning operator with something real to point at.
-        st.system(hint);
     }
     if first_run {
         let seed = app.config.thinking.mode;
@@ -688,10 +687,66 @@ fn apply_turn_done(
     true
 }
 
+/// The pinned tracker for `work`, as both the planning and the promotion paths
+/// need it. Built in one place so a promoted plan cannot end up displayed
+/// differently from a planned one.
+fn pinned_plan_for(
+    st: &State,
+    work: &nexus_core::orchestration::WorkBreakdown,
+) -> state::PinnedPlan {
+    state::PinnedPlan {
+        plan_id: work.id.as_str().to_string(),
+        agent: st.bar.agent.clone(),
+        objective: work.objective.clone(),
+        version: work.version,
+        steps: work
+            .stages
+            .iter()
+            .map(|stage| state::PinnedStep {
+                sequence: stage.sequence,
+                title: stage.title.clone(),
+                status: stage.status,
+            })
+            .collect(),
+        awaiting_approval: false,
+    }
+}
+
 fn pressed_key(event: Event) -> Option<KeyEvent> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => Some(key),
         _ => None,
+    }
+}
+
+/// Bring pane and focus state back in line with a terminal that just changed
+/// size.
+///
+/// A resize used to be a no-op — "the next draw adapts" — which was true of
+/// everything the renderer recomputes per frame and false of the panel state it
+/// does not. On a phone or tablet the software keyboard opening *is* a resize,
+/// and it was enough to make a panel appear that the operator had no way to
+/// know was armed. So the size class is reconciled here, once, before the next
+/// draw: what the layout takes away is remembered as taken away, and what it
+/// gives back is given back. Everything the operator was in the middle of —
+/// composer text and cursor, timeline scroll and follow state, input history —
+/// is untouched.
+fn reconcile_layout(st: &mut State, columns: u16, rows: u16) {
+    let rl = crate::layout::classify(ratatui::layout::Rect::new(0, 0, columns, rows));
+    let can_show = rl.show_sidebar
+        || matches!(
+            rl.context_placement,
+            crate::layout::ContextPlacement::Overlay
+        );
+    st.context_pane = if can_show {
+        st.context_pane.relax()
+    } else {
+        st.context_pane.constrain()
+    };
+    // Focus must not be left pointing at something that is no longer drawn:
+    // keystrokes would go somewhere invisible, which reads as a frozen UI.
+    if st.focus == Focus::Context && !rl.show_sidebar && !st.context_pane.is_open() {
+        st.focus = Focus::Input;
     }
 }
 
@@ -751,7 +806,10 @@ fn handle_key(
             }
             return;
         }
-        Event::Resize(..) => return, // next draw adapts
+        Event::Resize(columns, rows) => {
+            reconcile_layout(st, columns, rows);
+            return;
+        }
         _ => return,
     };
 
@@ -979,7 +1037,11 @@ fn handle_key(
 
     if matches!(key.code, KeyCode::F(6)) {
         st.focus = st.focus.next();
-        st.context_drawer = st.focus == Focus::Context;
+        // Focus no longer decides visibility. Cycling onto Context used to arm
+        // the panel, and on a roomy terminal that was invisible — the rail is
+        // already drawn there — so the flag sat latched until a resize made it
+        // paint over the conversation. Showing the panel is now something the
+        // operator asks for directly.
         st.agent_drawer = st.focus == Focus::Drawer;
         return;
     }
@@ -1047,6 +1109,29 @@ fn handle_key(
         }
     }
 
+    // The context panel is the operator's, so Esc closes it and Up/Down move
+    // through it while it holds focus. Without this it could be opened and then
+    // only dismissed by pressing the same arrow again — no way out that anyone
+    // would guess, on the layout where it matters most.
+    if st.context_pane.is_open() && st.focus == Focus::Context {
+        match key.code {
+            KeyCode::Esc => {
+                st.context_pane = ContextPane::Closed;
+                st.focus = Focus::Input;
+                return;
+            }
+            KeyCode::Up => {
+                st.context_scroll = st.context_scroll.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                st.context_scroll = st.context_scroll.saturating_add(1);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::PageUp => {
             transcript_scroll_up(st, st.viewport_rows.max(4) / 2, app, session.as_ref());
@@ -1066,7 +1151,7 @@ fn handle_key(
         KeyCode::Down => st.input.history_next(),
         KeyCode::Left if st.input.is_empty() => {
             st.agent_drawer = !st.agent_drawer;
-            st.context_drawer = false;
+            st.context_pane = ContextPane::Closed;
             st.focus = if st.agent_drawer {
                 Focus::Drawer
             } else {
@@ -1074,9 +1159,18 @@ fn handle_key(
             };
         }
         KeyCode::Right if st.input.is_empty() => {
-            st.context_drawer = !st.context_drawer;
+            // At sizes with nothing to spare, say so instead of setting a flag
+            // that draws nothing — a toggle with no visible effect is how the
+            // panel came to be armed without anyone knowing in the first place.
+            if !st.layout.show_sidebar
+                && st.layout.context_placement == crate::layout::ContextPlacement::StatusOnly
+            {
+                st.toast("no room for the context panel here — /context", Sev::Info);
+                return;
+            }
+            st.context_pane = st.context_pane.toggle();
             st.agent_drawer = false;
-            st.focus = if st.context_drawer {
+            st.focus = if st.context_pane.is_open() {
                 Focus::Context
             } else {
                 Focus::Input
@@ -1208,6 +1302,10 @@ fn resolve_approval(st: &mut State, decision: ApprovalDecision) {
                 TimelineStatus::Completed
             };
             event.phase = LifecyclePhase::Completed;
+            // The summary moved on with the status. Leaving it at "awaiting
+            // approval" while the card said `✓ DONE` had the operator reading a
+            // request that had already been answered.
+            event.summary = format!("{label} · {}", req.action.tool);
             if let TimelineKind::Approval {
                 decision: stored,
                 edited,
@@ -2106,10 +2204,13 @@ fn handle_effect(
                 nexus_app::View::Profile => LoadRequest::Profile,
                 nexus_app::View::Tools => LoadRequest::Tools,
                 nexus_app::View::Memory => LoadRequest::Memory,
+                nexus_app::View::Rsi => LoadRequest::Rsi,
                 nexus_app::View::Skills => LoadRequest::Skills,
                 nexus_app::View::Mcp => LoadRequest::Mcp,
                 nexus_app::View::Theme => LoadRequest::Theme,
                 nexus_app::View::Thinking => LoadRequest::Thinking,
+                nexus_app::View::Narrate => LoadRequest::Narrate,
+                nexus_app::View::Activity => LoadRequest::Activity,
                 nexus_app::View::Details => LoadRequest::Details,
                 nexus_app::View::Transcript => LoadRequest::Transcript,
                 nexus_app::View::Permissions => LoadRequest::Permissions,
@@ -2191,6 +2292,10 @@ fn handle_effect(
         Effect::SetActivityMode(mode) => {
             st.set_activity_mode(mode);
             st.toast(format!("activity view → {}", mode.as_str()), Sev::Ok);
+        }
+        Effect::SetNarration(mode) => {
+            st.narration_mode = mode;
+            st.toast(format!("narration → {}", mode.as_str()), Sev::Ok);
         }
         Effect::SetPlanMode(on) => {
             st.bar.plan_mode = on;
@@ -2869,8 +2974,20 @@ fn profile_cards_for_menu(app: &App, session_id: Option<&str>) -> nexus_core::Re
         cards.push((profile, fact_count, memory_count));
     }
     let pending_conflicts = repository.identity_conflicts(true)?.len();
-    let mut menu =
-        menus::profile_cards_menu(&cards, context.profile_id.as_deref(), pending_conflicts);
+    let pending_facts: Vec<nexus_core::harness::ProfileFact> = match context.profile_id.as_deref() {
+        Some(profile_id) => repository
+            .profile_facts(profile_id, true)?
+            .into_iter()
+            .filter(|fact| fact.status == nexus_core::harness::ProfileFactStatus::Candidate)
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut menu = menus::profile_cards_menu(
+        &cards,
+        context.profile_id.as_deref(),
+        pending_conflicts,
+        &pending_facts,
+    );
     menu.on_refresh = Some(UiAction::Load(LoadRequest::Profile));
     Ok(menu)
 }
@@ -3106,6 +3223,16 @@ fn start_load(
             Ok(menu) => replace_or_push_menu(st, app, menu),
             Err(error) => st.system_sev(format!("memory: {error}"), Sev::Err),
         },
+        LoadRequest::Narrate => {
+            replace_or_push_menu(st, app, menus::narrate_menu(st.narration_mode));
+        }
+        LoadRequest::Activity => {
+            replace_or_push_menu(st, app, menus::view_menu(st.activity_mode));
+        }
+        LoadRequest::Rsi => {
+            let mode = nexus_app::services::permission_mode(&app.config.policy);
+            replace_or_push_menu(st, app, menus::rsi_menu(mode));
+        }
         LoadRequest::CommandMenu(name) => match nexus_app::registry::find(&name) {
             Some(definition) => push_menu(st, app, menus::command_menu(definition)),
             None => st.system_sev(format!("unknown command /{name}"), Sev::Err),
@@ -3497,21 +3624,29 @@ fn submit_objective(
                 let text = app
                     .redactor
                     .redact(&nexus_core::sanitize::sanitize_terminal(&notice));
-                let conflict = text.contains("IDENTITY CONFLICT");
+                // A card that says DONE over something still waiting on the
+                // operator, or over something that was refused, is the timeline
+                // asserting an outcome that did not happen. The notice already
+                // names which of the three it is.
+                let (status, severity) = if text.starts_with("PROFILE NOT STORED") {
+                    (TimelineStatus::Failed, "error")
+                } else if text.starts_with("PROFILE REVIEW")
+                    || text.starts_with("IDENTITY CONFLICT")
+                {
+                    (TimelineStatus::Waiting, "warning")
+                } else {
+                    (TimelineStatus::Completed, "info")
+                };
                 st.push_local_event_for_turn(
                     turn_id.clone(),
-                    if conflict {
-                        TimelineStatus::Waiting
-                    } else {
-                        TimelineStatus::Completed
-                    },
+                    status,
                     text.lines()
                         .next()
                         .unwrap_or("profile/memory update")
                         .to_string(),
                     TimelineKind::Notice {
                         text,
-                        severity: if conflict { "warning" } else { "info" }.into(),
+                        severity: severity.into(),
                     },
                 );
             }
@@ -3536,7 +3671,7 @@ fn submit_objective(
     }
 
     let runtime = match app.runtime(Some(session_id.clone())) {
-        Ok(r) => r,
+        Ok(r) => app.with_profile_tools(r),
         Err(e) => {
             st.system_sev(format!("cannot build runtime: {e}"), Sev::Err);
             return;
@@ -3544,6 +3679,15 @@ fn submit_objective(
     };
 
     st.mode = Mode::Running;
+    // The welcome panel has done its job the moment there is real work to look
+    // at. Collapsing here — on the turn starting, not on the timeline changing
+    // — means scrolling, resizing, or a background task landing never moves it.
+    st.collapse_welcome();
+    // Per-turn status facts belong to the turn that produced them: a stale
+    // effort or step count carried into the next turn would be an invention.
+    st.provider_effort = None;
+    st.intent_steps = 0;
+    st.reset_status_display();
     st.turn_started = Some(std::time::Instant::now());
     // A previous turn's decision must never leak into this one.
     st.reset_thinking_resolution();
@@ -3614,6 +3758,23 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
                 },
             );
         }
+        LoopEvent::IntentPlanned {
+            steps,
+            class,
+            refined,
+        } => {
+            st.intent_steps = steps.len();
+            st.push_local_event_for_turn(
+                turn_id.clone(),
+                TimelineStatus::Running,
+                format!("intent · {} step(s)", steps.len()),
+                TimelineKind::Intent {
+                    steps,
+                    class,
+                    refined,
+                },
+            );
+        }
         LoopEvent::ModelFallback {
             from_model,
             to_model,
@@ -3641,6 +3802,12 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
             running,
             failed,
         } => {
+            // The status line shows effort only when the provider reported one;
+            // storing it here is what keeps that field truthful rather than
+            // defaulted.
+            st.provider_effort = reasoning_enabled
+                .then(|| effort.trim().to_string())
+                .filter(|effort| !effort.is_empty());
             let label = if reasoning_enabled {
                 format!("Thinking… · {effort}")
             } else {
@@ -3933,22 +4100,7 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
         // recorded there once, and repeating it every transition would bury the
         // conversation under copies of the same list.
         LoopEvent::WorkPlanned { work } => {
-            st.pinned_plan = Some(state::PinnedPlan {
-                plan_id: work.id.as_str().to_string(),
-                agent: st.bar.agent.clone(),
-                objective: work.objective.clone(),
-                version: work.version,
-                steps: work
-                    .stages
-                    .iter()
-                    .map(|stage| state::PinnedStep {
-                        sequence: stage.sequence,
-                        title: stage.title.clone(),
-                        status: stage.status,
-                    })
-                    .collect(),
-                awaiting_approval: false,
-            });
+            st.pinned_plan = Some(pinned_plan_for(st, &work));
         }
         LoopEvent::PlanReviewRequested { request } => {
             // The pop-up itself is opened when the request arrives on the plan
@@ -4029,6 +4181,13 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
             to,
             reason,
         } => {
+            // A promotion replaces the plan. Without this the tracker kept the
+            // superseded version for the rest of the turn — and since stage
+            // updates are matched by title, none of the new stages could ever
+            // land on it. A turn that finished one of two stages then signed
+            // off as `COMPLETE · 0/1 tasks`, reporting a plan that no longer
+            // existed while the context panel beside it read `v2 · 1/2`.
+            st.pinned_plan = Some(pinned_plan_for(st, &work));
             st.push_local_event_for_turn(
                 turn_id.clone(),
                 if work.kind == nexus_core::orchestration::WorkBreakdownKind::Planned
@@ -4425,6 +4584,158 @@ mod tests {
             Vec::new(),
             nexus_core::ThinkingMode::Auto,
         )
+    }
+
+    /// Found by reading a real turn's sign-off: `COMPLETE · 0/1 tasks` next to
+    /// a context panel that read `tracked v2 · 1/2`.
+    ///
+    /// A turn that grows mid-flight is promoted to a bigger plan, and the
+    /// tracker only ever refreshed on `WorkPlanned`. So it kept the superseded
+    /// version — and because stage updates are matched by title, the new
+    /// stages could never land on it either. Both numbers in the sign-off were
+    /// wrong, and they were wrong in the direction that reads as "nothing got
+    /// done".
+    #[test]
+    fn a_promoted_plan_replaces_the_one_the_tracker_is_showing() {
+        use nexus_core::orchestration::{StageStatus, WorkBreakdown, WorkEstimate};
+
+        let mut st = turn_test_state();
+        let turn = TurnId::generate();
+
+        // A bounded request gets a one-stage direct plan.
+        let objective = "read main.rs and review it";
+        let mut work = WorkBreakdown::generate(objective, WorkEstimate::from_objective(objective));
+        apply_loop_event(
+            &mut st,
+            &turn,
+            LoopEvent::WorkPlanned { work: work.clone() },
+        );
+        assert_eq!(st.pinned_plan.as_ref().expect("tracker").steps.len(), 1);
+
+        // It then turns out to need real work, exactly as the loop discovers
+        // mid-turn, and the harness promotes the plan.
+        let mut observed = WorkEstimate::from_objective(objective);
+        observed.predicted_actions = 4;
+        observed.writes = true;
+        observed.multi_file = true;
+        let promotion = work.promote(observed).expect("a bigger turn promotes");
+        assert!(work.stages.len() > 1, "promotion produces a bigger plan");
+
+        apply_loop_event(
+            &mut st,
+            &turn,
+            LoopEvent::PlanPromoted {
+                work: work.clone(),
+                from: promotion.from.as_str().into(),
+                to: promotion.to.as_str().into(),
+                reason: "4 observed actions".into(),
+            },
+        );
+        let plan = st.pinned_plan.as_ref().expect("tracker");
+        assert_eq!(plan.version, work.version, "the tracker kept the old plan");
+        assert_eq!(plan.steps.len(), work.stages.len());
+
+        // …and a stage transition now matches a title that actually exists,
+        // which is what makes the sign-off able to count anything at all.
+        apply_loop_event(
+            &mut st,
+            &turn,
+            LoopEvent::StageChanged {
+                plan_id: work.id.as_str().to_string(),
+                stage_id: work.stages[0].id.clone(),
+                title: work.stages[0].title.clone(),
+                status: StageStatus::Completed,
+                next_action: None,
+            },
+        );
+        let (done, total) = st.pinned_plan.as_ref().expect("tracker").progress();
+        assert_eq!(
+            (done, total),
+            (1, work.stages.len()),
+            "the sign-off would report {done}/{total}",
+        );
+    }
+
+    /// A panel the terminal took away comes back when the terminal gives the
+    /// room back — the operator never asked for it to close.
+    #[test]
+    fn a_pane_the_keyboard_collapsed_reopens_when_the_keyboard_closes() {
+        let mut st = turn_test_state();
+        st.context_pane = ContextPane::Open;
+
+        reconcile_layout(&mut st, 100, 14);
+        assert_eq!(
+            st.context_pane,
+            ContextPane::Collapsed,
+            "the panel must not stay open where it cannot be drawn",
+        );
+
+        reconcile_layout(&mut st, 100, 30);
+        assert_eq!(st.context_pane, ContextPane::Open);
+    }
+
+    /// The other half of the same rule: a panel the *operator* closed is theirs
+    /// to reopen. Restoring it for them would be the same surprise in reverse.
+    #[test]
+    fn a_pane_the_operator_closed_stays_closed_through_a_resize() {
+        let mut st = turn_test_state();
+        st.context_pane = ContextPane::Closed;
+
+        reconcile_layout(&mut st, 100, 14);
+        reconcile_layout(&mut st, 160, 50);
+        assert_eq!(st.context_pane, ContextPane::Closed);
+    }
+
+    /// Focus pointing at something no longer drawn reads as a frozen UI: keys
+    /// go somewhere invisible and nothing on screen responds.
+    #[test]
+    fn focus_leaves_a_pane_that_the_resize_took_away() {
+        let mut st = turn_test_state();
+        st.context_pane = ContextPane::Open;
+        st.focus = Focus::Context;
+
+        reconcile_layout(&mut st, 100, 14);
+        assert_eq!(st.focus, Focus::Input);
+    }
+
+    /// A resize must not disturb what the operator was in the middle of.
+    #[test]
+    fn a_resize_preserves_the_composer_and_the_timeline_position() {
+        let mut st = turn_test_state();
+        st.input.insert_paste("half a sentence");
+        st.input.left();
+        let cursor = st.input.cursor();
+        st.scroll = 12;
+        st.follow = false;
+
+        reconcile_layout(&mut st, 100, 14);
+        reconcile_layout(&mut st, 120, 40);
+
+        assert_eq!(st.input.text(), "half a sentence");
+        assert_eq!(st.input.cursor(), cursor);
+        assert_eq!(st.scroll, 12);
+        assert!(!st.follow);
+    }
+
+    /// Terminals emit resize storms while a window is dragged or a keyboard
+    /// animates in; none of it may panic or leave the state inconsistent.
+    #[test]
+    fn a_storm_of_resizes_settles_without_panicking() {
+        let mut st = turn_test_state();
+        st.context_pane = ContextPane::Open;
+        for (columns, rows) in [
+            (120, 40),
+            (100, 14),
+            (24, 8),
+            (160, 50),
+            (30, 9),
+            (100, 30),
+            (100, 12),
+            (120, 40),
+        ] {
+            reconcile_layout(&mut st, columns, rows);
+        }
+        assert_eq!(st.context_pane, ContextPane::Open);
     }
 
     fn outcome(message: &str) -> nexus_agent::LoopOutcome {

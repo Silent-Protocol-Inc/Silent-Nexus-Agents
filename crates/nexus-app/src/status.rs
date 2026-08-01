@@ -16,12 +16,33 @@ pub struct ActiveContext {
     pub last_error: Option<String>,
 }
 
+/// Headline state of the governed self-improvement loop, for `/status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RsiFacts {
+    pub candidates: usize,
+    /// Candidates whose next step is a human decision.
+    pub awaiting_human: usize,
+    pub governance_version: u32,
+}
+
 /// One measured status snapshot.
 #[derive(Debug, Clone)]
 pub struct StatusSnapshot {
     pub session: Option<SessionFacts>,
     pub goal: Option<GoalFacts>,
     pub agent: String,
+    /// The flagship agent identity (`nexus · Recursive Self-Improvement (RSI)`),
+    /// a fixed product fact independent of which agent is currently active.
+    pub flagship: String,
+    /// Pending self-improvement proposals awaiting review, or `None` when
+    /// surfacing is disabled (`[self_improvement].surface_pending = false`).
+    pub self_improvement_pending: Option<usize>,
+    /// Governed RSI candidates and how many of them are waiting on a human.
+    /// `None` when the harness cannot be read.
+    pub rsi: Option<RsiFacts>,
+    /// The three presentation axes, as `thinking · narration · view`. They are
+    /// easy to confuse, so status shows them together and never alone.
+    pub presentation: String,
     pub model: Option<ModelFacts>,
     pub sandbox_backend: String,
     pub sandbox_level: String,
@@ -146,6 +167,28 @@ pub async fn snapshot(app: &App, active: &ActiveContext, probe_health: bool) -> 
         session,
         goal,
         agent: app.active_agent(),
+        flagship: format!(
+            "{} · {} ({})",
+            nexus_core::brand::FLAGSHIP_AGENT,
+            nexus_core::brand::FLAGSHIP_MODE,
+            nexus_core::brand::FLAGSHIP_MODE_SHORT,
+        ),
+        self_improvement_pending: if app.config.self_improvement.surface_pending {
+            app.rsi().list(false).map(|p| p.len()).ok()
+        } else {
+            None
+        },
+        rsi: rsi_facts(app),
+        presentation: format!(
+            "{} thinking · {} narration · {} view",
+            app.read_ui_state(|state| state.thinking()).as_str(),
+            app.narration_mode().as_str(),
+            nexus_core::timeline::ActivityMode::parse(
+                &app.read_ui_state(|state| state.activity_mode.clone())
+            )
+            .unwrap_or_default()
+            .as_str(),
+        ),
         model,
         sandbox_backend: isolation.backend.clone(),
         sandbox_level: isolation.level.clone(),
@@ -226,6 +269,29 @@ async fn model_facts(app: &App, probe_health: bool) -> Option<ModelFacts> {
     })
 }
 
+/// Whether a candidate's next legal step is a decision no automated stage may
+/// take for it. `Testing`, `Shadow`, and `Canary` are WARP's to advance;
+/// `Proposed` and `Validated` are the two points where a human decides.
+pub fn awaits_human(status: nexus_core::harness::ImprovementStatus) -> bool {
+    use nexus_core::harness::ImprovementStatus as S;
+    matches!(status, S::Proposed | S::Validated)
+}
+
+/// Count governed candidates and how many of them are waiting on a human.
+fn rsi_facts(app: &App) -> Option<RsiFacts> {
+    let proposals = app
+        .harness()
+        .workspace_repository()
+        .improvement_proposals(None)
+        .ok()?;
+    let awaiting_human = proposals.iter().filter(|p| awaits_human(p.status)).count();
+    Some(RsiFacts {
+        candidates: proposals.len(),
+        awaiting_human,
+        governance_version: nexus_core::governance::GOVERNANCE_VERSION,
+    })
+}
+
 fn context_facts(app: &App, session_id: &str) -> Option<ContextFacts> {
     let messages = app.sessions().messages(session_id).ok()?;
     let used: usize = messages
@@ -284,6 +350,29 @@ pub fn to_report(s: &StatusSnapshot) -> Report {
         None => r = r.field_sev("goal", "none", Sev::Dim),
     }
     r = r.field("agent", &s.agent);
+    r = r.field("flagship", &s.flagship);
+    if let Some(pending) = s.self_improvement_pending {
+        if pending > 0 {
+            r = r.field(
+                "self-improvement",
+                format!("{pending} pending proposal(s) — review with 'snx profile'"),
+            );
+        }
+    }
+    r = r.field("presentation", &s.presentation);
+    if let Some(rsi) = &s.rsi {
+        if rsi.candidates > 0 {
+            let text = format!(
+                "{} candidate(s), {} awaiting a human — /rsi (governance v{})",
+                rsi.candidates, rsi.awaiting_human, rsi.governance_version
+            );
+            r = if rsi.awaiting_human > 0 {
+                r.field_sev("rsi", text, Sev::Warn)
+            } else {
+                r.field("rsi", text)
+            };
+        }
+    }
     match &s.model {
         Some(m) => {
             let pin = if m.pinned { " (pinned)" } else { "" };
@@ -367,4 +456,33 @@ pub fn to_report(s: &StatusSnapshot) -> Report {
         r = r.field("process", format!("{} MB RSS{load}", p.rss_mb));
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nexus_core::harness::ImprovementStatus as S;
+
+    #[test]
+    fn only_the_two_decision_points_await_a_human() {
+        for status in [S::Proposed, S::Validated] {
+            assert!(awaits_human(status), "{status:?} needs a human");
+        }
+        // WARP advances these itself; counting them would nag the operator
+        // about work that is not theirs.
+        for status in [
+            S::Observed,
+            S::Draft,
+            S::Approved,
+            S::Testing,
+            S::Shadow,
+            S::Canary,
+            S::Promoted,
+            S::Rejected,
+            S::RolledBack,
+            S::Deprecated,
+        ] {
+            assert!(!awaits_human(status), "{status:?} must not await a human");
+        }
+    }
 }

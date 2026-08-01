@@ -1,5 +1,291 @@
 # Changelog
 
+## [2.11.0] — 2026-07-26
+
+### Added
+
+- **`nexus` is now a real flagship agent — the default Recursive
+  Self-Improvement (RSI) agent.** A fresh install already selected `nexus` as
+  its default agent, but the role was a hollow shell: same capabilities as the
+  orchestrator, yet no behavioral contract, so it told the model nothing about
+  how to work. `nexus` now carries a proper charter — a generalist that plans,
+  implements, verifies, and delegates, and that improves over time by letting
+  the harness record *approval-gated* self-improvement proposals. The charter
+  sits strictly below the immutable safety rules and cannot relax workspace
+  confinement, approval, or evidence requirements.
+- **SNX can act on what you tell it about yourself.** Telling SNX "my name is
+  Sans" stored a fact in the canonical profile store — and then the agent
+  answered *"I don't have a profile-card management tool in this session."* That
+  answer was accurate: the storage layer was complete, but nothing above it was
+  reachable from a turn. There is now a `profile` tool category — `get_active`,
+  `list`, `create`, `select`, `update`, `add_fact`, `remove_fact`, `merge`,
+  `get_candidates`, `review_candidate` — granted to every role for reading and
+  to working roles for writing. Roles that work from external material
+  (researcher, and the read-only audit roles) can read the card and never write
+  it, so nothing SNX finds on the internet becomes something you said.
+  Capability gating is enforced in the agent loop, not merely declared.
+  Alongside it, a deterministic pre-turn pass captures durable statements —
+  preferred name, occupation, timezone, language, working preferences, stack —
+  from named, individually tested wordings. There is **no extra model call and
+  no per-message classification**: an ambiguous phrasing captures nothing and
+  the agent uses `profile.add_fact` deliberately instead, so every automatic
+  capture traces to a pattern with a test beside it. Repeating yourself is a
+  no-op rather than a duplicate row; a changed value supersedes the old one
+  without discarding it. Credentials are never turned into a profile fact, and
+  sensitive categories are held as candidates you approve in `/profile` — which
+  now shows what is waiting and says plainly that it is not in use yet. New
+  `[profile]` block: `auto_capture`, `capture_preferences`,
+  `require_review_for_sensitive`, all on by default.
+- **Recursive Self-Improvement is a first-class, visible default.** The
+  post-turn analysis that mines finished turns for reusable workflows, repeated
+  failures, and stated preferences (recording each as an approval-gated proposal
+  reviewed with `snx profile`) has been running for releases, but silently and
+  with no way to turn it off. It now lives under a `[self_improvement]` config
+  block (`enabled`, `surface_pending`, both on by default), and `snx status` and
+  the TUI startup surface the pending-proposal count so the review queue is no
+  longer invisible.
+- **Flagship identity in branding.** `snx about` and `snx status` now show the
+  flagship agent line — `nexus · Recursive Self-Improvement (RSI)`. The product
+  name stays **NEXUS by Silent Protocol**; this names the agent, not a rebrand.
+- **Governed self-improvement: Nexus RSI + WARP.** Self-improvement is no longer
+  just a proposal queue. Candidates are now typed (target, scope, risk tier,
+  success metrics, affected components) and judged by **WARP** — Watch, Assess,
+  Replay, Promote — an independent validation layer in its own crate that can
+  reject a candidate but never author one. WARP runs deterministic checks in an
+  isolated worktree or overlay, replays sanitized historical fixtures (including
+  holdouts), runs an adversarial suite, scans the candidate's diff for the
+  mechanical forms of reward hacking, and asks independent evaluators that never
+  see the author's reasoning. An objective failure is a hard veto no model
+  verdict can average away.
+- **A governance layer the pipeline cannot edit.** `nexus-core::governance` holds
+  the ruleset as compile-time constants with no setter and no config key; RSI and
+  WARP depend on that crate, so they cannot reach up and rewrite what constrains
+  them. A candidate touching governance, audit, policy, permissions, or the
+  validation layer is tier 4 and auto-rejected. Risk classification only moves
+  *up*: the effective tier is the maximum of declared and computed.
+- **Promotion fails closed.** The promotion gate rejects when WARP is
+  unavailable, a stage is missing, or a verdict is inconclusive. Tier 1 may
+  auto-promote after every stage passes; tier 2 needs a shadow run; tier 3 needs
+  a human signature that is not the author's. `/permissions full access` removes
+  prompts, not governance — `allow_tier_3_auto_promotion = true` is recorded and
+  ignored.
+- **Shadow, canary, and recorded rollback.** A shadow run gives the candidate
+  real inputs and the world nothing: only read-only tool calls execute, and an
+  effect that escapes containment is a hard veto. Canary rollout climbs
+  5→15→30→50→100% with deterministic per-session assignment; a success or error
+  breach rolls back, and one security violation rolls back at any sample size.
+  Every promotion is recorded with its author and a way back — the ledger
+  refuses to record one that has neither a rollback command nor a checkpoint.
+- **`/rsi` and `snx rsi`.** Status, candidates, candidate detail, observations,
+  outcomes, promotions, rollbacks, and the governance ruleset. The candidate list
+  shows the declared tier next to WARP's classified one, so a candidate that
+  undersold its blast radius is visible. `/status` shows how many candidates wait
+  on a human. Full documentation in [`docs/rsi.md`](docs/rsi.md).
+- **What this does not do**, stated plainly: the stages are implemented and
+  tested individually, but the loop is not yet wired to carry a candidate through
+  every stage on its own; code-plane changes are never hot-swapped into a running
+  process (they ship as a human-approved release); and open-ended self-directed
+  modification stays disabled.
+- **A presentation architecture: boot, status, timeline, debug.** A turn used to
+  be either raw tool rows (`fs.read`, `terminal.exec`, argument JSON) or silence
+  until the final answer, and startup was three unrelated system lines pushed
+  from two different files. What you see is now organized into four strict
+  layers with one rule between them: *boot, status, and timeline may render only
+  what the translation layer emitted; debug renders the untranslated truth.*
+  That is structural — the product layers consume a `Presented` value that has
+  no field for a tool name, an argument blob, or raw output, so a leak is a
+  compile error, and a test asserts it over every tool in the real registry.
+  `snx run` renders at the debug layer throughout, as it always has: it is a log
+  with no `/view` to turn detail back on. It shares the intent card and the
+  milestones with the TUI, so the two surfaces cannot drift.
+  Full documentation in [`docs/presentation.md`](docs/presentation.md).
+- **One welcome panel instead of startup logs.** Opening a session used to print
+  four `✓ DONE  NOTICE` cards — session restored, memory linked, what's new,
+  ready — because startup facts were pushed through the ordinary timeline
+  renderer, which files them as completed `Notice` events. Startup is not work
+  the agent did, so it is no longer an event at all: `BootSnapshot` gathers the
+  facts once and a dedicated panel above the timeline renders them, with
+  identity, workspace, model, agent, access, session, memory, one changelog
+  headline, and two or three tips chosen from live state. Every section is
+  omitted when it has nothing real to say, so a fresh workspace shows identity,
+  metadata, and a tip — never `Session: none`. Labels are `SESSION // RESTORED`,
+  not run outcomes. The panel collapses to one line
+  (`◢ NEXUS · implementer · Ollama / qwen · main · restored`) when the first turn
+  starts, so it is never a permanent tax on transcript height, and it sheds rows
+  in a defined order on a short terminal rather than being clipped. The timeline
+  now starts empty. No progress bar: startup is not measurable in advance.
+- **A live status line.** While a turn runs, one transient row above the input
+  says what the agent is doing — `◇ Tracing intent · 24 seconds · high effort` —
+  with a terse verb, elapsed time, and the *reported* effort, omitted rather than
+  guessed when the provider did not report one. It degrades to verb-only on
+  narrow terminals, holds a verb for a dwell window so a fast tool sequence
+  cannot strobe, and disappears when idle. It renders in every narration and
+  thinking mode, including `off`: liveness is not verbosity. Being a render-time
+  projection with no store write, it cannot append to the record it sits above.
+- **Intent and milestones (`/narrate`, `snx narrate`).** A task turn opens with a
+  2–5 step intent card and then reports milestones as they happen. The steps come
+  from a deterministic skeleton built from the same task class and work estimate
+  the work breakdown uses; a model may improve the *wording* only, and the gate
+  accepts a rewording only if it is 1:1 — same count, same order, verb still
+  compatible with the step, no identifier-shaped token — otherwise the skeleton
+  stands and the plan records `refined: false` rather than implying model
+  authorship. The plan is an intention: no step is ever ticked off, and a
+  milestone is constructible only from a completed fact. Greetings and one-step
+  lookups get no intent and no milestones. New `[narration]` block: `mode`
+  (`off|compact|auto|verbose`, default `auto`), `refine_wording`, `max_steps`.
+- **One design language, and one icon per action state.**
+  `nexus-core::brand::design` owns the icons, motion timings, separators, casing,
+  and elapsed formatting; nothing else picks a glyph, so a reskin is a second
+  `Skin` constructor rather than an edit to every renderer. Icons are keyed to
+  what the agent is *doing* (`◇` tracing intent, `⌕` scanning, `▸` applying,
+  `◎` checking, `◌` waiting, `◆` composing) rather than to a tool family, with a
+  full ASCII fallback. Reduced motion collapses an animation to its final frame
+  instead of swapping in a different design, and animation never encodes
+  progress, because nothing here measures its own.
+
+### Changed
+
+- **No emoji on any product surface.** They are double-width, font-dependent, and
+  render as boxes on several supported mobile clients. `[tui.activity].tool_icons
+  = "emoji"` still parses and now resolves to geometric, so no configuration
+  breaks; the tool-family glyph ladder survives as a debug-layer concern, since
+  tool rows no longer appear above it. A terminal that cannot draw Unicode still
+  overrides any preference, exactly as before.
+- **Raw tool rows fold while narration is active** — into the milestone that
+  describes them. `/view detailed|debug` reveals them whatever narration says,
+  and `/narrate off` folds nothing, restoring the previous timeline. `/status`
+  now prints all three axes together (`auto thinking · verbose narration ·
+  default view`) because they are easy to confuse. There is deliberately no
+  `debug` narration mode: raw-payload visibility belongs to `/view` and is not
+  duplicated.
+
+- **Recording a memory takes effect immediately.** `memory.add` stored every
+  agent-recorded fact as a candidate that a human had to approve before it could
+  be read back, so an agent that wrote down what it had just established could
+  not use it, and the review queue filled with facts nobody disputed. Recording
+  now applies directly. The properties that make it safe are unchanged: secrets
+  are still refused, the store is still separate from the workspace, writes are
+  still budgeted per turn, and everything recorded is still visible and
+  deletable in `/memory`. Set `[memory].require_approval = true` to put the
+  queue back.
+
+### Fixed
+
+- **Answers render as terminal documents, not Markdown source.** A model answer
+  arrives as Markdown, and the timeline handed it to a plain word-wrapper — so
+  `## Review summary`, `**Suggested fix:**`, and backticked commands reached the
+  operator as literal source. There was no parser to ignore; there was no
+  parser. Answers are now parsed with CommonMark (`pulldown-cmark`, tables, task
+  lists, and strikethrough on, **HTML off**) into a width-independent document
+  and projected to styled rows: ruled headings, real bold and italic, inline
+  code without backticks, nested lists with hanging indents and per-depth
+  bullets, framed code blocks with their language label, quoted bars, thematic
+  rules, and responsive tables that degrade to key/value records rather than
+  being crushed. Severity headings (`Critical`, `High`, `Medium`, `Low`,
+  `Informational`) take a theme accent, and the word stays, so meaning is never
+  carried by colour alone. The stored answer remains the canonical source —
+  export and copy are unaffected — and the parse is memoised, so a resize
+  re-renders rather than re-parses. Streaming is safe: an unclosed fence renders
+  as provisional code, a list still filling stays a list, and an unmatched
+  emphasis opener is dropped at the tip so `**` never flickers into view — using
+  CommonMark's left-flanking rule, so `2 * 3` keeps its asterisk.
+- **`/view` is a selector, not a flag.** Every other presentation control opens
+  a menu with the current value marked; `/view` printed a report and expected
+  you to retype the command with the value you wanted. Bare `/view` now opens
+  the picker. Typed arguments still work as the scripting path.
+- **Card headers stop stamping run outcomes on things that are not runs.** The
+  operator's own message was headed `✓ DONE  USER MESSAGE` — telling them their
+  typing had succeeded — and every one-sentence notice cost two rows, a status
+  word above the sentence. A user message now reads `❯ You` in the composer's
+  own prompt character, a short notice becomes its own single row, and an intent
+  card says `Intent · 3 steps` rather than `RUNNING`, because a plan is an
+  intention and is never running or done. Long and multi-line notices keep a
+  separate body so they can still wrap.
+- **A refused tool call no longer wedges the session permanently.** When policy
+  refused an action, the turn returned immediately — after the assistant message
+  carrying the `function_call` had already been persisted. The stored
+  conversation was left holding a call with no `function_call_output`, and
+  providers that speak the Responses API validate that pairing, so *every*
+  subsequent turn came back `HTTP 400 … No tool output found for function call
+  call_…`. The session was dead and no amount of retrying could clear it. Every
+  early exit now records the tool result first and ends the turn after, so the
+  refusal reaches the model as well as the operator. The same fix covers the
+  repeated-malformed-arguments, no-progress, and failure-budget exits.
+- **A second checkout no longer greets you as a stranger.** Profile cards are
+  global but the active one is per-workspace, and a workspace that had never
+  chosen fell back to the anonymous `default` card — so a new clone of the same
+  project started as nobody and filed everything you told it onto the
+  placeholder. A workspace with no explicit choice now inherits your most
+  recently used card. An explicit choice is still never overwritten.
+- **Saying your name again does not add another row.** Repeating any fact was
+  supposed to be a no-op, and was — except along the identity path, which wrote
+  straight to the table without consulting the deduplication every other write
+  goes through. So the one sentence people actually repeat, "my name is …", was
+  the one that accumulated: found on a live card as three identical
+  `identity.name` rows. There is now a single way in, and a changed value still
+  supersedes the old one rather than sitting beside it. Existing duplicates are
+  left alone rather than migrated — they are harmless and yours to remove.
+- **ACTIVE CONTEXT no longer buries the timeline when a phone keyboard opens.**
+  On a narrow terminal the context panel was drawn as a full-body wipe painted
+  last, so when a software keyboard cut the viewport height the panel covered
+  the transcript, the composer, and any open approval prompt — and the work
+  itself became unreachable. The layout now states its priority explicitly:
+  the timeline and the composer are never what yields. `classify()` decides
+  from height as well as width and guarantees the timeline a floor of rows, the
+  panel is bounded to the body rect and drawn *before* modals rather than over
+  them, and when there is no room for it at all it is not drawn and the status
+  bar says `CTX hidden` instead of hiding silently. A panel the layout collapsed
+  comes back when the keyboard closes; a panel you closed yourself stays closed.
+  Resize is reconciled rather than ignored, so composer text, cursor, and scroll
+  survive the trip. The reason this shipped at all: every wide terminal size in
+  the test suite was also tall, and every short one also narrow — the
+  wide-and-short quadrant a phone in landscape lands in had no coverage
+  anywhere. It does now.
+- **An agent that cannot change your profile says so instead of claiming it
+  did.** Withholding the write tools from the researcher and the read-only audit
+  roles stopped the write but told the model nothing, and silence read as
+  permission: asked to record an occupation, the researcher answered *"I have
+  recorded that"* having stored nothing. The profile section now states whether
+  the role may write and that it must not claim otherwise. Refusing a write and
+  reporting the refusal are separate guarantees; only the first was in place.
+- **The status bar no longer offers to close a panel that is not on screen.**
+  The layout decided the context panel's placement from the terminal size, but
+  the welcome panel then took rows out of the body — so on a short, wide
+  terminal the composer read `context · Esc close` with nothing to close. The
+  geometry is now the single answer to whether the panel is showing, and the
+  composer and status bar both read it.
+- **The flagship agent describes itself.** `/agent` listed `nexus` as a bare row
+  with no subtitle while all twenty-one other roles had one, because
+  `output_contract()` — which is the *model's* contract, not a menu subtitle —
+  was an empty string for it. The two are now separate: `description()` is what
+  the picker renders, and it falls through to the contract for every other role,
+  so no other row changes by a character.
+- **The restricted-file refusal says what to do instead.** A workspace holding
+  files classified as no-read — a password manager, a keystore, a repo with
+  `.env` — cannot run host commands, because nothing can prove those files are
+  masked from the process. The message stated the rule and stopped; it now names
+  how many files blocked it and points at the two ways forward: the per-file
+  tools, which are checked individually, or the container sandbox.
+- **An approval card states its decision.** Answering a prompt flipped the card
+  to `✓ DONE` but left the summary reading "awaiting approval", so a resolved
+  request looked like a pending one. It now reads `Approved once · run: cargo
+  test`, or `Awaiting your approval · …` while it is genuinely waiting.
+- **A changelog headline no longer gets cut mid-word.** "What's new" read only
+  the first physical line of a markdown bold span, so a wrapped headline showed
+  as "…is now a real flagship agent — the def" + "ault Recursive". The span is
+  rejoined and the cap falls on a word boundary.
+- **The restored-session line shows a date, not a timestamp.** It printed the
+  raw `2026-07-23T18:25:53.941Z`; it now reads `23 Jul 2026`.
+- **Two places that leaked a tool name into operator-facing text.** A failed tool
+  was narrated as `"<tool> failed: …"` and a passing validation as
+  `"<tool> passed."`, both on surfaces that are supposed to be user-level. Both
+  now route through the single translation layer, which replaces two partial
+  implementations that disagreed with each other.
+- **Startup text is emitted from one place.** The pending-proposals line — which
+  still pointed at the superseded `snx profile` — moved into the boot memory
+  stage and points at `/rsi`, and the two hardcoded system rows moved into the
+  welcome stage.
+
 ## [2.10.2] — 2026-07-25
 
 ### Fixed

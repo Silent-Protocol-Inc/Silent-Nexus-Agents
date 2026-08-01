@@ -3,6 +3,16 @@
 //! This module owns the product geometry, copy, spacing, color rules, and
 //! Unicode/ASCII fallbacks. Renderers only translate semantic roles into
 //! their terminal framework's style type.
+//!
+//! [`design`] extends that ownership from the lockup to the rest of the
+//! product surface — icons, motion, separators, casing, elapsed formatting —
+//! so a reskin is a new [`design::Skin`] rather than an edit in every renderer.
+
+pub mod design;
+
+pub use design::{
+    ActionState, Casing, ElapsedStyle, IconSet, LifecycleMark, Motion, Separators, Skin,
+};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -13,6 +23,11 @@ pub const MARK: &str = "NEXUS";
 pub const COMPACT_MARK: &str = "NEXUS";
 pub const CLI: &str = "snx";
 pub const ATTRIBUTION: &str = "by Silent Protocol";
+/// The default flagship agent shipped with NEXUS and its defining behavior.
+/// The product name stays `NEXUS`; this names the agent a fresh install runs.
+pub const FLAGSHIP_AGENT: &str = "nexus";
+pub const FLAGSHIP_MODE: &str = "Recursive Self-Improvement";
+pub const FLAGSHIP_MODE_SHORT: &str = "RSI";
 pub const WORDMARK: &str = "N  E  X  U  S";
 pub const TAGLINE: &str = "LOCAL INTELLIGENCE. CONTROLLED EXECUTION.";
 pub const TAGLINE_FIRST: &str = "LOCAL INTELLIGENCE.";

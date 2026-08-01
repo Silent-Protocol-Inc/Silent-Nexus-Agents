@@ -678,7 +678,8 @@ pub fn agent_show_report(app: &App, name: &str) -> Result<Report> {
                     .collect::<Vec<_>>()
                     .join(", "),
             )
-            .line(role.output_contract()));
+            .field("output contract", role.output_contract())
+            .line(role.description()));
     }
     let catalog = app.agent_catalog()?;
     let Some(definition) = catalog
@@ -762,7 +763,7 @@ pub fn agents_report(app: &App) -> Result<Report> {
                     "read-only"
                 }
                 .to_string(),
-                r.output_contract().chars().take(70).collect::<String>(),
+                r.description().chars().take(70).collect::<String>(),
             ]
         })
         .collect();
@@ -785,7 +786,12 @@ pub fn agents_report(app: &App) -> Result<Report> {
             ),
         ]);
     }
-    Ok(Report::new("agents").table(&["role", "access", "charter"], rows))
+    Ok(Report::new("agents")
+        .table(&["role", "access", "charter"], rows)
+        .line_sev(
+            "WARP evaluator roles run in isolated contexts without the candidate author's reasoning — no role creates, judges, and promotes the same candidate (/rsi governance)",
+            Sev::Dim,
+        ))
 }
 
 // ---------------------------------------------------------- persona/profile
@@ -1565,6 +1571,10 @@ pub fn memory_candidates_report(app: &App, session_id: Option<&str>) -> Result<R
         .line_sev(
             "approve with /memory approve <id>, reject with /memory reject <id>",
             Sev::Dim,
+        )
+        .line_sev(
+            "a candidate is not a fact: RSI-derived memory stays unverified until evidence or you confirm it (/rsi)",
+            Sev::Dim,
         ))
 }
 
@@ -2039,6 +2049,13 @@ pub fn permissions_report(app: &App) -> Report {
             },
         );
     }
+    // Permission mode and self-improvement governance are different axes, and
+    // the difference is easy to assume away: `full-access` removes prompts, not
+    // governance. Say so where the mode is chosen.
+    r = r
+        .header("self-improvement governance")
+        .line("permission mode never grants a tier-3 bypass, an auto-MCP install, or the removal of a validation stage")
+        .line("governed candidates and the rules in force: /rsi governance");
     r
 }
 
@@ -4349,6 +4366,15 @@ pub fn about_report() -> Report {
         .field("build commit", nexus_core::brand::BUILD_COMMIT)
         .field("source epoch", nexus_core::brand::BUILD_EPOCH)
         .field("tagline", nexus_core::brand::TAGLINE)
+        .field(
+            "flagship agent",
+            format!(
+                "{} · {} ({})",
+                nexus_core::brand::FLAGSHIP_AGENT,
+                nexus_core::brand::FLAGSHIP_MODE,
+                nexus_core::brand::FLAGSHIP_MODE_SHORT,
+            ),
+        )
         .field("cli", nexus_core::brand::CLI)
 }
 
@@ -4405,6 +4431,65 @@ pub fn thinking_report(app: &App) -> Report {
         .line(status.description())
         .line_sev(
             "Hidden chain-of-thought is never requested or displayed.",
+            Sev::Dim,
+        )
+}
+
+/// Persist an explicit narration choice. From here on it outranks
+/// `[narration].mode` in config, exactly as `/thinking` and `/view` do for
+/// their own axes.
+pub fn set_narration(app: &App, mode: nexus_core::timeline::NarrationMode) -> Result<()> {
+    app.update_ui_state(move |state| state.narration_mode = mode.as_str().to_string())
+}
+
+/// What the agent will say about its own work, and what the neighbouring axes
+/// are set to — the three are easy to confuse, so this report names all of them.
+pub fn narration_report(app: &App) -> Report {
+    use nexus_core::timeline::NarrationMode;
+    let mode = app.narration_mode();
+    let description = match mode {
+        NarrationMode::Off => {
+            "Says nothing about its own work. The live status line still shows, because knowing \
+             the agent is alive is not verbosity."
+        }
+        NarrationMode::Compact => {
+            "States its intent, then speaks only for failures, approvals, and check results."
+        }
+        NarrationMode::Auto => {
+            "States its intent, then reports meaningful milestones as they happen. Greetings and \
+             one-step lookups stay silent."
+        }
+        NarrationMode::Verbose => "States its intent and reports every observed action.",
+    };
+    Report::new("narrate")
+        .field("mode", mode.as_str())
+        .line(description)
+        .header("the other two axes")
+        .field(
+            "thinking",
+            format!(
+                "{} — how much it deliberates",
+                app.read_ui_state(|state| state.thinking()).as_str()
+            ),
+        )
+        .field(
+            "view",
+            format!(
+                "{} — which stored events render",
+                nexus_core::timeline::ActivityMode::parse(
+                    &app.read_ui_state(|state| state.activity_mode.clone())
+                )
+                .unwrap_or_default()
+                .as_str()
+            ),
+        )
+        .line_sev(
+            "Narration folds raw tool rows into what it said; /view reveals them again.",
+            Sev::Dim,
+        )
+        .line_sev(
+            "Presentation only: none of these change what runs, what is checked, or what needs \
+             approval.",
             Sev::Dim,
         )
 }
@@ -4739,6 +4824,15 @@ pub fn build_config_toml(
     s.push_str("# NEXUS configuration by Silent Protocol — generated by setup.\n");
     s.push_str(&format!("# Host GPU: {}\n", gpu.summary()));
     s.push_str("version = 1\n\n[general]\ndefault_agent = \"nexus\"\n\n");
+    // The flagship `nexus` agent's Recursive Self-Improvement is on by default;
+    // this block is emitted commented so the operator can discover and tune it.
+    s.push_str(
+        "# Recursive Self-Improvement: the nexus agent records approval-gated\n\
+         # improvement proposals after finished turns (review with `snx profile`).\n\
+         # [self_improvement]\n\
+         # enabled = true\n\
+         # surface_pending = true\n\n",
+    );
 
     for (name, provider, base_url, model) in models {
         // A server the operator runs charges nothing per token, so starting it

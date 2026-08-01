@@ -55,7 +55,7 @@
         },
         "tool_icons": {
           "default": "geometric",
-          "description": "Marks drawn beside tool rows: `geometric` (default), `emoji`, `ascii`.\n\nGeometric is the default because it is single-width in every terminal and needs no emoji font. `emoji` is opt-in: those marks are two cells wide and render as boxes on several mobile clients. A terminal that cannot draw Unicode at all falls back to `ascii` whatever this says.",
+          "description": "Marks drawn beside the tool rows `/view detailed|debug` reveals: `geometric` (default) or `ascii`.\n\nThe product surface itself no longer draws emoji anywhere — they are two cells wide, need an installed font, and render as boxes on several mobile clients — so a legacy `emoji` value still loads and resolves to `geometric`. A terminal that cannot draw Unicode at all falls back to `ascii` whatever this says.",
           "type": "string"
         }
       },
@@ -372,6 +372,11 @@
           "default": false,
           "description": "Allow global (cross-project) memory. Off by default.",
           "type": "boolean"
+        },
+        "require_approval": {
+          "default": false,
+          "description": "Hold agent-recorded memories as candidates until a human approves them.\n\nOff by default: an agent that records what it just established and then cannot read it back has not remembered anything, and the review queue filled up with facts nobody disputed. The protections that make recording safe are unchanged either way — secrets are still refused, the store is still separate from the workspace, writes are still budgeted per turn, and everything recorded is still visible and deletable in `/memory`. Set this to `true` to put the queue back.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -548,6 +553,30 @@
       },
       "type": "object"
     },
+    "NarrationConfig": {
+      "additionalProperties": false,
+      "description": "What the agent says about its own work while it does it.\n\nThis is the **third** verbosity-adjacent axis, and each of the three owns exactly one question, so none is defined twice:\n\n* `[thinking].mode` — how much *optional deliberation* the harness performs. * `[narration].mode` — whether the agent *says what it is doing*. * `[tui.activity].mode` (`/view`) — which *stored events render*.\n\nThe composition rule is one sentence: **narration folds, `/view` reveals.** There is no `debug` narration mode; raw-payload visibility stays with `/view` rather than being duplicated here.",
+      "properties": {
+        "max_steps": {
+          "default": 5,
+          "description": "Upper bound on intent steps (clamped to 2..=5). A plan longer than this stops being a glance and starts being a document.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mode": {
+          "default": "auto",
+          "description": "`off`, `compact`, `auto`, or `verbose`. `off` restores the pre-narration timeline exactly; the live status line renders in every mode, because liveness feedback is not verbosity.",
+          "type": "string"
+        },
+        "refine_wording": {
+          "default": true,
+          "description": "Allow one bounded model pass to improve the *wording* of the intent steps. The deterministic skeleton stays the source of truth: a refinement that changes the number, order, or meaning of steps is discarded.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "PolicyConfig": {
       "additionalProperties": false,
       "properties": {
@@ -625,6 +654,28 @@
           "default": "ask",
           "description": "Decision for workspace writes.",
           "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ProfileConfig": {
+      "additionalProperties": false,
+      "description": "Automatic capture of durable facts about the operator.\n\nA profile is read into the prompt of every later turn, so a wrong entry is not a wrong answer once — it is a wrong premise indefinitely. These switches exist because that trade is not the same for everyone: a shared or recorded terminal may want nothing kept at all.",
+      "properties": {
+        "auto_capture": {
+          "default": true,
+          "description": "Detect durable facts the operator states outright and store them on the active profile card. Off means the profile only ever changes through `/profile` or an explicit `profile.*` tool call.",
+          "type": "boolean"
+        },
+        "capture_preferences": {
+          "default": true,
+          "description": "Include stated working preferences and tooling, not just identity.",
+          "type": "boolean"
+        },
+        "require_review_for_sensitive": {
+          "default": true,
+          "description": "Hold facts in sensitive categories — health, religion, politics, sexuality, finances — as candidates for a human to approve rather than storing them live. Mentioning something in conversation is not consent to keep it, so this defaults on.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -781,6 +832,23 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "SelfImprovementConfig": {
+      "additionalProperties": false,
+      "description": "Recursive Self-Improvement (RSI) — the flagship `nexus` agent's ability to learn from finished turns. After a turn completes, the harness mines it for reusable workflows, repeated tool failures, and stated preferences and records them as *approval-gated* proposals (reviewed with `snx profile`). Nothing is ever applied without explicit operator approval; disabling this only stops the analysis, it changes no safety guarantee.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Analyze finished turns and record improvement proposals. On by default; set `false` to disable post-turn analysis entirely.",
+          "type": "boolean"
+        },
+        "surface_pending": {
+          "default": true,
+          "description": "Surface the pending-proposal count in `snx status` and TUI startup so the operator knows there is a review queue waiting.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1001,7 +1069,8 @@
       "default": {
         "default_ttl_days": 90,
         "enabled": true,
-        "global_enabled": false
+        "global_enabled": false,
+        "require_approval": false
       }
     },
     "models": {
@@ -1011,6 +1080,19 @@
       "default": {},
       "description": "Named model endpoints, e.g. `[models.local_main]`.",
       "type": "object"
+    },
+    "narration": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/NarrationConfig"
+        }
+      ],
+      "default": {
+        "max_steps": 5,
+        "mode": "auto",
+        "refine_wording": true
+      },
+      "description": "How much the agent narrates its own work (`[narration]`)."
     },
     "policy": {
       "allOf": [
@@ -1039,6 +1121,19 @@
         "reads": "allow",
         "writes": "ask"
       }
+    },
+    "profile": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ProfileConfig"
+        }
+      ],
+      "default": {
+        "auto_capture": true,
+        "capture_preferences": true,
+        "require_review_for_sensitive": true
+      },
+      "description": "What the harness may learn about the operator (`[profile]`)."
     },
     "routing": {
       "allOf": [
@@ -1073,6 +1168,18 @@
         "network": "off",
         "timeout_secs": 120
       }
+    },
+    "self_improvement": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SelfImprovementConfig"
+        }
+      ],
+      "default": {
+        "enabled": true,
+        "surface_pending": true
+      },
+      "description": "Recursive Self-Improvement behavior (`[self_improvement]`): the flagship `nexus` agent's post-turn analysis that records approval-gated proposals."
     },
     "thinking": {
       "allOf": [

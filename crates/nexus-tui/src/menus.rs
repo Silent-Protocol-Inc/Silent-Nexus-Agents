@@ -1005,7 +1005,10 @@ pub fn agents_menu(active: &str, custom: &[nexus_agent::CustomAgentDefinition]) 
                 }
                 .to_string(),
             )
-            .detail(r.output_contract().chars().take(90).collect::<String>())
+            // No manual truncation: the renderer already cuts the detail to the
+            // panel width. Taking a fixed character count on top of that cut
+            // words in half at widths where the row had room to spare.
+            .detail(r.description().to_string())
         })
         .collect();
     items.extend(custom.iter().map(|definition| {
@@ -1027,7 +1030,13 @@ pub fn agents_menu(active: &str, custom: &[nexus_agent::CustomAgentDefinition]) 
             } else {
                 "read-only"
             },
-            definition.description
+            // A custom agent may legitimately omit its description; without a
+            // fallback the row ended in a dangling separator.
+            if definition.description.trim().is_empty() {
+                "no description"
+            } else {
+                definition.description.trim()
+            }
         ))
     }));
     Menu::new("agents", items)
@@ -1083,6 +1092,7 @@ pub fn profile_cards_menu(
     profiles: &[(nexus_core::harness::UserProfile, usize, usize)],
     active_profile_id: Option<&str>,
     pending_conflicts: usize,
+    pending_facts: &[nexus_core::harness::ProfileFact],
 ) -> Menu {
     let mut items = vec![MenuItem::new(
         "Create profile card…",
@@ -1091,6 +1101,27 @@ pub fn profile_cards_menu(
     .id("profile:create")
     .category("actions")
     .detail("creates a separate profile; existing people are never silently merged")];
+    // Facts captured automatically but held back — sensitive categories, and
+    // anything not stated outright. They are recorded and not in use, and this
+    // is the only place that says so; without it, "SNX remembered that" and
+    // "SNX is waiting to be told whether it may" look identical.
+    items.extend(pending_facts.iter().map(|fact| {
+        MenuItem::new(
+            format!("◇ {}", fact.key),
+            UiAction::InsertInput(format!("/profile approve {}", fact.id)),
+        )
+        .id(fact.id.clone())
+        .category("pending review")
+        .badge("awaiting review".to_string())
+        .detail(format!(
+            "{} · {} · not in use until you approve it",
+            match &fact.value {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            },
+            fact.sensitivity
+        ))
+    }));
     items.extend(profiles.iter().map(|(profile, fact_count, memory_count)| {
         let selected = active_profile_id == Some(profile.id.as_str());
         MenuItem::new(
@@ -1405,6 +1436,82 @@ pub fn subagents_menu(runs: &[nexus_core::orchestration::AgentRun], has_session:
 
 /// `/permissions` — approval presets, most restrictive first. Full access is
 /// explicit about what it stops asking for; destructive actions always ask.
+/// The `/rsi` workspace: what the self-improvement loop has observed, what it
+/// proposes, and what governs it.
+///
+/// Write actions are filtered by permission mode — in `read-only` the review
+/// entries are not offered at all. The hint says the part that matters and is
+/// easy to assume otherwise: `full-access` removes prompts, not governance. A
+/// tier-3 candidate still waits for a human whatever this menu shows.
+pub fn rsi_menu(active_mode: &str) -> Menu {
+    let read_only = active_mode == "read-only";
+    let mut items = vec![
+        MenuItem::new("Status", UiAction::RunCommand("rsi status".into()))
+            .category("overview")
+            .detail("observation state, candidate queue, and the last promotion"),
+        MenuItem::new("Candidates", UiAction::RunCommand("rsi candidates".into()))
+            .category("overview")
+            .detail("every candidate with its declared and classified risk tier"),
+        MenuItem::new(
+            "Candidate detail…",
+            UiAction::InsertInput("/rsi show ".into()),
+        )
+        .category("overview")
+        .detail("one candidate: evidence, success metrics, WARP classification"),
+        MenuItem::new(
+            "Observations",
+            UiAction::RunCommand("rsi observations".into()),
+        )
+        .category("evidence")
+        .detail("redacted harness events the candidates are built from"),
+        MenuItem::new(
+            "Outcome history",
+            UiAction::RunCommand("rsi outcomes".into()),
+        )
+        .category("evidence")
+        .detail("multi-dimensional scoring; agent self-assessment ranks lowest"),
+        MenuItem::new("Promotions", UiAction::RunCommand("rsi promotions".into()))
+            .category("promotion")
+            .detail("what was promoted, by whom, and the recorded way back"),
+        MenuItem::new("Rollbacks", UiAction::RunCommand("rsi rollbacks".into()))
+            .category("promotion")
+            .detail("triggers and restored versions"),
+        MenuItem::new("Governance", UiAction::RunCommand("rsi governance".into()))
+            .category("governance")
+            .badge("compile-time")
+            .detail("the rules, and the components no candidate may modify"),
+        MenuItem::new("Memory health", UiAction::Load(LoadRequest::Memory))
+            .category("related")
+            .detail("memory candidates start unverified until evidence supports them"),
+        MenuItem::new("Skills", UiAction::Load(LoadRequest::Skills))
+            .category("related")
+            .detail("proposed skills are stored disabled until reviewed"),
+    ];
+    if !read_only {
+        items.push(
+            MenuItem::new("Review queue…", UiAction::InsertInput("/improve ".into()))
+                .category("actions")
+                .detail("approve or reject a proposal — governance still applies on top"),
+        );
+        items.push(
+            MenuItem::new(
+                "Observation setting…",
+                UiAction::InsertInput("/config set workspace self_improvement.enabled true".into()),
+            )
+            .category("actions")
+            .detail("turn post-turn analysis on or off"),
+        );
+    }
+    Menu::new("rsi — governed self-improvement", items)
+        .route("/rsi")
+        .branded(BrandVariant::Compact)
+        .hint(if read_only {
+            "read-only permissions: review actions hidden · full-access would not bypass tier 3"
+        } else {
+            "Enter opens a report · promotion needs WARP evidence; full-access does not bypass tier 3"
+        })
+}
+
 pub fn permissions_menu(active_mode: &str) -> Menu {
     let mut items: Vec<MenuItem> = nexus_app::services::PERMISSION_MODES
         .iter()
@@ -1657,6 +1764,88 @@ pub fn thinking_menu(active: nexus_core::ThinkingMode, preview: &str) -> Menu {
         .hint(preview.to_string())
 }
 
+/// The narration axis. The hint names the neighbouring axes on purpose: three
+/// verbosity-adjacent controls are easy to confuse, and each owns exactly one
+/// question.
+pub fn narrate_menu(active: nexus_core::timeline::NarrationMode) -> Menu {
+    use nexus_core::timeline::NarrationMode;
+    let items = [
+        (
+            NarrationMode::Auto,
+            "auto (recommended)",
+            "intent, then meaningful milestones; greetings stay silent",
+        ),
+        (
+            NarrationMode::Compact,
+            "compact",
+            "intent, then failures, approvals, and check results only",
+        ),
+        (
+            NarrationMode::Verbose,
+            "verbose",
+            "intent and every observed action, in plain language",
+        ),
+        (
+            NarrationMode::Off,
+            "off",
+            "says nothing; raw tool rows return, and the status line stays",
+        ),
+    ]
+    .into_iter()
+    .map(|(mode, label, detail)| {
+        MenuItem::new(
+            format!("{} {label}", if mode == active { "●" } else { " " }),
+            UiAction::RunCommand(format!("narrate {}", mode.as_str())),
+        )
+        .detail(detail)
+    })
+    .collect();
+    Menu::new("narration mode", items)
+        .route("/narrate")
+        .hint("Narration folds raw tool rows; /view reveals them · /thinking is deliberation")
+}
+
+/// `/view` as a selector rather than a flag.
+///
+/// Every other presentation control opens a menu with the current value marked;
+/// this one printed a report and expected the operator to retype the command
+/// with the value they wanted. Typed arguments still work — they are the
+/// scripting path — but they are no longer how you discover the options.
+pub fn view_menu(active: nexus_core::timeline::ActivityMode) -> Menu {
+    use nexus_core::timeline::ActivityMode;
+    let items = [
+        (
+            ActivityMode::Default,
+            "default (recommended)",
+            "essential activity only; the product surface",
+        ),
+        (
+            ActivityMode::Detailed,
+            "detailed",
+            "adds reasoning summaries, plans, stages, and raw tool rows",
+        ),
+        (
+            ActivityMode::Debug,
+            "debug",
+            "adds routing, policy, and provider diagnostics; nothing is hidden",
+        ),
+    ]
+    .into_iter()
+    .map(|(mode, label, detail)| {
+        MenuItem::new(
+            format!("{} {label}", if mode == active { "●" } else { " " }),
+            UiAction::RunCommand(format!("view {}", mode.as_str())),
+        )
+        .id(format!("view:{}", mode.as_str()))
+        .detail(detail)
+    })
+    .collect();
+    Menu::new("timeline view", items)
+        .id("view-menu")
+        .route("/view")
+        .hint("/view reveals machine detail · /narrate folds it · Esc close")
+}
+
 pub fn details_menu(active: nexus_core::timeline::TranscriptDetail) -> Menu {
     let items = [
         (
@@ -1839,4 +2028,147 @@ pub fn branches_menu(branches: &[nexus_app::gitx::BranchInfo]) -> Menu {
         .route("/branch")
         .searchable()
         .hint("Push/pull/PR operations stay in connector workflows")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(menu: &Menu) -> Vec<String> {
+        menu.items.iter().map(|i| i.label.clone()).collect()
+    }
+
+    /// The flagship used to render as a bare name with no second line, because
+    /// its subtitle was an empty string and the renderer drops empty details.
+    /// Every selectable row must carry one — a blank row makes the default
+    /// agent look unfinished and says nothing about what it is for.
+    #[test]
+    fn every_agent_row_carries_a_subtitle() {
+        let menu = agents_menu("nexus", &[]);
+        assert_eq!(menu.items.len(), AgentRole::all().len());
+        for item in &menu.items {
+            assert!(
+                !item.detail.trim().is_empty(),
+                "`{}` renders without a subtitle",
+                item.label
+            );
+        }
+    }
+
+    /// The panel is capped at 78 columns and the detail is truncated to fit it,
+    /// so a subtitle written past that budget is shown cut off mid-word.
+    ///
+    /// Several of the older subtitles already run past it and are ellipsized —
+    /// rewriting them is not this change. The flagship's is new, so it is held
+    /// to the budget: a default agent whose one line of explanation trails off
+    /// is the defect this was meant to fix.
+    #[test]
+    fn the_flagship_subtitle_is_not_truncated_by_the_panel() {
+        const DETAIL_BUDGET: usize = 70;
+        let width = nexus_core::brand::visible_width(AgentRole::Nexus.description());
+        assert!(
+            width <= DETAIL_BUDGET,
+            "the flagship subtitle needs {width} columns, budget is {DETAIL_BUDGET}",
+        );
+    }
+
+    /// A custom agent may omit its description; the row used to end in a
+    /// dangling separator when it did.
+    #[test]
+    fn a_custom_agent_without_a_description_still_reads_cleanly() {
+        let definition = nexus_agent::CustomAgentDefinition {
+            name: "auditor".into(),
+            base: "reviewer".into(),
+            description: String::new(),
+            instructions: String::new(),
+            tool_categories: None,
+            allow_write: None,
+            max_risk: None,
+            max_steps: None,
+            max_tokens: None,
+            max_runtime_ms: None,
+            allow_delegation: None,
+            scope: "project".into(),
+            source: std::path::PathBuf::new(),
+        };
+        let menu = agents_menu("nexus", std::slice::from_ref(&definition));
+        let row = menu
+            .items
+            .iter()
+            .find(|item| item.label.trim_start_matches([' ', '●']).trim() == "auditor")
+            .expect("custom row");
+        assert!(row.detail.contains("no description"), "{}", row.detail);
+        assert!(!row.detail.trim_end().ends_with('·'), "{}", row.detail);
+    }
+
+    /// A fact captured automatically but held back is recorded and *not in
+    /// use*. Without a row saying so, "SNX remembered that" and "SNX is
+    /// waiting to be told whether it may" are indistinguishable from here.
+    #[test]
+    fn a_fact_awaiting_review_is_visible_without_a_restart() {
+        let profile = nexus_core::harness::UserProfile::new("Sans").expect("valid card");
+        let mut held = nexus_core::harness::ProfileFact::explicit(
+            &profile.id,
+            "identity.occupation",
+            serde_json::Value::String("cardiologist".into()),
+        );
+        held.sensitivity = "sensitive".into();
+        held.status = nexus_core::harness::ProfileFactStatus::Candidate;
+
+        let menu = profile_cards_menu(
+            &[(profile.clone(), 1, 0)],
+            Some(profile.id.as_str()),
+            0,
+            std::slice::from_ref(&held),
+        );
+        let row = menu
+            .items
+            .iter()
+            .find(|item| item.id == held.id)
+            .expect("the held fact has no row");
+        assert_eq!(row.category, "pending review");
+        assert!(row.detail.contains("not in use"), "{}", row.detail);
+        assert!(row.detail.contains("cardiologist"), "{}", row.detail);
+        // …and it does not appear at all once nothing is pending.
+        let clean = profile_cards_menu(&[(profile, 1, 0)], None, 0, &[]);
+        assert!(clean
+            .items
+            .iter()
+            .all(|item| item.category != "pending review"));
+    }
+
+    #[test]
+    fn the_rsi_menu_routes_and_offers_the_read_only_views() {
+        let menu = rsi_menu("default");
+        assert_eq!(menu.route, "/rsi");
+        for expected in ["Status", "Candidates", "Observations", "Governance"] {
+            assert!(
+                labels(&menu).iter().any(|l| l == expected),
+                "missing `{expected}` in {:?}",
+                labels(&menu)
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_permissions_hide_the_review_actions() {
+        let restricted = rsi_menu("read-only");
+        assert!(
+            restricted.items.iter().all(|i| i.category != "actions"),
+            "read-only must not offer write actions"
+        );
+        let normal = rsi_menu("default");
+        assert!(normal.items.iter().any(|i| i.category == "actions"));
+    }
+
+    /// Easy thing to assume wrongly, so the menu says it in both modes.
+    #[test]
+    fn every_hint_states_that_full_access_does_not_bypass_tier_three() {
+        for mode in ["read-only", "default", "auto-edit", "full-access"] {
+            assert!(
+                rsi_menu(mode).hint.contains("tier 3"),
+                "hint for `{mode}` omits the tier-3 note"
+            );
+        }
+    }
 }

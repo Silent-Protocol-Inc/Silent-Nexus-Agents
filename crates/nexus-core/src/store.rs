@@ -58,6 +58,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0010_session_side_notes",
         include_str!("../../../migrations/0010_session_side_notes.sql"),
     ),
+    (
+        "0011_rsi_warp",
+        include_str!("../../../migrations/0011_rsi_warp.sql"),
+    ),
 ];
 pub const MIGRATION_COUNT: usize = MIGRATIONS.len();
 

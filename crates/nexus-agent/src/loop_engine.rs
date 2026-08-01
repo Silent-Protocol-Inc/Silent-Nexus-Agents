@@ -57,6 +57,16 @@ const MAX_PLAN_REVISIONS: u32 = 5;
 /// going to be rescued by another fold.
 const MAX_MID_TURN_COMPACTIONS: u32 = 3;
 
+/// Capabilities that [`AgentRole::capabilities`] decides, and that a tool
+/// declaring them will be withheld for.
+///
+/// An allowlist rather than "everything a tool declares", because
+/// `ToolMeta::required_capabilities` predates role capabilities and is mostly
+/// used to restate the tool's own category — `fs.read_file` requires
+/// `"filesystem"`, which no role grants by that name. Enforcing the field
+/// wholesale would leave every role with no tools at all.
+const GOVERNED_CAPABILITIES: &[&str] = &[nexus_tools::profile::WRITE_CAPABILITY];
+
 /// Per-turn safety limits.
 #[derive(Debug, Clone)]
 pub struct TurnLimits {
@@ -320,6 +330,17 @@ pub enum LoopEvent {
         mode: String,
         show: bool,
         reason: &'static str,
+    },
+    /// The 2–5 step plan the agent intends to follow, stated before it acts.
+    ///
+    /// An intention, never a record: no step is ever marked done from this
+    /// event, and its presence says nothing about what happened. `refined`
+    /// reports whether a model was allowed to improve the wording, so a
+    /// degraded turn reads as degraded instead of as authored.
+    IntentPlanned {
+        steps: Vec<String>,
+        class: String,
+        refined: bool,
     },
     /// Provider-supplied reasoning summary accompanying a real tool plan.
     /// Hidden chain-of-thought is never requested or surfaced.
@@ -1036,6 +1057,23 @@ impl TurnTimeline {
                     )?;
                 }
             }
+            LoopEvent::IntentPlanned {
+                steps,
+                class,
+                refined,
+            } => {
+                self.append(
+                    LifecyclePhase::Proposed,
+                    TimelineStatus::Running,
+                    format!("intent · {} step(s)", steps.len()),
+                    TimelineKind::Intent {
+                        steps: steps.clone(),
+                        class: class.clone(),
+                        refined: *refined,
+                    },
+                    None,
+                )?;
+            }
             LoopEvent::AgentActivity {
                 role,
                 step,
@@ -1607,16 +1645,23 @@ pub struct AgentLoop {
     custom_agent: Option<CustomAgentDefinition>,
     events: Option<mpsc::UnboundedSender<LoopEvent>>,
     active_timeline: Arc<Mutex<Option<Arc<TurnTimeline>>>>,
+    /// Resolved once per turn, where the task class and work estimate are
+    /// known, and read by every narration site after that. Deriving it again
+    /// at each call site would let two places disagree about whether this turn
+    /// narrates.
+    narration: Arc<Mutex<crate::narration::NarrationPolicy>>,
 }
 
 impl AgentLoop {
     pub fn new(runtime: AgentRuntime, role: AgentRole) -> Self {
+        let narration = crate::narration::NarrationPolicy::silent(runtime.narration);
         Self {
             runtime,
             role,
             custom_agent: None,
             events: None,
             active_timeline: Arc::new(Mutex::new(None)),
+            narration: Arc::new(Mutex::new(narration)),
         }
     }
 
@@ -1665,16 +1710,57 @@ impl AgentLoop {
     /// Emit one activity segment. The single door every narration goes through,
     /// so the "never private reasoning" rule has one place to hold.
     fn narrate(&self, work: &WorkBreakdown, phase: ActivityPhase, text: impl AsRef<str>) {
+        self.emit_activity(Self::active_step(work), phase, text);
+    }
+
+    /// The same door, for the facts that happen outside a stage — compaction
+    /// and provider backoff belong to the turn, not to a step of its plan, and
+    /// inventing a step number for them would be exactly the fabricated
+    /// progress the status line refuses to show.
+    fn emit_activity(&self, step: Option<(u32, u32)>, phase: ActivityPhase, text: impl AsRef<str>) {
         let text = text.as_ref().trim();
         if text.is_empty() {
             return;
         }
         self.emit(LoopEvent::AgentActivity {
             role: self.review_agent_name(),
-            step: Self::active_step(work),
+            step,
             phase,
             text: self.safe_model_text(text),
         });
+    }
+
+    /// The narration policy resolved for this turn.
+    fn narration_policy(&self) -> crate::narration::NarrationPolicy {
+        self.narration
+            .lock()
+            .map(|policy| *policy)
+            .unwrap_or_else(|_| crate::narration::NarrationPolicy::silent(self.runtime.narration))
+    }
+
+    /// Narrate one completed fact, if the current mode surfaces it.
+    ///
+    /// The only path from a runtime result to the timeline. Translation strips
+    /// the machine detail; the policy decides whether this mode says anything
+    /// at all. A routine success in `compact` produces silence rather than a
+    /// line nobody needed.
+    fn narrate_fact(&self, work: Option<&WorkBreakdown>, fact: &crate::narration::RuntimeFact) {
+        let policy = self.narration_policy();
+        let presented = crate::narration::present(fact);
+        if !policy.shows(&presented) {
+            return;
+        }
+        let phase = match presented.state {
+            nexus_core::brand::ActionState::Done | nexus_core::brand::ActionState::Failed => {
+                ActivityPhase::Validation
+            }
+            nexus_core::brand::ActionState::WaitingOnYou
+            | nexus_core::brand::ActionState::WaitingOnProvider
+            | nexus_core::brand::ActionState::NeedsApproval => ActivityPhase::Waiting,
+            nexus_core::brand::ActionState::Scanning => ActivityPhase::Analysis,
+            _ => ActivityPhase::Execution,
+        };
+        self.emit_activity(work.and_then(Self::active_step), phase, presented.line());
     }
 
     fn agent_can_write(&self) -> bool {
@@ -2238,7 +2324,38 @@ impl AgentLoop {
                     self.emit(LoopEvent::Error(format!("goal budget: {e}")));
                 }
             }
-            if outcome.stopped_reason == "finished" {
+            if self.runtime.tool_ctx.config.self_improvement.enabled {
+                // Level-0 observability: record the turn outcome as structured,
+                // redacted evidence. Observation must never break a turn, so any
+                // storage error is logged and swallowed.
+                let collector = nexus_rsi::ObservationCollector::new(
+                    HarnessRepository::new(self.runtime.store.clone()),
+                    self.runtime.redactor.clone(),
+                    true,
+                );
+                let ctx = nexus_rsi::ObservationContext {
+                    session_id: Some(session_id.as_str().to_string()),
+                    goal_id: session.current_goal.clone(),
+                    model: Some(session.model.clone()),
+                    ..Default::default()
+                };
+                let observation = if outcome.stopped_reason == "finished" {
+                    collector.task_completed(
+                        &ctx,
+                        objective,
+                        outcome.steps as u64,
+                        outcome.input_tokens.saturating_add(outcome.output_tokens) as u64,
+                    )
+                } else {
+                    collector.task_failed(&ctx, objective, &outcome.stopped_reason)
+                };
+                if let Err(error) = observation {
+                    tracing::warn!(%error, "post-turn RSI observation skipped");
+                }
+            }
+            if outcome.stopped_reason == "finished"
+                && self.runtime.tool_ctx.config.self_improvement.enabled
+            {
                 if let Err(error) =
                     nexus_memory::RsiStore::new(self.runtime.store.clone(), &session.workspace)
                         .after_completed_turn(session_id.as_str(), objective)
@@ -2447,6 +2564,42 @@ impl AgentLoop {
             model: model_name.clone(),
             agent: self.agent_name().into(),
         });
+
+        // What this turn intends to do, said before it does anything.
+        //
+        // Deterministic and free: it comes from the same class and work
+        // estimate the breakdown above used, so the two can never disagree, and
+        // a constrained local model gets the same plan as a frontier one. The
+        // policy keeps it off greetings and lookups — a plan for "hi" is noise.
+        let narration = crate::narration::NarrationPolicy::for_turn(
+            self.runtime.narration,
+            class,
+            &observed_work,
+        );
+        if let Ok(mut stored) = self.narration.lock() {
+            *stored = narration;
+        }
+        let mut intent = if narration.emits_intent() {
+            crate::narration::skeleton(class, &observed_work, self.runtime.narration_max_steps)
+        } else {
+            None
+        };
+        // One bounded pass to improve the *wording* — the deterministic half
+        // above is the source of truth, and `accept_rewording` discards
+        // anything that is not a 1:1 restatement of it.
+        if let (Some(plan), true) = (
+            intent.as_mut(),
+            narration.refines_wording() && self.runtime.narration_refine,
+        ) {
+            *plan = self.refine_intent(plan, objective, &model_name).await;
+        }
+        if let Some(plan) = &intent {
+            self.emit(LoopEvent::IntentPlanned {
+                steps: plan.texts(),
+                class: class.as_str().into(),
+                refined: plan.refined,
+            });
+        }
 
         // Resolve the deliberation decision once, here, so the UI never has to
         // recompute it and every surface agrees on what this turn is doing.
@@ -3311,16 +3464,16 @@ impl AgentLoop {
                     // placeholder "[structured tool action omitted]" here,
                     // which told the operator only that there was nothing to
                     // tell them.
+                    //
+                    // Nothing is narrated here for a call that has not run yet.
+                    // A line about an action the harness is *about* to take is a
+                    // claim about the future, and the timeline is a record of the
+                    // past; the live status line is what answers "what is it doing
+                    // right now". The provider's own public summary is a different
+                    // claim — the provider made it — so that one still passes
+                    // through.
                     let reasoning = tool_reasoning_summary(&completion.content, native);
-                    if reasoning.is_empty() {
-                        let arguments =
-                            serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
-                        self.narrate(
-                            &work,
-                            ActivityPhase::Execution,
-                            derived_activity(&call.name, &arguments),
-                        );
-                    } else {
+                    if !reasoning.is_empty() {
                         self.narrate(&work, ActivityPhase::Analysis, &reasoning);
                         // Still recorded as a provider summary: the two are
                         // different claims, and only this one came from the
@@ -3443,50 +3596,52 @@ impl AgentLoop {
                     tool_calls_count += 1;
                     harness_state.tool_call_count = tool_calls_count;
 
+                    // **Every path out of here must first answer the call.**
+                    //
+                    // The provider has already been sent an assistant message
+                    // containing this `function_call`, and that message is
+                    // persisted. A Responses-API provider rejects an entire
+                    // conversation whose `function_call` has no matching
+                    // `function_call_output` — so returning early on a refusal
+                    // left the session permanently wedged: every later turn came
+                    // back `HTTP 400 … No tool output found for function call
+                    // call_…`, and no amount of retrying could clear it. A stop
+                    // is therefore *decided* here and *acted on* after the result
+                    // has been recorded.
+                    let mut stop: Option<(String, &'static str)> = None;
+                    let mut hard_error: Option<NexusError> = None;
+
                     let result_text = match tool_result {
                         Ok(text) => text,
                         Err(e) if e.is_policy_stop() => {
-                            // Denied or budget: surface and stop the turn.
-                            let msg = format!("stopped: {e}");
-                            self.emit(LoopEvent::Error(msg.clone()));
-                            return Ok(LoopOutcome {
-                                final_message: msg,
-                                steps,
-                                tool_calls: tool_calls_count,
-                                stopped_reason: "policy_stop".into(),
-                                input_tokens,
-                                output_tokens,
-                                cache,
-                            });
+                            // Denied or budget: the turn stops, but the model
+                            // still gets told why — a refusal the transcript
+                            // does not record is a refusal that repeats.
+                            let message = format!("stopped: {e}");
+                            stop = Some((message, "policy_stop"));
+                            format!("ERROR: {e}")
                         }
                         Err(e @ NexusError::ToolInput { .. }) => {
                             failure_count += 1;
                             harness_state.failure_count = failure_count;
                             if tool_input_correction_used {
-                                let msg = format!(
+                                let message = format!(
                                     "stopped: model repeated malformed tool arguments after one schema correction ({e})"
                                 );
-                                self.emit(LoopEvent::Error(msg.clone()));
-                                return Ok(LoopOutcome {
-                                    final_message: msg,
-                                    steps,
-                                    tool_calls: tool_calls_count,
-                                    stopped_reason: "malformed_action".into(),
-                                    input_tokens,
-                                    output_tokens,
-                                    cache,
-                                });
+                                stop = Some((message, "malformed_action"));
+                                format!("ERROR: {e}")
+                            } else {
+                                tool_input_correction_used = true;
+                                let schema = self
+                                    .runtime
+                                    .tools
+                                    .get(&call.name)
+                                    .map(|tool| compact_schema(&tool.meta().input_schema))
+                                    .unwrap_or_else(|_| "{}".into());
+                                format!(
+                                    "ERROR: malformed tool arguments. Retry once with valid JSON matching {schema}. {e}"
+                                )
                             }
-                            tool_input_correction_used = true;
-                            let schema = self
-                                .runtime
-                                .tools
-                                .get(&call.name)
-                                .map(|tool| compact_schema(&tool.meta().input_schema))
-                                .unwrap_or_else(|_| "{}".into());
-                            format!(
-                                "ERROR: malformed tool arguments. Retry once with valid JSON matching {schema}. {e}"
-                            )
                         }
                         Err(e) if e.is_model_recoverable() => {
                             failure_count += 1;
@@ -3494,44 +3649,33 @@ impl AgentLoop {
                             // Feed the error back so the model can correct.
                             format!("ERROR: {e}")
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            let text = format!("ERROR: {e}");
+                            hard_error = Some(e);
+                            text
+                        }
                     };
 
-                    if result_text.starts_with("ERROR:") {
+                    if stop.is_none() && result_text.starts_with("ERROR:") {
                         recent_errors.push(result_text.clone());
                         let repeats = recent_errors
                             .iter()
                             .filter(|previous| **previous == result_text)
                             .count() as u32;
                         if repeats >= limits.max_repeated_calls {
-                            let message = format!(
-                                "stopped: no progress after {repeats} identical tool errors"
-                            );
-                            self.emit(LoopEvent::Error(message.clone()));
-                            return Ok(LoopOutcome {
-                                final_message: message,
-                                steps,
-                                tool_calls: tool_calls_count,
-                                stopped_reason: "no_progress".into(),
-                                input_tokens,
-                                output_tokens,
-                                cache,
-                            });
+                            stop = Some((
+                                format!(
+                                    "stopped: no progress after {repeats} identical tool errors"
+                                ),
+                                "no_progress",
+                            ));
                         }
                     }
-                    if failure_count > limits.max_failures {
-                        let message =
-                            format!("stopped: failure budget {} exhausted", limits.max_failures);
-                        self.emit(LoopEvent::Error(message.clone()));
-                        return Ok(LoopOutcome {
-                            final_message: message,
-                            steps,
-                            tool_calls: tool_calls_count,
-                            stopped_reason: "failure_budget".into(),
-                            input_tokens,
-                            output_tokens,
-                            cache,
-                        });
+                    if stop.is_none() && failure_count > limits.max_failures {
+                        stop = Some((
+                            format!("stopped: failure budget {} exhausted", limits.max_failures),
+                            "failure_budget",
+                        ));
                     }
 
                     let tool_msg = ChatMessage::tool_result(&call.id, &call.name, &result_text);
@@ -3539,6 +3683,23 @@ impl AgentLoop {
                         .sessions
                         .add_message(session_id.as_str(), turn, &tool_msg)?;
                     messages.push(tool_msg);
+
+                    // The call is answered; now the turn may end.
+                    if let Some(error) = hard_error {
+                        return Err(error);
+                    }
+                    if let Some((message, reason)) = stop {
+                        self.emit(LoopEvent::Error(message.clone()));
+                        return Ok(LoopOutcome {
+                            final_message: message,
+                            steps,
+                            tool_calls: tool_calls_count,
+                            stopped_reason: reason.into(),
+                            input_tokens,
+                            output_tokens,
+                            cache,
+                        });
+                    }
 
                     // A submitted plan is the end of planning and the start of
                     // the decision. Everything the operator needs to judge it
@@ -3787,6 +3948,17 @@ impl AgentLoop {
         };
         timeline.record_loop_event(&event)?;
         self.emit(event);
+        // Compaction is a degradation: earlier turns are now a summary, and the
+        // operator should know that before wondering why a detail was
+        // forgotten. It belongs to the turn rather than to a step of its plan,
+        // so it carries no step number.
+        self.narrate_fact(
+            None,
+            &crate::narration::RuntimeFact::ContextCompacted {
+                before: before_tokens,
+                after: after_tokens,
+            },
+        );
         Ok(())
     }
 
@@ -3848,6 +4020,94 @@ impl AgentLoop {
                 (fallback_compaction_summary(folded), false)
             }
         }
+    }
+
+    /// One bounded model pass over the intent wording.
+    ///
+    /// The hybrid half of the planner: the skeleton decides *what* the steps
+    /// are, and this may only say them better. Every failure mode — no
+    /// provider, an error, an empty reply, a wrong number of lines, a step that
+    /// changed the act or reached for a function name — lands on the same
+    /// outcome: the skeleton, unchanged, with `refined: false`. A degraded
+    /// refinement is recorded rather than implied, so a plan never *looks*
+    /// model-authored when it is not.
+    ///
+    /// It costs one small completion on a task-shaped turn and nothing at all
+    /// otherwise, because `emits_intent()` already excluded greetings and
+    /// lookups before this is reached.
+    async fn refine_intent(
+        &self,
+        skeleton: &crate::narration::IntentPlan,
+        objective: &str,
+        model_name: &str,
+    ) -> crate::narration::IntentPlan {
+        let numbered = skeleton
+            .texts()
+            .iter()
+            .enumerate()
+            .map(|(index, text)| format!("{}. {text}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let request = nexus_models::types::ModelRequest {
+            messages: vec![
+                ChatMessage::system(
+                    "Rewrite each step of this plan so it reads naturally for the person who \
+                     asked. Keep exactly the same number of steps, in the same order, each \
+                     describing the same action as the step it replaces — you are improving \
+                     the sentence, not the plan. One step per line, numbered as given, at \
+                     most 80 characters each. Plain language only: no function names, no \
+                     file paths, no shell commands, no identifiers with dots or underscores. \
+                     Output the numbered lines and nothing else.",
+                ),
+                ChatMessage::user(format!(
+                    "The person asked: {}\n\nThe plan:\n{numbered}",
+                    self.safe_model_text(objective)
+                )),
+            ],
+            // Enough for five short lines and no more; an overrun is a
+            // rejection anyway, so there is no reason to pay for one.
+            max_tokens: Some(256),
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+        // The intent is meant to appear *before* the work starts, so this pass
+        // gets a short leash: a slow local model must not turn "here is what I
+        // am about to do" into ten seconds of silence. Timing out is just
+        // another way of keeping the skeleton.
+        const REFINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+        let completion = match self.runtime.models.get(model_name) {
+            Ok(provider) => {
+                match tokio::time::timeout(REFINE_TIMEOUT, provider.complete(request)).await {
+                    Ok(Ok(completion)) => completion.content,
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "intent rewording failed; keeping the skeleton");
+                        return skeleton.clone();
+                    }
+                    Err(_) => {
+                        tracing::debug!("intent rewording timed out; keeping the skeleton");
+                        return skeleton.clone();
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(%error, "no provider for the intent rewording");
+                return skeleton.clone();
+            }
+        };
+        // Model text on a product surface goes through the same sanitizer as
+        // every other model text; the rewording gate is about meaning, not
+        // about control characters or secrets.
+        let completion = self.safe_model_text(&completion);
+        let reworded: Vec<String> = completion
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| strip_step_number(line).to_string())
+            .collect();
+        if reworded.len() != skeleton.len() {
+            return skeleton.clone();
+        }
+        crate::narration::accept_rewording(skeleton, &reworded)
     }
 
     /// Turn a validated `plan.submit` payload into a durable plan.
@@ -4330,6 +4590,15 @@ impl AgentLoop {
         let mut unsafe_host_authorized = false;
         match effective_decision {
             Decision::Deny => {
+                // A refusal changes what the turn can do, so it is a milestone
+                // in every mode that narrates at all — the operator otherwise
+                // sees a turn that simply stopped short.
+                self.narrate_fact(
+                    Some(work),
+                    &crate::narration::RuntimeFact::PolicyRefused {
+                        reason: outcome.reason.clone(),
+                    },
+                );
                 return Err(NexusError::PolicyDenied(format!(
                     "`{}` denied ({})",
                     call.name, outcome.reason
@@ -4417,6 +4686,13 @@ impl AgentLoop {
                                 tool: call.name.clone(),
                                 approved: false,
                                 edited: false,
+                            },
+                        );
+                        self.narrate_fact(
+                            Some(work),
+                            &crate::narration::RuntimeFact::ApprovalResolved {
+                                granted: false,
+                                summary: action_req.summary.clone(),
                             },
                         );
                         return Err(NexusError::ApprovalRequired(format!(
@@ -4562,6 +4838,17 @@ impl AgentLoop {
                         edited,
                     },
                 );
+                // Every path that reaches here approved; the decline returned
+                // above. An approval is a decision the operator made, so it is
+                // recorded in the timeline rather than living only in the modal
+                // that has since closed.
+                self.narrate_fact(
+                    Some(work),
+                    &crate::narration::RuntimeFact::ApprovalResolved {
+                        granted: true,
+                        summary: action_req.summary.clone(),
+                    },
+                );
             }
             Decision::Allow | Decision::AllowOnce | Decision::AllowSession => {}
         }
@@ -4649,19 +4936,26 @@ impl AgentLoop {
         // where the execution direction changes. Success stays silent here —
         // the tool row already says it worked, and a line per successful call
         // is the flood this feature exists to avoid.
-        let observation = observation_activity(&call.name, ok, &output);
-        if !observation.is_empty() {
-            self.narrate(work, ActivityPhase::Observation, observation);
-        } else if validation_action {
-            // A passing check is the exception worth a line of its own: it is
-            // the evidence a turn is judged on, and silence would leave the
-            // operator unable to tell "tests ran" from "tests passed".
-            self.narrate(
-                work,
-                ActivityPhase::Validation,
-                format!("{} passed.", call.name),
-            );
-        }
+        // What happened, in the operator's words. Both branches go through the
+        // translation layer, which is what keeps the tool's name out of the
+        // timeline: the previous versions of these two lines read
+        // "{tool} failed: …" and "{tool} passed." — the only places a raw
+        // function name reached a product surface.
+        let fact = if validation_action {
+            crate::narration::RuntimeFact::ValidationCompleted {
+                label: validation_label(&call.name, action_req.command.as_deref()),
+                passed: ok,
+                elapsed_ms: None,
+            }
+        } else {
+            crate::narration::RuntimeFact::ToolCompleted {
+                name: call.name.clone(),
+                arguments: serde_json::from_str(&call.arguments).unwrap_or(Value::Null),
+                ok,
+                output: output.clone(),
+            }
+        };
+        self.narrate_fact(Some(work), &fact);
         let changed_paths = if action_req.risk >= nexus_core::RiskLevel::Write {
             action_req.paths.clone()
         } else {
@@ -4819,6 +5113,7 @@ impl AgentLoop {
                 nexus_tools::ToolCategory::Memory,
                 nexus_tools::ToolCategory::Goal,
                 nexus_tools::ToolCategory::Mcp,
+                nexus_tools::ToolCategory::Profile,
             ]
         } else {
             self.agent_tool_categories()
@@ -4839,7 +5134,28 @@ impl AgentLoop {
                 cats.push(category);
             }
         }
-        self.runtime.tools.for_categories(&cats)
+        // A category says which surface a role works on; a capability says what
+        // it may do there. Full access removes prompts, not this — it is the
+        // difference between an agent that can read who the operator is and one
+        // that can rewrite it, and no permission mode should collapse the two.
+        //
+        // Only the capabilities the role system actually grants are enforced
+        // here. `required_capabilities` predates that system and mostly repeats
+        // the tool's own category ("filesystem", "repo"); treating those as
+        // grants would deny every role every tool.
+        let held = self.role.capabilities();
+        self.runtime
+            .tools
+            .for_categories(&cats)
+            .into_iter()
+            .filter(|tool| {
+                tool.meta()
+                    .required_capabilities
+                    .iter()
+                    .filter(|required| GOVERNED_CAPABILITIES.contains(&required.as_str()))
+                    .all(|required| held.iter().any(|granted| granted == required))
+            })
+            .collect()
     }
 
     fn build_initial_messages(
@@ -5016,6 +5332,19 @@ impl AgentLoop {
             "selected agent contract",
             agent_contract,
         ));
+        // The flagship's charter is identity, not a contract: it says how the
+        // role works rather than what the turn must produce. It is pinned at
+        // the same authority as the contract, which sits *below* the immutable
+        // safety rules — so it can shape conduct and can never relax
+        // confinement, approval, or the evidence requirement.
+        let charter = self.role.charter();
+        if !charter.is_empty() {
+            sections.push(ContextSection::pinned(
+                AuthorityLayer::SelectedAgent,
+                format!("{} charter", self.role.as_str()),
+                charter,
+            ));
+        }
 
         let mut goal_constraints = Vec::new();
         if let Some(goal_id) = session.current_goal.as_deref() {
@@ -5251,7 +5580,19 @@ impl AgentLoop {
                 )));
             }
             let facts = global_harness.profile_facts(profile_id, false)?;
+            // Whether this role may change the card, said in the payload it
+            // reads the card from. Withholding the write tools stops the write
+            // but tells the model nothing, and a researcher asked to record an
+            // occupation answered "I have recorded that" with no tool to do it
+            // and nothing stored. A role that cannot write has to know it
+            // cannot, or it will report work it did not do.
+            let writable = self
+                .role
+                .capabilities()
+                .contains(&nexus_tools::profile::WRITE_CAPABILITY);
             let payload = serde_json::json!({
+                "writable": writable,
+                "note": profile_write_note(writable),
                 "id": profile.id,
                 "display_name": profile.display_name,
                 "preferred_name": profile.preferred_name,
@@ -5758,6 +6099,27 @@ fn summarize(text: &str, max_chars: usize) -> String {
     summary
 }
 
+/// Drop a leading list marker from a reworded intent step.
+///
+/// The model is asked for `1. Read the failing test`, and models variously
+/// answer `1)`, `- `, or `1 - `. The marker is formatting, not content, so it
+/// is removed rather than counted against the rewording — but only from the
+/// front, and only once, so a step that legitimately contains a number keeps it.
+fn strip_step_number(line: &str) -> &str {
+    let trimmed = line.trim_start_matches(['-', '*', '•']).trim_start();
+    let rest = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
+    if rest.len() == trimmed.len() {
+        // No leading digits, so there is no number to strip and nothing that
+        // looks like one to mistake for a marker.
+        return trimmed;
+    }
+    // `1.`, `1)`, and `1 - ` all reach here; the separator may be spaced away
+    // from the digits, so whitespace is taken before it as well as after.
+    rest.trim_start()
+        .trim_start_matches(['.', ')', ':', '-'])
+        .trim()
+}
+
 /// Best-effort path + insertion/deletion counts from git unified-diff text.
 /// Returns `(path, insertions, deletions)`; the path prefers the `+++ b/<path>`
 /// header and counts exclude the `+++`/`---` file markers.
@@ -5803,100 +6165,24 @@ fn tool_reasoning_summary(content: &str, native_tool_calls: bool) -> String {
     before_object.to_string()
 }
 
-/// The most identifying argument of a call, for narration only.
-///
-/// Never the whole argument object: that is where secrets and long payloads
-/// live, and the segment is a one-line summary, not a record of the request.
-fn narration_subject(arguments: &Value) -> Option<String> {
-    const KEYS: [&str; 8] = [
-        "path",
-        "file",
-        "pattern",
-        "query",
-        "command",
-        "cmd",
-        "objective",
-        "name",
-    ];
-    let subject = KEYS.iter().find_map(|key| {
-        arguments
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    })?;
-    Some(summarize(subject, 60))
-}
-
-/// A factual line describing a call, for when the model offered no prose.
-///
-/// Every branch describes something the harness is about to do, in the
-/// operator's terms. Nothing here infers intent the runtime did not observe —
-/// the phrasing says what is happening, never why the model wanted it.
-fn derived_activity(tool: &str, arguments: &Value) -> String {
-    let subject = narration_subject(arguments);
-    let lower = tool.to_ascii_lowercase();
-    let with = |verb: &str, fallback: &str| match &subject {
-        Some(subject) => format!("{verb} {subject}."),
-        None => fallback.to_string(),
-    };
-    if lower.contains("list") || lower.contains("dir") {
-        return with("Listing", "Listing the working directory.");
+/// An operator-facing name for what was checked, derived from the command when
+/// there is one. Never the tool's function name, and never the full command
+/// line — "tests" and "clippy", not `terminal.exec` or `cargo test -j2 …`.
+fn validation_label(tool: &str, command: Option<&str>) -> String {
+    let haystack = format!("{tool} {}", command.unwrap_or_default()).to_ascii_lowercase();
+    for (needle, label) in [
+        ("clippy", "clippy"),
+        ("lint", "the lint"),
+        ("fmt", "the formatter"),
+        ("test", "tests"),
+        ("check", "the check"),
+        ("build", "the build"),
+    ] {
+        if haystack.contains(needle) {
+            return label.to_string();
+        }
     }
-    if lower.contains("structure") || lower.contains("tree") {
-        return "Mapping the repository structure.".into();
-    }
-    if lower.contains("git") {
-        return "Checking the working tree.".into();
-    }
-    if lower.contains("search") || lower.contains("grep") || lower.contains("find") {
-        return with("Searching for", "Searching the workspace.");
-    }
-    if lower.contains("read") || lower.contains("open") || lower.contains("cat") {
-        return with("Reading", "Reading a file.");
-    }
-    if lower.contains("write") || lower.contains("edit") || lower.contains("patch") {
-        return with("Editing", "Editing a file.");
-    }
-    if lower.contains("delete") || lower.contains("remove") {
-        return with("Removing", "Removing a file.");
-    }
-    if lower.contains("memory") {
-        return "Recording a finding.".into();
-    }
-    if lower.contains("plan") {
-        return "Revising the plan.".into();
-    }
-    if lower.contains("agent") || lower.contains("delegate") {
-        return with("Delegating", "Delegating to another agent.");
-    }
-    if lower.contains("shell")
-        || lower.contains("exec")
-        || lower.contains("run")
-        || lower.contains("command")
-    {
-        return with("Running", "Running a command.");
-    }
-    with(&format!("Running {tool} on"), &format!("Running {tool}."))
-}
-
-/// What a finished call actually showed, and what follows from it.
-///
-/// Reports the outcome and nothing beyond it. A failure says what failed and
-/// that the agent is continuing; it does not claim to know the cause.
-fn observation_activity(tool: &str, ok: bool, detail: &str) -> String {
-    let detail = detail.trim();
-    if ok {
-        return String::new();
-    }
-    if detail.is_empty() {
-        format!("{tool} failed. Adjusting before continuing.")
-    } else {
-        format!(
-            "{tool} failed: {}. Adjusting before continuing.",
-            summarize(detail, 120).trim_end_matches('.')
-        )
-    }
+    "the check".to_string()
 }
 
 fn is_validation_action(tool: &str, command: Option<&str>) -> bool {
@@ -5968,6 +6254,24 @@ fn compact_schema(schema: &Value) -> String {
     }
 }
 
+/// What the profile section tells the agent about its own write access.
+///
+/// Withholding the write tools stops the write but says nothing, and silence
+/// reads as permission: asked to record an occupation, a researcher — which
+/// holds no `profile.write` — answered "I have recorded that your occupation is
+/// cardiologist", having called only a read tool and stored nothing. Refusing
+/// and reporting the refusal are two different guarantees, and only the first
+/// was in place.
+fn profile_write_note(writable: bool) -> &'static str {
+    if writable {
+        "Use the profile.* tools to change this card. Report only what the tool result says happened."
+    } else {
+        "This agent can read this card but cannot change it, and has no tool that will. If asked to \
+         record something, say plainly that this agent cannot and that another agent can — never say \
+         it was recorded."
+    }
+}
+
 fn idempotency_key(session_scope: &str, tool: &str, args: &Value) -> String {
     use nexus_core::sanitize;
     let raw = format!("{session_scope}::{tool}::{args}");
@@ -5985,6 +6289,61 @@ fn idempotency_key(session_scope: &str, tool: &str, args: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every role that reads a profile card is told whether it may change it,
+    /// and a role that may not is told in words that it must not claim it did.
+    /// Refusing a write and reporting the refusal are separate guarantees; the
+    /// second is what stops "I have recorded that" from being said over a
+    /// profile nothing touched.
+    #[test]
+    fn a_role_that_cannot_write_the_profile_is_told_not_to_claim_it_did() {
+        let denied = profile_write_note(false);
+        assert!(denied.contains("cannot"), "{denied}");
+        assert!(denied.contains("never say"), "{denied}");
+        assert!(profile_write_note(true).contains("profile.*"));
+
+        for role in AgentRole::all() {
+            let writable = role
+                .capabilities()
+                .contains(&nexus_tools::profile::WRITE_CAPABILITY);
+            assert_eq!(
+                profile_write_note(writable) == denied,
+                !writable,
+                "`{}` is told the wrong thing about its own access",
+                role.as_str()
+            );
+        }
+    }
+
+    /// The refinement asks for `1. Step`, and models answer in every list
+    /// dialect there is. The marker is formatting; the sentence is the content.
+    #[test]
+    fn every_list_dialect_a_model_answers_in_reduces_to_the_sentence() {
+        for line in [
+            "1. Read the failing test",
+            "1) Read the failing test",
+            "1 - Read the failing test",
+            "1: Read the failing test",
+            "- Read the failing test",
+            "* Read the failing test",
+            "  2.  Read the failing test  ",
+            "Read the failing test",
+        ] {
+            assert_eq!(strip_step_number(line), "Read the failing test", "{line:?}");
+        }
+    }
+
+    /// Only a *leading* marker goes. A step that is about a number keeps it,
+    /// and a bare number is not a step at all — the rewording gate rejects the
+    /// empty string that falls out.
+    #[test]
+    fn a_number_inside_a_step_is_content_not_a_marker() {
+        assert_eq!(
+            strip_step_number("Update the 3 failing cases"),
+            "Update the 3 failing cases"
+        );
+        assert_eq!(strip_step_number("3."), "");
+    }
 
     #[test]
     fn the_summary_budget_tracks_the_window_instead_of_a_flat_ceiling() {

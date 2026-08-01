@@ -41,6 +41,122 @@ pub struct Config {
     pub tui: TuiConfig,
     /// Deliberation behavior (`[thinking]`).
     pub thinking: ThinkingConfig,
+    /// Recursive Self-Improvement behavior (`[self_improvement]`): the flagship
+    /// `nexus` agent's post-turn analysis that records approval-gated proposals.
+    pub self_improvement: SelfImprovementConfig,
+    /// How much the agent narrates its own work (`[narration]`).
+    pub narration: NarrationConfig,
+    /// What the harness may learn about the operator (`[profile]`).
+    pub profile: ProfileConfig,
+}
+
+/// Automatic capture of durable facts about the operator.
+///
+/// A profile is read into the prompt of every later turn, so a wrong entry is
+/// not a wrong answer once — it is a wrong premise indefinitely. These switches
+/// exist because that trade is not the same for everyone: a shared or recorded
+/// terminal may want nothing kept at all.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProfileConfig {
+    /// Detect durable facts the operator states outright and store them on the
+    /// active profile card. Off means the profile only ever changes through
+    /// `/profile` or an explicit `profile.*` tool call.
+    pub auto_capture: bool,
+    /// Include stated working preferences and tooling, not just identity.
+    pub capture_preferences: bool,
+    /// Hold facts in sensitive categories — health, religion, politics,
+    /// sexuality, finances — as candidates for a human to approve rather than
+    /// storing them live. Mentioning something in conversation is not consent
+    /// to keep it, so this defaults on.
+    pub require_review_for_sensitive: bool,
+}
+
+impl Default for ProfileConfig {
+    fn default() -> Self {
+        Self {
+            auto_capture: true,
+            capture_preferences: true,
+            require_review_for_sensitive: true,
+        }
+    }
+}
+
+/// What the agent says about its own work while it does it.
+///
+/// This is the **third** verbosity-adjacent axis, and each of the three owns
+/// exactly one question, so none is defined twice:
+///
+/// * `[thinking].mode` — how much *optional deliberation* the harness performs.
+/// * `[narration].mode` — whether the agent *says what it is doing*.
+/// * `[tui.activity].mode` (`/view`) — which *stored events render*.
+///
+/// The composition rule is one sentence: **narration folds, `/view` reveals.**
+/// There is no `debug` narration mode; raw-payload visibility stays with
+/// `/view` rather than being duplicated here.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct NarrationConfig {
+    /// `off`, `compact`, `auto`, or `verbose`. `off` restores the pre-narration
+    /// timeline exactly; the live status line renders in every mode, because
+    /// liveness feedback is not verbosity.
+    pub mode: String,
+    /// Allow one bounded model pass to improve the *wording* of the intent
+    /// steps. The deterministic skeleton stays the source of truth: a refinement
+    /// that changes the number, order, or meaning of steps is discarded.
+    pub refine_wording: bool,
+    /// Upper bound on intent steps (clamped to 2..=5). A plan longer than this
+    /// stops being a glance and starts being a document.
+    pub max_steps: u8,
+}
+
+impl Default for NarrationConfig {
+    fn default() -> Self {
+        Self {
+            mode: "auto".into(),
+            refine_wording: true,
+            max_steps: 5,
+        }
+    }
+}
+
+impl NarrationConfig {
+    /// Parsed mode, falling back to the default rather than failing a load —
+    /// an unreadable presentation preference must never stop the agent.
+    pub fn mode(&self) -> crate::timeline::NarrationMode {
+        crate::timeline::NarrationMode::parse(&self.mode).unwrap_or_default()
+    }
+
+    /// `max_steps`, clamped to the supported range.
+    pub fn max_steps(&self) -> usize {
+        usize::from(self.max_steps).clamp(2, 5)
+    }
+}
+
+/// Recursive Self-Improvement (RSI) — the flagship `nexus` agent's ability to
+/// learn from finished turns. After a turn completes, the harness mines it for
+/// reusable workflows, repeated tool failures, and stated preferences and
+/// records them as *approval-gated* proposals (reviewed with `snx profile`).
+/// Nothing is ever applied without explicit operator approval; disabling this
+/// only stops the analysis, it changes no safety guarantee.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct SelfImprovementConfig {
+    /// Analyze finished turns and record improvement proposals. On by default;
+    /// set `false` to disable post-turn analysis entirely.
+    pub enabled: bool,
+    /// Surface the pending-proposal count in `snx status` and TUI startup so the
+    /// operator knows there is a review queue waiting.
+    pub surface_pending: bool,
+}
+
+impl Default for SelfImprovementConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            surface_pending: true,
+        }
+    }
 }
 
 /// How much *optional* deliberation the harness performs, and whether the live
@@ -116,12 +232,14 @@ pub struct ActivityConfig {
     pub reduced_motion: bool,
     /// Coalesce related events (tool start/complete, retries) into one entry.
     pub coalesce_events: bool,
-    /// Marks drawn beside tool rows: `geometric` (default), `emoji`, `ascii`.
+    /// Marks drawn beside the tool rows `/view detailed|debug` reveals:
+    /// `geometric` (default) or `ascii`.
     ///
-    /// Geometric is the default because it is single-width in every terminal
-    /// and needs no emoji font. `emoji` is opt-in: those marks are two cells
-    /// wide and render as boxes on several mobile clients. A terminal that
-    /// cannot draw Unicode at all falls back to `ascii` whatever this says.
+    /// The product surface itself no longer draws emoji anywhere — they are
+    /// two cells wide, need an installed font, and render as boxes on several
+    /// mobile clients — so a legacy `emoji` value still loads and resolves to
+    /// `geometric`. A terminal that cannot draw Unicode at all falls back to
+    /// `ascii` whatever this says.
     pub tool_icons: String,
 }
 
@@ -560,6 +678,16 @@ pub struct MemoryConfig {
     pub global_enabled: bool,
     /// Days after which unverified memories expire (0 = never).
     pub default_ttl_days: u32,
+    /// Hold agent-recorded memories as candidates until a human approves them.
+    ///
+    /// Off by default: an agent that records what it just established and then
+    /// cannot read it back has not remembered anything, and the review queue
+    /// filled up with facts nobody disputed. The protections that make
+    /// recording safe are unchanged either way — secrets are still refused, the
+    /// store is still separate from the workspace, writes are still budgeted
+    /// per turn, and everything recorded is still visible and deletable in
+    /// `/memory`. Set this to `true` to put the queue back.
+    pub require_approval: bool,
 }
 
 impl Default for MemoryConfig {
@@ -568,6 +696,7 @@ impl Default for MemoryConfig {
             enabled: true,
             global_enabled: false,
             default_ttl_days: 90,
+            require_approval: false,
         }
     }
 }

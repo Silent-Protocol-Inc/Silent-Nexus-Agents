@@ -18,6 +18,7 @@ pub mod html;
 pub mod memory;
 pub mod net_guard;
 pub mod plan;
+pub mod profile;
 pub mod pty;
 pub mod repo;
 pub mod terminal;
@@ -49,6 +50,7 @@ pub enum ToolCategory {
     Memory,
     Goal,
     Mcp,
+    Profile,
 }
 
 impl ToolCategory {
@@ -62,6 +64,7 @@ impl ToolCategory {
             ToolCategory::Memory => "memory",
             ToolCategory::Goal => "goal",
             ToolCategory::Mcp => "mcp",
+            ToolCategory::Profile => "profile",
         }
     }
 }
@@ -101,6 +104,14 @@ pub struct ToolContext {
     pub store: nexus_core::store::Store,
     pub session: Option<SessionId>,
     pub authorization: ExecutionAuthorization,
+    /// The application's profile services, when there is an application.
+    ///
+    /// Profile cards live in the global store and selecting one touches the
+    /// workspace store, the UI state, and the session row — all owned by a
+    /// layer that depends on this crate. `None` in a bare context makes the
+    /// `profile.*` tools refuse with a reason rather than panic or, worse,
+    /// quietly report a success that stored nothing.
+    pub profile: Option<Arc<dyn crate::profile::ProfilePort>>,
 }
 
 #[derive(Clone, Default)]
@@ -178,6 +189,7 @@ impl ToolRegistry {
         diag::register(&mut r);
         plan::register(&mut r);
         memory::register(&mut r);
+        profile::register(&mut r);
         r
     }
 
@@ -340,6 +352,7 @@ pub(crate) mod test_support {
             store,
             session: None,
             authorization,
+            profile: None,
         }
     }
 }

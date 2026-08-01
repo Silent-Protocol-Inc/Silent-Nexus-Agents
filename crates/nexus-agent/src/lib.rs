@@ -16,6 +16,7 @@ pub mod agents;
 pub mod classify;
 pub mod custom_agents;
 pub mod loop_engine;
+pub mod narration;
 pub mod session;
 pub mod subagent;
 pub mod thinking;
@@ -27,6 +28,7 @@ pub use loop_engine::{
     AgentLoop, ApprovalDecision, ApprovalHandler, CacheTokens, LoopEvent, LoopOutcome,
     PlanDecision, PlanReviewRequest, PlanReviewResponse, PlanReviewStage, RunOutcome, TurnLimits,
 };
+pub use narration::{NarrationPolicy, Presented, RuntimeFact, Significance};
 pub use session::{SessionMeta, SessionStore, SessionUsage};
 
 use nexus_core::redact::Redactor;
@@ -63,4 +65,12 @@ pub struct AgentRuntime {
     /// Plan mode. The turn runs under a scope that refuses to change anything
     /// and the agent's job is to author a plan for approval, not to act.
     pub plan_mode: bool,
+    /// How much the agent says about its own work. A presentation preference:
+    /// it changes what is *said*, never what is done, checked, or approved.
+    pub narration: nexus_core::timeline::NarrationMode,
+    /// Upper bound on intent steps, already clamped to 2..=5 by config.
+    pub narration_max_steps: usize,
+    /// Whether one bounded model pass may improve the intent wording. The
+    /// deterministic skeleton stays the source of truth either way.
+    pub narration_refine: bool,
 }

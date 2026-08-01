@@ -56,10 +56,20 @@ pub struct UiState {
     /// True once the harness has completed a first interactive launch, so the
     /// onboarding banner shows exactly once.
     pub first_run_completed: bool,
+    /// Version whose changelog headline the operator has already been shown, so
+    /// "what's new" appears once per upgrade rather than on every launch.
+    pub last_seen_version: String,
     /// Timeline verbosity chosen via `/view`: `default`, `detailed`, or `debug`.
     /// Default keeps the timeline to essential activity; diagnostics stay one
     /// keystroke away rather than flooding the transcript.
     pub activity_mode: String,
+    /// How much the agent narrates its own work, chosen via `/narrate`:
+    /// `off`, `compact`, `auto`, or `verbose`. Empty until the operator
+    /// chooses, so `[narration].mode` in config keeps applying. A different axis from
+    /// `activity_mode` — that one decides which stored events render, this one
+    /// decides whether the agent says what it is doing. There is deliberately
+    /// no `debug` value here; raw-payload visibility belongs to `/view`.
+    pub narration_mode: String,
     /// Plan mode, entered with `/plan`. While it is on, every turn runs under a
     /// scope that refuses to change anything, and the agent's job is to author
     /// a plan for approval rather than to act. Approving it clears this.
@@ -103,6 +113,11 @@ impl Default for UiState {
             thinking_enabled: None,
             first_run_completed: false,
             activity_mode: "default".into(),
+            last_seen_version: String::new(),
+            // Empty means "the operator has not chosen", which is what lets
+            // `[narration].mode` in config still apply. A filled-in default
+            // here would silently outrank the config file forever.
+            narration_mode: String::new(),
             plan_mode: false,
             selected_persona: None,
             profile_name: "default".into(),
@@ -161,11 +176,16 @@ impl UiState {
             // refuse the operator's next edit.
             self.plan_mode = false;
         }
+        // `narration_mode` deliberately has no migration step: it is a new
+        // axis, so no prior operator choice exists to preserve, and leaving it
+        // empty is what keeps `[narration].mode` in config authoritative until
+        // someone actually runs `/narrate`.
         // Never re-emit the legacy key, whatever version we loaded.
         self.thinking_enabled = None;
         if self.thinking_mode.trim().is_empty() {
             self.thinking_mode = nexus_core::ThinkingMode::default().as_str().into();
         }
+
         self.version = UI_STATE_VERSION;
     }
 
@@ -173,6 +193,14 @@ impl UiState {
     /// stored string is unrecognized rather than failing the whole load.
     pub fn thinking(&self) -> nexus_core::ThinkingMode {
         self.thinking_mode.parse().unwrap_or_default()
+    }
+
+    /// The operator's explicit narration choice, or `None` when they have not
+    /// made one and config still decides. An unrecognized stored value reads as
+    /// no choice rather than failing the load — an unreadable presentation
+    /// preference must never stop the agent.
+    pub fn narration(&self) -> Option<nexus_core::timeline::NarrationMode> {
+        nexus_core::timeline::NarrationMode::parse(&self.narration_mode)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -444,5 +472,42 @@ mod tests {
         assert_eq!(state.menus.len(), 64);
         assert!(!state.menus.contains_key("/route-00"));
         assert!(state.menus.contains_key("/route-69"));
+    }
+    /// Empty means "not chosen", which is what keeps `[narration].mode` in
+    /// config authoritative until someone runs `/narrate`. A filled-in default
+    /// here would silently outrank the config file forever.
+    #[test]
+    fn narration_is_unset_until_the_operator_chooses() {
+        let fresh = UiState::default();
+        assert_eq!(fresh.narration(), None);
+
+        let chosen: UiState =
+            serde_json::from_str(r#"{ "version": 8, "narration_mode": "verbose" }"#)
+                .expect("state");
+        assert_eq!(
+            chosen.narration(),
+            Some(nexus_core::timeline::NarrationMode::Verbose)
+        );
+    }
+
+    /// An unreadable presentation preference must never stop the agent: it
+    /// reads as "no choice" and config decides.
+    #[test]
+    fn an_unrecognized_narration_mode_reads_as_no_choice() {
+        let state: UiState =
+            serde_json::from_str(r#"{ "version": 8, "narration_mode": "loud" }"#).expect("state");
+        assert_eq!(state.narration(), None);
+    }
+
+    /// The what's-new stage shows once per version, so the marker has to
+    /// survive a reload.
+    #[test]
+    fn the_last_seen_version_round_trips() {
+        let mut state = UiState::default();
+        assert!(state.last_seen_version.is_empty());
+        state.last_seen_version = "2.11.0".into();
+        let text = serde_json::to_string(&state).expect("encode");
+        let loaded: UiState = serde_json::from_str(&text).expect("decode");
+        assert_eq!(loaded.last_seen_version, "2.11.0");
     }
 }

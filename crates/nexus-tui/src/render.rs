@@ -135,6 +135,7 @@ pub fn draw(f: &mut Frame, st: &mut State) {
     let t = st.theme;
     let area = f.area();
     let rl = crate::layout::classify(area);
+    st.layout = rl;
 
     if rl.too_small {
         draw_too_small(f, area, &t);
@@ -146,11 +147,19 @@ pub fn draw(f: &mut Frame, st: &mut State) {
     // transcript widget, so scrolling the timeline never moves it and it never
     // becomes scrollback.
     let plan_rows = plan_panel_rows(st, &rl);
+    // The welcome panel is a *region*, not a timeline entry. Reserving its rows
+    // here is what keeps startup facts out of the transcript: they are drawn
+    // above it, scroll with nothing, and disappear when it collapses.
+    let welcome_rows = welcome_panel_rows(st, area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(rl.header_rows),
-            Constraint::Min(3),
+            Constraint::Length(welcome_rows),
+            // The conversation is the one region with a floor. Everything above
+            // and below it is already sized to shed under height pressure, so
+            // this is what a shrinking viewport runs into last.
+            Constraint::Min(rl.min_timeline_rows),
             Constraint::Length(plan_rows),
             Constraint::Length(input_rows),
             Constraint::Length(rl.status_rows),
@@ -158,23 +167,40 @@ pub fn draw(f: &mut Frame, st: &mut State) {
         .split(area);
 
     draw_header(f, rows[0], st, &t, &rl);
+    if welcome_rows > 0 {
+        draw_welcome(f, rows[1], st, &t);
+    }
 
     if rl.show_sidebar {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(40), Constraint::Length(rl.sidebar_width)])
-            .split(rows[1]);
+            .split(rows[2]);
         draw_transcript(f, body[0], st, &t, &rl);
         draw_context_rail(f, body[1], st, &t);
     } else {
-        draw_transcript(f, rows[1], st, &t, &rl);
+        draw_transcript(f, rows[2], st, &t, &rl);
     }
 
+    // Decided once, from the body rect the transcript actually got, and read by
+    // the composer title and the status bar as well — so nothing can announce a
+    // panel that is not on screen.
+    let context_overlay = context_overlay_rect(rows[2], st, &rl);
+
     if plan_rows > 0 {
-        draw_plan_panel(f, rows[2], st, &t);
+        draw_plan_panel(f, rows[3], st, &t);
     }
-    draw_input(f, rows[3], st, &t, &rl);
-    draw_footer(f, rows[4], st, &t, &rl);
+    draw_input(f, rows[4], st, &t, &rl, context_overlay.is_some());
+    draw_footer(f, rows[5], st, &t, &rl, context_overlay.is_some());
+
+    // Drawn against the conversation region only, and *before* the modal stack.
+    // It used to be painted last over the whole frame, which put it on top of
+    // the composer, every overlay, and the approval prompt — so a panel of
+    // read-only metadata could cover the controls you needed to answer.
+    if let Some(overlay) = context_overlay {
+        f.render_widget(Clear, overlay);
+        draw_context_rail(f, overlay, st, &t);
+    }
 
     // Overlay stack: render every overlay, topmost last.
     for overlay in &st.overlays {
@@ -185,14 +211,134 @@ pub fn draw(f: &mut Frame, st: &mut State) {
         draw_approval(f, area, st, &t);
     }
 
-    if !rl.show_sidebar && st.context_drawer {
-        draw_context_drawer(f, area, st, &t);
-    }
     if st.agent_drawer {
         draw_agent_drawer(f, area, st, &t);
     }
 
     draw_toasts(f, area, st, &t);
+}
+
+/// Where the ACTIVE CONTEXT overlay goes this frame, or `None` if it does not
+/// fit and is therefore not drawn.
+///
+/// This is deliberately the *only* answer to "is the panel showing": returning
+/// the geometry rather than a boolean is what keeps the decision and the drawing
+/// from disagreeing. They did. [`classify`](crate::layout::classify) sizes the
+/// body from the terminal alone, but the welcome panel takes rows out of it
+/// afterwards, so on a short-and-wide terminal the layout said *overlay* while
+/// the body had no room — leaving the composer titled `context · Esc close` with
+/// nothing on screen to close.
+///
+/// `body` is the conversation's rect, not the frame. Three things must hold: the
+/// rail is not already showing this, the operator asked for it, and what is left
+/// keeps `min_timeline_rows` and enough columns to read a line of prose.
+pub(crate) fn context_overlay_rect(
+    body: Rect,
+    st: &State,
+    rl: &crate::layout::ResponsiveLayout,
+) -> Option<Rect> {
+    if rl.show_sidebar
+        || rl.context_placement != crate::layout::ContextPlacement::Overlay
+        || !st.context_pane.is_open()
+    {
+        return None;
+    }
+    // Floated inside the conversation's own frame rather than over it, so the
+    // transcript keeps its border and the panel reads as sitting in the corner
+    // of the conversation instead of replacing it.
+    let inner = body.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    // Leave the conversation its floor; spend at most half the remaining rows
+    // so the panel reads as secondary even when there is room to be generous.
+    let height = inner
+        .height
+        .saturating_sub(rl.min_timeline_rows)
+        .min(inner.height / 2);
+    // Two thirds, but never so wide that the timeline behind it is reduced to a
+    // column of broken words.
+    let width =
+        (inner.width.saturating_mul(2) / 3).min(inner.width.saturating_sub(MIN_TIMELINE_COLS));
+    if height < MIN_OVERLAY_ROWS || width < MIN_OVERLAY_COLS {
+        return None;
+    }
+    Some(Rect::new(
+        inner.right().saturating_sub(width),
+        inner.bottom().saturating_sub(height),
+        width,
+        height,
+    ))
+}
+
+/// Rows to reserve for the welcome panel.
+///
+/// Zero once it has collapsed *and* the identity is already in the header, so
+/// the panel never becomes a permanent tax on timeline height. The panel is
+/// also dropped whole rather than clipped when the terminal is too short to
+/// hold it and a usable transcript — half a border is worse than none.
+fn welcome_panel_rows(st: &State, area: Rect) -> u16 {
+    let Some(snapshot) = &st.boot_snapshot else {
+        return 0;
+    };
+    if st.welcome_collapsed {
+        return 1;
+    }
+    let unicode = crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii;
+    // Leave the transcript, composer, and status bar room to exist. The panel
+    // sheds its own content to fit rather than being clipped or dropped whole,
+    // so an 80×24 gets a shorter panel instead of no panel.
+    // Two independent limits, both necessary: an absolute floor so the
+    // transcript, composer, and status bar always exist, and a proportional cap
+    // so the panel never takes more than half the screen on a tall terminal.
+    let budget = area
+        .height
+        .saturating_sub(MIN_ROWS_BELOW_WELCOME)
+        .min(area.height / 2);
+    if budget < MIN_PANEL_ROWS {
+        return 0;
+    }
+    crate::welcome::panel_rows(snapshot, area.width, budget, unicode)
+}
+
+/// Header, a few transcript rows, composer, and status bar.
+///
+/// Tuned against a real 80×24: at 10 the panel squeezed the transcript to a
+/// single row, and at 16 the panel itself was reduced to an identity line and
+/// one tip. The transcript is briefly thin before the first turn and gets every
+/// row back the moment the panel collapses, so the balance favours the panel
+/// while it is the only thing there is to read.
+const MIN_ROWS_BELOW_WELCOME: u16 = 13;
+/// Below this there is no panel worth drawing: the collapsed line carries the
+/// identity instead, and the status bar already has the rest.
+const MIN_PANEL_ROWS: u16 = 6;
+/// Columns the conversation keeps behind the ACTIVE CONTEXT overlay. Narrower
+/// than this and the text still visible beside the panel is broken words rather
+/// than readable prose, which is no better than hiding the conversation.
+const MIN_TIMELINE_COLS: u16 = 24;
+/// Smallest overlay worth drawing: a border plus a line of content, and wide
+/// enough for a `label value` pair. Under either, it is not drawn at all and the
+/// status bar says so — half a panel is worse than none.
+const MIN_OVERLAY_ROWS: u16 = 3;
+const MIN_OVERLAY_COLS: u16 = 24;
+
+fn draw_welcome(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
+    let Some(snapshot) = &st.boot_snapshot else {
+        return;
+    };
+    let unicode = crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii;
+    let lines = if st.welcome_collapsed {
+        vec![crate::welcome::collapsed_line(
+            snapshot,
+            &st.bar.agent,
+            &st.bar.model_label,
+            t,
+            unicode,
+        )]
+    } else {
+        crate::welcome::panel_lines(snapshot, area.width, area.height, t, unicode)
+    };
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Controlled message when the terminal is below the usable floor.
@@ -467,13 +613,17 @@ fn activity_track(st: &State) -> Vec<Span<'static>> {
     spans
 }
 
-fn format_elapsed(elapsed: std::time::Duration) -> String {
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    }
+/// 1-based position of the active stage in the turn's plan, when there is one.
+///
+/// `None` rather than a guess: a counter that is not bound to a real stage is
+/// exactly the invented progress the status line must never show.
+fn plan_position(st: &State) -> Option<usize> {
+    let work = st.active_work.work.as_ref()?;
+    let current = work.current_stage.as_deref()?;
+    work.stages
+        .iter()
+        .position(|stage| stage.id == current)
+        .map(|index| index + 1)
 }
 
 /// The live activity component: one status row, up to
@@ -490,58 +640,81 @@ fn processing_lines(st: &State, t: &Theme, width: usize) -> Vec<Line<'static>> {
         return Vec::new();
     }
 
+    let skin = nexus_core::brand::Skin::nexus().for_terminal(
+        crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+        st.reduced_motion || st.animation == "off",
+    );
     let phase = st.thinking_state();
-    let state_label = phase.title();
-    let elapsed = st.turn_started.map(|s| format_elapsed(s.elapsed()));
+    let action = st.status_action(&skin);
+    let icon = skin.icon(action);
+    let verb = action.verb();
 
-    // Mobile: one row, no preview, no track. Elapsed only when the row has
-    // width to spare — portrait stays as quiet as possible.
+    // Elapsed is withheld below the dwell floor so a sub-second turn does not
+    // flash a counter, and it is the long form only where the row can carry it.
+    let elapsed_secs = st.turn_started.map(|start| start.elapsed());
+    let elapsed = elapsed_secs
+        .filter(|e| e.as_millis() as u64 >= skin.motion.dwell_ms)
+        .map(|e| {
+            let style = if width >= 72 {
+                nexus_core::brand::ElapsedStyle::Long
+            } else {
+                nexus_core::brand::ElapsedStyle::Short
+            };
+            style.format(e.as_secs())
+        });
+
+    // Mobile: verb only. Portrait stays as quiet as possible.
     if width < 40 {
-        let mut text = format!("◢ {state_label}");
-        if let Some(elapsed) = &elapsed {
-            if width >= 28 {
-                text.push_str(" · ");
-                text.push_str(elapsed);
-            }
+        let mut text = format!("{icon} {verb}");
+        if let (Some(elapsed), true) = (&elapsed, width >= 28) {
+            text.push_str(skin.separators.field);
+            text.push_str(elapsed);
         }
         return vec![Line::from(Span::styled(text, t.primary()))];
     }
 
-    // "PROCESSING" claims a provider reasoning channel; without one this is
-    // the harness reporting its own activity, and it says so.
-    let heading = if st.has_provider_reasoning() {
-        format!("NEXUS {state_label}")
-    } else {
-        "NEXUS ACTIVITY".to_string()
-    };
-    let marker = if st.reduced_motion || st.animation == "off" {
-        "▪"
-    } else {
-        "◢"
-    };
+    // Effort is shown only when the provider actually reported one. An absent
+    // value is omitted rather than defaulted — "medium effort" that nobody
+    // reported would be an invention.
+    let effort = st
+        .provider_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(|effort| format!("{effort} effort"));
+    // The step counter is bound to a real intent plan, and only `verbose` asks
+    // for it. Without a plan there is no counter, rather than a made-up one.
+    let step = (st.narration_mode == nexus_core::timeline::NarrationMode::Verbose
+        && st.intent_steps > 0)
+        .then(|| plan_position(st))
+        .flatten()
+        .map(|index| format!("step {index}/{}", st.intent_steps));
 
-    let track = activity_track(st);
-    // Waiting is the one phase blocked on the operator, so it is the one phase
-    // whose heading asks for attention.
-    let heading_style = if phase.is_blocked() {
+    // Waiting on the operator is the one state that asks for attention, so it
+    // is the one state that colors its verb differently.
+    let verb_style = if action.is_blocked_on_operator() {
         t.warning()
     } else {
         t.primary()
     };
+    let track = activity_track(st);
     let mut head = vec![
-        Span::styled(format!("  {marker} "), t.secondary()),
+        Span::styled(format!("  {icon} "), t.secondary()),
         Span::styled(
             if track.is_empty() {
-                heading.clone()
+                verb.to_string()
             } else {
-                format!("{heading} ")
+                format!("{verb} ")
             },
-            heading_style,
+            verb_style,
         ),
     ];
     head.extend(track);
-    if let Some(elapsed) = elapsed {
-        head.push(Span::styled(format!("  {elapsed}"), t.muted()));
+    for field in [elapsed, effort, step].into_iter().flatten() {
+        head.push(Span::styled(
+            format!("{}{field}", skin.separators.field),
+            t.muted(),
+        ));
     }
     let mut lines = vec![Line::from(head)];
 
@@ -625,8 +798,16 @@ fn draw_transcript(
                 cached.rows
             }
             _ => {
-                let rows =
-                    event_lines(event, st.detail_level, expanded, selected, inner_width, t).len();
+                let rows = event_lines(
+                    event,
+                    st.detail_level,
+                    expanded,
+                    selected,
+                    inner_width,
+                    t,
+                    st.reveals_machine_detail(),
+                )
+                .len();
                 st.wrap_layout_cache.insert(
                     event.id.clone(),
                     WrapLayoutCacheEntry {
@@ -700,7 +881,15 @@ fn draw_transcript(
         }
         let event = &st.timeline[index];
         let selected = st.selected_event == Some(index) && st.focus == Focus::Timeline;
-        let rendered = event_lines(event, st.detail_level, expanded, selected, inner_width, t);
+        let rendered = event_lines(
+            event,
+            st.detail_level,
+            expanded,
+            selected,
+            inner_width,
+            t,
+            st.reveals_machine_detail(),
+        );
         let from = scroll.saturating_sub(offset).min(rendered.len());
         let to = visible_end
             .saturating_sub(offset)
@@ -764,6 +953,29 @@ fn event_layout_signature(
 
 /// A concise, purpose-built header for the kinds the operator sees most.
 /// Returns `None` for kinds that keep the generic status/type row.
+/// Whether a notice is short enough to *be* its header rather than sit under
+/// one. Anything multi-line or long keeps a separate body so it can wrap.
+fn inlines_into_header(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty() && !text.contains('\n') && text.chars().count() <= 72
+}
+
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
 fn component_header(
     event: &nexus_core::timeline::TimelineEvent,
     t: &Theme,
@@ -776,16 +988,23 @@ fn component_header(
         event.status,
         TimelineStatus::Failed | TimelineStatus::Blocked
     );
-    // `●` reads as live, `✓` settled, `✕` failed, `◆` handed to the background.
+    // Marks come from the design language, so a reskin reaches this header too.
+    // `●` is the one exception: a live component reads differently from a
+    // settled record, and that distinction belongs to this surface.
+    let skin = nexus_core::brand::Skin::nexus().for_terminal(
+        crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+        false,
+    );
+    use nexus_core::brand::LifecycleMark;
     let mark = match event.status {
         TimelineStatus::Running => "●",
-        TimelineStatus::Completed => "✓",
-        TimelineStatus::Failed => "✕",
-        TimelineStatus::Blocked => "■",
-        TimelineStatus::Cancelled => "×",
-        TimelineStatus::Waiting => "◫",
-        TimelineStatus::Pending => "◇",
-        TimelineStatus::Skipped => "–",
+        TimelineStatus::Completed => skin.lifecycle(LifecycleMark::Done),
+        TimelineStatus::Failed => skin.lifecycle(LifecycleMark::Failed),
+        TimelineStatus::Blocked => skin.lifecycle(LifecycleMark::Blocked),
+        TimelineStatus::Cancelled => skin.lifecycle(LifecycleMark::Cancelled),
+        TimelineStatus::Waiting => skin.lifecycle(LifecycleMark::Waiting),
+        TimelineStatus::Pending => skin.lifecycle(LifecycleMark::Pending),
+        TimelineStatus::Skipped => skin.lifecycle(LifecycleMark::Skipped),
     };
     let duration = event.duration_ms.map(human_duration);
     let mark = match &event.kind {
@@ -795,6 +1014,23 @@ fn component_header(
         // pair reads as one thing settling rather than two different events.
         TimelineKind::AgentActivity { .. } if running => "◢",
         TimelineKind::AgentActivity { .. } => "◆",
+        TimelineKind::Intent { .. } => skin.icon(nexus_core::brand::ActionState::ShapingApproach),
+        // The composer's own prompt character, so the operator's turn is marked
+        // where they typed it rather than stamped with an outcome.
+        TimelineKind::UserMessage { .. } => {
+            if crate::glyphs::tier() == crate::glyphs::GlyphTier::Ascii {
+                ">"
+            } else {
+                "❯"
+            }
+        }
+        // A notice is the harness talking, not a task reporting. Only the ones
+        // that mean something get a mark with weight.
+        TimelineKind::Notice { severity, .. } => match severity.as_str() {
+            "warning" => skin.lifecycle(LifecycleMark::Waiting),
+            "error" => skin.lifecycle(LifecycleMark::Failed),
+            _ => "·",
+        },
         _ => mark,
     };
 
@@ -893,6 +1129,45 @@ fn component_header(
             format!("Background · {}", truncate(event.summary.trim(), 60)),
             duration,
         ),
+        // The operator's own message. `✓ DONE  USER MESSAGE` told them their
+        // typing had succeeded, which is neither news nor an outcome of any
+        // work; the text is right underneath.
+        TimelineKind::UserMessage { .. } => ("You".to_string(), None),
+        // An approval is a decision, and the card should read as one. It is
+        // also the one place a tool name belongs above the debug layer: the
+        // operator is being asked to authorize a specific action, and "approve
+        // something" is not a question anyone can answer.
+        TimelineKind::Approval {
+            tool,
+            decision,
+            summary,
+            edited,
+        } => {
+            let subject = if summary.trim().is_empty() {
+                tool.clone()
+            } else {
+                truncate(summary.trim(), 60)
+            };
+            let verb = match decision.as_deref() {
+                None => "Awaiting your approval",
+                Some(decision) => &capitalize_first(decision),
+            };
+            let note = edited.then(|| "edited".to_string());
+            (format!("{verb} · {subject}"), note.or(duration))
+        }
+        // A plan is an intention, so a run status on it is a category error:
+        // an intent is never `RUNNING` and never `DONE`, whatever the turn
+        // around it is doing.
+        TimelineKind::Intent { steps, .. } => (
+            format!("Intent · {} step{}", steps.len(), plural(steps.len())),
+            None,
+        ),
+        // A short notice becomes its own header. Two rows — a status word and
+        // then one sentence — is what made startup and turn summaries read as
+        // completed tasks.
+        TimelineKind::Notice { text, .. } if inlines_into_header(text) => {
+            (text.trim().to_string(), duration)
+        }
         _ => return None,
     };
 
@@ -903,6 +1178,16 @@ fn component_header(
         TimelineKind::ProviderLimit { .. } => t.warning(),
         // Identity, in the accent that means identity everywhere else.
         TimelineKind::AgentActivity { .. } => t.secondary(),
+        // The operator's own words, in the colour the composer uses for them.
+        TimelineKind::UserMessage { .. } => t.user(),
+        // An inlined notice keeps the severity styling its body row had.
+        TimelineKind::Notice { severity, .. } => match severity.as_str() {
+            "ok" => t.success(),
+            "warning" => t.warning(),
+            "error" => t.failure(),
+            "dim" => t.muted(),
+            _ => t.text(),
+        },
         _ => t.text(),
     };
     let mut spans = vec![
@@ -922,18 +1207,44 @@ fn event_lines(
     selected: bool,
     width: usize,
     t: &Theme,
+    // `/view detailed|debug`. Tool names are machine detail and belong to the
+    // debug layer; the product layers describe what happened instead.
+    reveal_machine_detail: bool,
 ) -> Vec<Line<'static>> {
     use nexus_core::timeline::{TimelineKind, TimelineStatus};
 
+    // Marks come from the design language so a reskin reaches them; the labels
+    // and colors stay here because they are this surface's concern.
+    let skin = nexus_core::brand::Skin::nexus().for_terminal(
+        crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+        false,
+    );
+    use nexus_core::brand::LifecycleMark;
     let (glyph, status_label, status_style) = match event.status {
-        TimelineStatus::Pending => ("◇", "PENDING", t.muted()),
-        TimelineStatus::Running => ("◆", "RUNNING", t.primary()),
-        TimelineStatus::Completed => ("✓", "DONE", t.success()),
-        TimelineStatus::Failed => ("✗", "FAILED", t.failure()),
-        TimelineStatus::Blocked => ("■", "BLOCKED", t.failure()),
-        TimelineStatus::Cancelled => ("×", "CANCELLED", t.warning()),
-        TimelineStatus::Skipped => ("–", "SKIPPED", t.muted()),
-        TimelineStatus::Waiting => ("◫", "WAITING", t.warning()),
+        TimelineStatus::Pending => (skin.lifecycle(LifecycleMark::Pending), "PENDING", t.muted()),
+        TimelineStatus::Running => (
+            skin.lifecycle(LifecycleMark::Running),
+            "RUNNING",
+            t.primary(),
+        ),
+        TimelineStatus::Completed => (skin.lifecycle(LifecycleMark::Done), "DONE", t.success()),
+        TimelineStatus::Failed => (skin.lifecycle(LifecycleMark::Failed), "FAILED", t.failure()),
+        TimelineStatus::Blocked => (
+            skin.lifecycle(LifecycleMark::Blocked),
+            "BLOCKED",
+            t.failure(),
+        ),
+        TimelineStatus::Cancelled => (
+            skin.lifecycle(LifecycleMark::Cancelled),
+            "CANCELLED",
+            t.warning(),
+        ),
+        TimelineStatus::Skipped => (skin.lifecycle(LifecycleMark::Skipped), "SKIPPED", t.muted()),
+        TimelineStatus::Waiting => (
+            skin.lifecycle(LifecycleMark::Waiting),
+            "WAITING",
+            t.warning(),
+        ),
     };
     let label = event
         .kind
@@ -976,6 +1287,8 @@ fn event_lines(
         | TimelineKind::ReasoningSummary { text }
         | TimelineKind::AgentActivity { text, .. }
         | TimelineKind::Notice { text, .. } => !text.trim().is_empty(),
+        // The step list below is the body; the summary would repeat the count.
+        TimelineKind::Intent { steps, .. } => !steps.is_empty(),
         TimelineKind::Error { message, .. }
         | TimelineKind::Retry {
             reason: message, ..
@@ -991,19 +1304,36 @@ fn event_lines(
         TimelineKind::UserMessage { text } => {
             push_wrapped(&mut lines, text, width, t.user());
         }
+        // The answer is a document, not a log line. It used to go through
+        // `push_wrapped`, a plain word-wrapper, so `##`, `**`, and backticks
+        // reached the operator as literal source — there was no parser to
+        // ignore, there was no parser. The stored text stays the canonical
+        // source; this is a projection of it for one width and theme.
         TimelineKind::AssistantMessage { text, .. } | TimelineKind::FinalAnswer { text } => {
-            push_wrapped(&mut lines, text, width, t.text());
+            lines.extend(crate::markdown::render_source(
+                text,
+                t,
+                crate::markdown::RenderOptions {
+                    width,
+                    compact: detail == nexus_core::timeline::TranscriptDetail::Compact,
+                    unicode: crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+                },
+            ));
         }
         TimelineKind::ReasoningSummary { text } => {
             push_wrapped(&mut lines, text, width, t.muted());
         }
         TimelineKind::AgentActivity { text, tools, .. } => {
             push_wrapped(&mut lines, text, width, t.text());
-            // The tools that ran under this segment, listed once here instead
-            // of narrated one by one above. Bounded: a segment that ran forty
-            // reads should not push the rest of the turn off the screen.
+            // The tools that ran under this segment — machine detail, so only
+            // under `/view detailed|debug`. In the product view the segment
+            // text already says what happened, and a list of function names
+            // beside it is the noise the narration layer exists to remove.
+            // Bounded even when revealed: forty reads should not push the rest
+            // of the turn off the screen.
             const MAX_TOOL_ROWS: usize = 6;
             let tier = crate::glyphs::tier();
+            let tools: &[String] = if reveal_machine_detail { tools } else { &[] };
             for tool in tools.iter().take(MAX_TOOL_ROWS) {
                 push_wrapped(
                     &mut lines,
@@ -1016,6 +1346,31 @@ fn event_lines(
                 push_wrapped(&mut lines, &format!("  +{extra} more"), width, t.muted());
             }
         }
+        TimelineKind::Intent { steps, refined, .. } => {
+            // Numbered, and never ticked off: this is what the agent said it
+            // would do, not a record of what it did. Progress lives in the
+            // milestones below it, each tied to something that happened.
+            for (index, step) in steps.iter().enumerate() {
+                push_wrapped(
+                    &mut lines,
+                    &format!("  {}. {step}", index + 1),
+                    width,
+                    t.text(),
+                );
+            }
+            // Only under `/view detailed|debug`: whether a model was allowed to
+            // reword the plan is provenance, not product copy. It is recorded
+            // rather than implied so a degraded turn can be told apart from an
+            // authored one.
+            if reveal_machine_detail {
+                let provenance = if *refined {
+                    "wording refined by the model; steps are the harness's"
+                } else {
+                    "harness wording (no refinement)"
+                };
+                push_wrapped(&mut lines, &format!("  {provenance}"), width, t.muted());
+            }
+        }
         TimelineKind::Notice { text, severity } => {
             let style = match severity.as_str() {
                 "ok" => t.success(),
@@ -1024,7 +1379,9 @@ fn event_lines(
                 "dim" => t.muted(),
                 _ => t.text(),
             };
-            if !text.trim().is_empty() {
+            // A short notice is already the header; repeating it here is the
+            // second of the two rows this change exists to remove.
+            if !text.trim().is_empty() && !inlines_into_header(text) {
                 push_wrapped(&mut lines, text, width, style);
             }
         }
@@ -1392,24 +1749,31 @@ fn draw_context_rail(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     for blocker in active.blockers.iter().take(3) {
         lines.push(kv("blocker", truncate(blocker, 24), t.failure()));
     }
+    // The rail is taller than a constrained viewport can show. Scrolling makes
+    // the overflow reachable; without it the tail — files, checks, approval —
+    // was simply cut off with nothing to say so.
+    let visible = area.height.saturating_sub(2) as usize;
+    let overflow = lines.len().saturating_sub(visible);
+    let offset = (st.context_scroll as usize).min(overflow);
+    if overflow > 0 {
+        let block = block.title_bottom(Span::styled(
+            format!(" {}/{} ", offset + 1, overflow + 1),
+            t.muted(),
+        ));
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .block(block)
+                .scroll((offset as u16, 0)),
+            area,
+        );
+        return;
+    }
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .block(block)
             .wrap(Wrap { trim: false }),
         area,
     );
-}
-
-fn draw_context_drawer(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
-    let width = area.width.saturating_mul(3) / 4;
-    let drawer = Rect::new(
-        area.right().saturating_sub(width),
-        area.y + 1,
-        width,
-        area.height.saturating_sub(2),
-    );
-    f.render_widget(Clear, drawer);
-    draw_context_rail(f, drawer, st, t);
 }
 
 fn draw_agent_drawer(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
@@ -1485,6 +1849,7 @@ fn draw_input(
     st: &State,
     t: &Theme,
     rl: &crate::layout::ResponsiveLayout,
+    context_visible: bool,
 ) {
     use crate::layout::WidthClass;
     let searching = st.search_edit.is_some();
@@ -1498,8 +1863,18 @@ fn draw_input(
             " running — input queued after turn ".to_string(),
             t.warning(),
         )
+    } else if st.focus == Focus::Context && context_visible {
+        (" context · ↑/↓ scroll · Esc close ".to_string(), t.muted())
     } else if st.focus != Focus::Input {
         (" F6 focus · input inactive ".to_string(), t.muted())
+    } else if rl.context_placement == crate::layout::ContextPlacement::Overlay
+        && !context_visible
+        && st.input.is_empty()
+    {
+        // The only way to reach the panel is an arrow key on an empty composer,
+        // which nothing said anywhere. On the layouts where the rail is gone,
+        // that is the difference between hidden and unreachable.
+        (" → context · Enter send ".to_string(), t.muted())
     } else if st.bar.plan_mode {
         // The title is where the operator looks before typing, so plan mode
         // says what typing will do here rather than only in the status bar.
@@ -1573,6 +1948,7 @@ fn draw_footer(
     st: &State,
     t: &Theme,
     rl: &crate::layout::ResponsiveLayout,
+    context_visible: bool,
 ) {
     use crate::layout::{pack_status, sandbox_short, SegColor, StatusSegment, WidthClass};
     if st.pending.is_some() {
@@ -1641,6 +2017,29 @@ fn draw_footer(
             "NEW",
             st.new_events.to_string(),
             SegColor::Warning,
+            1,
+            true,
+        ));
+    }
+    // Say so in words whenever the operator wants the panel and it is not on
+    // screen — whether the layout collapsed it or the body simply had no room
+    // for it after the welcome panel took its rows. That is the one case where
+    // something asked for has silently not happened. Not whenever the rail
+    // happens to be absent: on every terminal under ninety columns that is
+    // permanent noise, and it costs a row segment that says something
+    // changeable.
+    //
+    // Text, not an icon, so it survives NO_COLOR and a terminal that cannot draw
+    // Unicode; ahead of the static segments because packing is by insertion
+    // order.
+    if st.context_pane != crate::state::ContextPane::Closed && !rl.show_sidebar && !context_visible
+    {
+        segs.push(mk(
+            "CONTEXT",
+            "CTX",
+            "CTX",
+            "hidden".to_string(),
+            SegColor::Muted,
             1,
             true,
         ));
@@ -3395,11 +3794,19 @@ mod tests {
                 },
             ),
         ] {
-            let text = event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = event_lines(
+                &event,
+                TranscriptDetail::Compact,
+                false,
+                false,
+                80,
+                &theme,
+                false,
+            )
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
             assert_eq!(text.matches(&event.summary).count(), 1, "{text}");
         }
     }
@@ -3421,7 +3828,21 @@ mod tests {
         )
     }
 
+    /// The product view: what an operator sees at `/view default`.
     fn rendered(event: &nexus_core::timeline::TimelineEvent, width: usize) -> String {
+        rendered_with_detail(event, width, false)
+    }
+
+    /// The debug view: `/view detailed|debug`, where machine detail is revealed.
+    fn rendered_debug(event: &nexus_core::timeline::TimelineEvent, width: usize) -> String {
+        rendered_with_detail(event, width, true)
+    }
+
+    fn rendered_with_detail(
+        event: &nexus_core::timeline::TimelineEvent,
+        width: usize,
+        reveal: bool,
+    ) -> String {
         let theme = Theme::new("nexus-dark", ColorSupport::None);
         event_lines(
             event,
@@ -3430,6 +3851,7 @@ mod tests {
             false,
             width,
             &theme,
+            reveal,
         )
         .iter()
         .map(line_text)
@@ -3457,14 +3879,171 @@ mod tests {
     }
 
     #[test]
-    fn grouped_tools_are_listed_once_and_bounded() {
+    fn grouped_tools_are_listed_once_and_bounded_under_debug() {
         let many: Vec<String> = (0..12).map(|i| format!("fs.read_file_{i}")).collect();
         let refs: Vec<&str> = many.iter().map(String::as_str).collect();
-        let text = rendered(&activity_event("reviewer", None, &refs), 80);
+        let text = rendered_debug(&activity_event("reviewer", None, &refs), 80);
         assert!(text.contains("fs.read_file_0"), "{text}");
         // A segment with forty reads must not push the turn off the screen.
         assert!(!text.contains("fs.read_file_11"), "{text}");
         assert!(text.contains("+6 more"), "{text}");
+    }
+
+    /// The layer boundary: a function name is machine detail. In the product
+    /// view the segment says what happened; the names live one keystroke away
+    /// under `/view detailed|debug`.
+    #[test]
+    fn the_product_view_never_shows_a_tool_name() {
+        let event = activity_event("reviewer", None, &["fs.read_file", "terminal.exec"]);
+        let product = rendered(&event, 80);
+        assert!(!product.contains("fs.read_file"), "{product}");
+        assert!(!product.contains("terminal.exec"), "{product}");
+        // The narration itself still renders — folding a row is not silence.
+        assert!(product.contains("choosing the review path"), "{product}");
+        // And the same event under the debug view does show them.
+        let debug = rendered_debug(&event, 80);
+        assert!(debug.contains("fs.read_file"), "{debug}");
+    }
+
+    /// **Run outcomes belong to runs.** `✓ DONE  USER MESSAGE` told the
+    /// operator that their own typing had succeeded, and every one-sentence
+    /// notice cost two rows: a status word and then the sentence.
+    #[test]
+    fn a_user_message_is_not_stamped_with_a_run_outcome() {
+        let event = message_event(
+            "read the config",
+            TimelineKind::UserMessage {
+                text: "read the config".into(),
+            },
+        );
+        let text = rendered(&event, 80);
+        assert!(!text.contains("DONE"), "{text}");
+        assert!(!text.contains("USER MESSAGE"), "{text}");
+        assert!(text.contains("You"), "{text}");
+        assert!(text.contains("read the config"), "{text}");
+    }
+
+    /// A short notice is its own header. The turn summary used to be
+    /// `✓ DONE  NOTICE` with `COMPLETE · 1/1 tasks …` underneath it.
+    #[test]
+    fn a_short_notice_is_one_row_with_no_status_word() {
+        let event = message_event(
+            "COMPLETE · 1/1 tasks · 2 steps · 1 tool call",
+            TimelineKind::Notice {
+                text: "COMPLETE · 1/1 tasks · 2 steps · 1 tool call".into(),
+                severity: "ok".into(),
+            },
+        );
+        let text = rendered(&event, 80);
+        assert!(!text.contains("DONE"), "{text}");
+        assert!(!text.contains("NOTICE"), "{text}");
+        assert_eq!(
+            text.matches("COMPLETE · 1/1 tasks").count(),
+            1,
+            "the sentence must not appear twice:\n{text}"
+        );
+        assert_eq!(text.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+    }
+
+    /// A long or multi-line notice keeps a separate body so it can wrap.
+    #[test]
+    fn a_long_notice_still_gets_a_body_to_wrap_into() {
+        let long = "a".repeat(200);
+        let event = message_event(
+            "long",
+            TimelineKind::Notice {
+                text: long.clone(),
+                severity: "warning".into(),
+            },
+        );
+        let text = rendered(&event, 60);
+        assert!(text.contains(&"a".repeat(20)), "{text}");
+        assert!(text.lines().count() > 1, "{text}");
+    }
+
+    /// An approval card is a decision, and it must never say `DONE` over the
+    /// words "awaiting approval" — which is exactly what it did once the status
+    /// was resolved but the summary was left behind.
+    #[test]
+    fn an_approval_card_states_the_decision_not_a_run_status() {
+        let pending = message_event(
+            "awaiting approval · terminal.run_program",
+            TimelineKind::Approval {
+                tool: "terminal.run_program".into(),
+                decision: None,
+                summary: "run: cargo test".into(),
+                edited: false,
+            },
+        );
+        let text = rendered(&pending, 80);
+        assert!(text.contains("Awaiting your approval"), "{text}");
+        assert!(text.contains("run: cargo test"), "{text}");
+        assert!(!text.contains("DONE"), "{text}");
+        assert!(!text.contains("APPROVAL"), "{text}");
+
+        let resolved = message_event(
+            "approved once · terminal.run_program",
+            TimelineKind::Approval {
+                tool: "terminal.run_program".into(),
+                decision: Some("approved once".into()),
+                summary: "run: cargo test".into(),
+                edited: false,
+            },
+        );
+        let text = rendered(&resolved, 80);
+        assert!(text.contains("Approved once"), "{text}");
+        assert!(!text.contains("awaiting"), "{text}");
+    }
+
+    /// A plan is an intention, so it is never `RUNNING` and never `DONE`.
+    #[test]
+    fn an_intent_header_states_a_count_not_a_status() {
+        let event = message_event(
+            "intent · 3 step(s)",
+            TimelineKind::Intent {
+                steps: vec!["One".into(), "Two".into(), "Three".into()],
+                class: "coding".into(),
+                refined: false,
+            },
+        );
+        let text = rendered(&event, 80);
+        assert!(text.contains("Intent · 3 steps"), "{text}");
+        assert!(!text.contains("DONE"), "{text}");
+        assert!(!text.contains("RUNNING"), "{text}");
+    }
+
+    #[test]
+    fn an_intent_renders_numbered_steps_and_never_ticks_one_off() {
+        let event = message_event(
+            "intent · 3 step(s)",
+            TimelineKind::Intent {
+                steps: vec![
+                    "Read the failing test".into(),
+                    "Apply the fix".into(),
+                    "Run the suite".into(),
+                ],
+                class: "coding".into(),
+                refined: false,
+            },
+        );
+        let text = rendered(&event, 80);
+        assert!(text.contains("1. Read the failing test"), "{text}");
+        assert!(text.contains("3. Run the suite"), "{text}");
+        // An intention, not a record: no *step* is marked done. (The card's own
+        // status glyph is a different thing and is allowed to be there.)
+        for line in text
+            .lines()
+            .filter(|line| line.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+        {
+            assert!(!line.contains('✓'), "a step was ticked off: {line}");
+            assert!(!line.contains('✕'), "a step was marked failed: {line}");
+        }
+        // Provenance is machine detail, not product copy.
+        assert!(!text.contains("no refinement"), "{text}");
+        assert!(
+            rendered_debug(&event, 80).contains("no refinement"),
+            "provenance must be available under debug"
+        );
     }
 
     #[test]
@@ -3496,11 +4075,19 @@ mod tests {
                 },
             ),
         ] {
-            let text = event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = event_lines(
+                &event,
+                TranscriptDetail::Compact,
+                false,
+                false,
+                80,
+                &theme,
+                false,
+            )
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
             assert_eq!(text.matches(&event.summary).count(), 1, "{text}");
             assert!(text.contains("second line"), "{text}");
         }
@@ -3518,7 +4105,15 @@ mod tests {
                 preview: "-old line\n+new line\n+another".into(),
             },
         );
-        let lines = event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme);
+        let lines = event_lines(
+            &event,
+            TranscriptDetail::Compact,
+            false,
+            false,
+            80,
+            &theme,
+            false,
+        );
         let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         // Path header with counts is present.
         assert!(text.contains("page.html"), "{text}");
@@ -3679,7 +4274,8 @@ mod tests {
         let lines = processing_lines(&state, &state.theme.clone(), 120);
         assert_eq!(lines.len(), 1, "the indicator row must survive `off`");
         let text = line_text(&lines[0]);
-        assert!(text.contains("NEXUS"), "{text}");
+        let skin = nexus_core::brand::Skin::nexus();
+        assert!(text.contains(state.status_action(&skin).verb()), "{text}");
         assert!(
             !text.contains("Ctrl+E"),
             "no preview means no detail pointer: {text}"
@@ -3841,8 +4437,13 @@ mod tests {
         let lines = processing_lines(&state, &state.theme.clone(), 36);
         assert_eq!(lines.len(), 1);
         let text = line_text(&lines[0]);
-        assert!(text.starts_with("◢ "), "{text}");
-        assert!(text.contains("PROCESSING") || text.contains('·'), "{text}");
+        let skin = nexus_core::brand::Skin::nexus();
+        let action = state.status_action(&skin);
+        assert!(text.starts_with(skin.icon(action)), "{text}");
+        assert!(text.contains(action.verb()), "{text}");
+        // A tool name would be machine detail on the most cramped surface there
+        // is; the status line never carries one.
+        assert!(!text.contains("fs."), "{text}");
     }
 
     #[test]
@@ -3852,7 +4453,11 @@ mod tests {
             .timeline
             .retain(|event| !matches!(event.kind, TimelineKind::ReasoningSummary { .. }));
         let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
-        assert!(text.contains("NEXUS ACTIVITY"), "{text}");
+        // The row no longer announces the product at all — it says what the
+        // agent is doing, which is the only thing an operator needs from it.
+        assert!(!text.contains("NEXUS"), "{text}");
+        let skin = nexus_core::brand::Skin::nexus();
+        assert!(text.contains(state.status_action(&skin).verb()), "{text}");
 
         state.active_turn_id = None;
         state.push_local_event(
@@ -3863,11 +4468,9 @@ mod tests {
             },
         );
         let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
-        assert!(
-            !text.contains("NEXUS ACTIVITY"),
-            "a real reasoning channel earns the live state label: {text}",
-        );
-        assert!(text.contains(state.thinking_state().title()), "{text}");
+        assert!(!text.contains("NEXUS"), "{text}");
+        let skin = nexus_core::brand::Skin::nexus();
+        assert!(text.contains(state.status_action(&skin).verb()), "{text}");
     }
 
     #[test]
@@ -3876,8 +4479,140 @@ mod tests {
         state.reduced_motion = true;
         assert!(activity_track(&state).is_empty());
         let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
-        assert!(text.contains('▪'), "{text}");
+        // Reduced motion stops the movement; it does not swap in a different
+        // design, so the state's own icon is still what leads the row.
+        let skin = nexus_core::brand::Skin::nexus();
+        assert!(
+            text.starts_with(&format!("  {}", skin.icon(state.status_action(&skin)))),
+            "{text}"
+        );
         assert!(!text.contains('▰'), "{text}");
+    }
+
+    #[test]
+    fn the_status_line_is_absent_when_idle() {
+        let mut state = activity_state();
+        state.mode = Mode::Idle;
+        assert!(processing_lines(&state, &state.theme.clone(), 120).is_empty());
+    }
+
+    /// Effort is the provider's claim, not the harness's. With nothing
+    /// reported the field is omitted — a defaulted "medium effort" would be an
+    /// invention on the most-read row in the product.
+    #[test]
+    fn effort_is_shown_only_when_the_provider_reported_one() {
+        let mut state = activity_state();
+        state.provider_effort = None;
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(!text.contains("effort"), "{text}");
+
+        state.provider_effort = Some("high".into());
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(text.contains("high effort"), "{text}");
+    }
+
+    /// The step counter is bound to a real plan. Without one there is no
+    /// counter rather than a made-up denominator.
+    #[test]
+    fn the_step_counter_needs_both_verbose_and_a_real_plan() {
+        let mut state = activity_state();
+        state.narration_mode = nexus_core::timeline::NarrationMode::Verbose;
+        state.intent_steps = 0;
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(!text.contains("step "), "{text}");
+
+        state.intent_steps = 3;
+        state.narration_mode = nexus_core::timeline::NarrationMode::Auto;
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(
+            !text.contains("step "),
+            "auto must not show a counter: {text}"
+        );
+    }
+
+    /// A sub-second turn must not flash a counter that is instantly stale.
+    #[test]
+    fn elapsed_is_withheld_below_the_dwell_floor() {
+        let mut state = activity_state();
+        state.turn_started = Some(std::time::Instant::now());
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(!text.contains("second"), "{text}");
+
+        state.turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(24));
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 120)[0]);
+        assert!(text.contains("24 seconds"), "{text}");
+    }
+
+    /// Narrow rows keep the verb and drop the prose form of the elapsed time.
+    #[test]
+    fn elapsed_switches_to_the_short_form_on_a_narrow_row() {
+        let mut state = activity_state();
+        state.turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(24));
+        let text = line_text(&processing_lines(&state, &state.theme.clone(), 60)[0]);
+        assert!(text.contains("24s"), "{text}");
+        assert!(!text.contains("24 seconds"), "{text}");
+    }
+
+    /// Rendering the status line is a pure projection: it must never append to
+    /// the record it sits above.
+    #[test]
+    fn the_status_line_never_writes_a_timeline_event() {
+        let state = activity_state();
+        let before = state.timeline.len();
+        for _ in 0..50 {
+            let _ = processing_lines(&state, &state.theme.clone(), 120);
+        }
+        assert_eq!(state.timeline.len(), before);
+    }
+
+    /// The 2.4.1 regression guard, extended to the narration axis: liveness
+    /// feedback is not verbosity, so every mode still shows the row.
+    #[test]
+    fn the_status_line_renders_in_every_narration_mode() {
+        use nexus_core::timeline::NarrationMode;
+        for mode in [
+            NarrationMode::Off,
+            NarrationMode::Compact,
+            NarrationMode::Auto,
+            NarrationMode::Verbose,
+        ] {
+            let mut state = activity_state();
+            state.narration_mode = mode;
+            assert!(
+                !processing_lines(&state, &state.theme.clone(), 120).is_empty(),
+                "{mode:?} lost the status line"
+            );
+        }
+    }
+
+    /// A fast tool sequence must not strobe the verb.
+    #[test]
+    fn the_verb_holds_for_the_dwell_window() {
+        let skin = nexus_core::brand::Skin::nexus();
+        let mut state = activity_state();
+        state.active_work.active_foreground_tool = None;
+        let first = state.status_action(&skin);
+
+        // The underlying phase changes immediately…
+        state.active_work.active_foreground_tool = Some("fs.write_file".into());
+        assert_eq!(
+            state.status_action(&skin),
+            first,
+            "the displayed verb changed inside the dwell window"
+        );
+
+        // …and the display catches up once the window has passed.
+        let past = nexus_core::brand::Skin {
+            motion: nexus_core::brand::Motion {
+                dwell_ms: 0,
+                ..skin.motion
+            },
+            ..skin
+        };
+        assert_eq!(
+            state.status_action(&past),
+            nexus_core::brand::ActionState::Applying
+        );
     }
 
     #[test]
@@ -3962,13 +4697,21 @@ mod tests {
         let mut event = message_event(summary, kind);
         event.status = status;
         event.duration_ms = duration_ms;
-        event_lines(&event, TranscriptDetail::Compact, false, false, 80, &theme)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim_end()
-            .to_string()
+        event_lines(
+            &event,
+            TranscriptDetail::Compact,
+            false,
+            false,
+            80,
+            &theme,
+            false,
+        )
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
     }
 
     fn tool(status: TimelineStatus, exit: Option<&str>) -> TimelineKind {
@@ -4091,6 +4834,26 @@ mod tests {
             "no diagnostic labels on the answer: {card}",
         );
         assert!(card.contains("The release is ready."), "{card}");
+    }
+
+    fn pending_approval() -> crate::approver::ApprovalRequest {
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        crate::approver::ApprovalRequest {
+            action: nexus_policy::ActionRequest {
+                tool: "terminal.run".into(),
+                risk: nexus_core::RiskLevel::Destructive,
+                paths: vec![],
+                formats: vec![],
+                command: Some("rm -rf build".into()),
+                command_analysis: None,
+                destination: None,
+                summary: "remove the build directory".into(),
+            },
+            arguments: serde_json::json!({"command": "rm -rf build"}),
+            reason: "destructive command".into(),
+            sandbox_active: false,
+            reply,
+        }
     }
 
     fn representative_state() -> State {
@@ -4219,10 +4982,20 @@ mod tests {
         output
     }
 
+    /// The snapshot fixture opens the context panel wherever the rail is not
+    /// drawn, so both presentations are covered.
+    ///
+    /// This used to key off `width < 100`, which meant the panel was only ever
+    /// exercised on narrow terminals — and every narrow size in the crate is
+    /// also short, while every wide one is also tall. The wide-and-short
+    /// quadrant, which is exactly where a tablet lands when its software
+    /// keyboard opens, was unreachable by any test here. Keying off the layout
+    /// instead of the width closes that.
     fn rendered_text(width: u16, height: u16) -> String {
         let mut state = representative_state();
-        if width < 100 {
-            state.context_drawer = true;
+        let rl = crate::layout::classify(Rect::new(0, 0, width, height));
+        if !rl.show_sidebar {
+            state.context_pane = crate::state::ContextPane::Open;
         }
         render_state_text(&mut state, width, height)
     }
@@ -4261,6 +5034,122 @@ mod tests {
             })
     }
 
+    /// The defect this fixes, at the dimensions it was reported at.
+    ///
+    /// A tablet in landscape sits around 100×30 and gets the rail. Its software
+    /// keyboard takes roughly half the viewport, and at 100×14 the rail no
+    /// longer fits — at which point the panel used to be painted over the whole
+    /// frame, so the operator saw session, branch, model, agent, objective, and
+    /// file metadata where the conversation had been, with no way back that
+    /// anyone would guess.
+    #[test]
+    fn a_keyboard_sized_viewport_never_hands_the_conversation_to_the_context_panel() {
+        for (width, height) in [(100, 14), (120, 16), (110, 12), (90, 15)] {
+            let mut state = representative_state();
+            // Armed on the roomy layout, where it draws nothing at all.
+            state.context_pane = crate::state::ContextPane::Open;
+            state.focus = Focus::Context;
+            let frame = render_state_text(&mut state, width, height);
+
+            assert!(
+                frame.contains("Transcript cards now stream in place"),
+                "the conversation is gone at {width}x{height}:\n{frame}"
+            );
+            let context_rows = frame
+                .lines()
+                .filter(|line| line.contains("ACTIVE CONTEXT"))
+                .count();
+            let timeline_rows = frame.lines().filter(|line| !line.trim().is_empty()).count();
+            assert!(
+                context_rows <= 1,
+                "the context panel is drawn more than once at {width}x{height}:\n{frame}"
+            );
+            assert!(
+                timeline_rows > 4,
+                "almost nothing survived at {width}x{height}:\n{frame}"
+            );
+        }
+    }
+
+    /// The composer is priority one: whatever else is shed, the operator can
+    /// still type. The panel used to be `Clear`ed across `height - 2`, which
+    /// took the composer's rows with it.
+    #[test]
+    fn the_composer_survives_the_context_panel_at_every_constrained_size() {
+        for (width, height) in [(100, 14), (120, 16), (110, 12), (80, 20), (45, 18)] {
+            let mut state = representative_state();
+            state.context_pane = crate::state::ContextPane::Open;
+            state.input.insert_paste("a message being written");
+            let frame = render_state_text(&mut state, width, height);
+            assert!(
+                frame.contains("a message being written"),
+                "the composer was covered at {width}x{height}:\n{frame}"
+            );
+        }
+    }
+
+    /// Read-only metadata must never sit on top of the controls used to answer
+    /// an approval prompt. The panel used to be drawn after the modal stack.
+    #[test]
+    fn the_context_panel_never_covers_the_approval_prompt() {
+        let mut state = representative_state();
+        state.context_pane = crate::state::ContextPane::Open;
+        state.pending = Some(pending_approval());
+        let frame = render_state_text(&mut state, 100, 16);
+        assert!(
+            frame.contains("APPROVAL") || frame.contains("approval"),
+            "the approval prompt is not reachable:\n{frame}"
+        );
+    }
+
+    /// A panel that the terminal took away says so in words. Something the
+    /// operator was looking at has gone, and nothing else on screen explains it.
+    #[test]
+    fn a_collapsed_context_panel_is_announced_in_readable_text() {
+        let mut state = representative_state();
+        state.context_pane = crate::state::ContextPane::Collapsed;
+        let frame = render_state_text(&mut state, 100, 14);
+        assert!(frame.contains("CTX"), "{frame}");
+        assert!(frame.contains("hidden"), "{frame}");
+
+        // Never opened, never taken away: nothing to announce, and the segment
+        // would be permanent noise on every terminal under ninety columns.
+        let mut untouched = representative_state();
+        untouched.context_pane = crate::state::ContextPane::Closed;
+        let quiet = render_state_text(&mut untouched, 100, 14);
+        assert!(!quiet.contains("CTX"), "{quiet}");
+    }
+
+    /// Found on a real terminal, not here: at 100x20 the composer read
+    /// `context · ↑/↓ scroll · Esc close` with no panel anywhere on screen.
+    ///
+    /// `classify` sizes the body from the terminal alone, so it said *overlay*;
+    /// the welcome panel then took those rows and the overlay could not be
+    /// drawn. Two answers to one question. There is now one — the geometry —
+    /// and this pins that every surface reads it: if the panel is not on
+    /// screen, the composer must not offer to close it and the status bar must
+    /// say it is hidden.
+    #[test]
+    fn nothing_announces_a_context_panel_that_is_not_on_screen() {
+        for (width, height) in [(100, 14), (100, 16), (100, 20), (120, 16), (45, 20)] {
+            let mut state = representative_state();
+            state.context_pane = crate::state::ContextPane::Open;
+            state.focus = Focus::Context;
+            let frame = render_state_text(&mut state, width, height);
+            if frame.contains("ACTIVE CONTEXT") {
+                continue;
+            }
+            assert!(
+                !frame.contains("Esc close"),
+                "{width}x{height} offers to close a panel it never drew:\n{frame}"
+            );
+            assert!(
+                frame.contains("hidden"),
+                "{width}x{height} dropped the panel without saying so:\n{frame}"
+            );
+        }
+    }
+
     #[test]
     fn timeline_and_context_snapshots_match_required_terminal_sizes() {
         let actual: Vec<(u16, u16, u64)> = [
@@ -4269,6 +5158,11 @@ mod tests {
             (60, 18),
             (60, 20),
             (80, 24),
+            // Wide and short: a tablet with its software keyboard open. Every
+            // other size here is either wide-and-tall or narrow-and-short, so
+            // this quadrant had no snapshot at all.
+            (100, 14),
+            (120, 16),
             (100, 30),
             (120, 40),
             (160, 50),
@@ -4276,15 +5170,45 @@ mod tests {
         .into_iter()
         .map(|(width, height)| (width, height, fnv1a64(&rendered_text(width, height))))
         .collect();
+        // Rebaselined when the card headers stopped stamping run outcomes on
+        // things that are not runs: `✓ DONE  USER MESSAGE` became `❯ You`, and
+        // a short notice became its own header instead of a status word above a
+        // sentence. New hashes reproduced across three consecutive runs and the
+        // 80×24 and 120×40 frames were read before this was touched.
+        // Rebaselined again when answers started rendering as documents: the
+        // body now reflows through the Markdown wrapper, so the four sizes that
+        // wrap the sample answer moved and the four that do not are unchanged.
+        // Hashes reproduced across three consecutive runs; the 45×20 and 100×30
+        // frames were read first.
+        // Rebaselined a third time when ACTIVE CONTEXT stopped being painted
+        // over the frame: it is now floated inside the conversation's own border
+        // and never drawn where a conversation would not fit beside it. Two
+        // wide-and-short sizes were added because that quadrant had no coverage
+        // at all. The five sizes that show the panel moved; the three
+        // wide-and-tall sizes, which show the rail instead, are byte-identical —
+        // the check that this changed nothing on a desktop. Hashes reproduced
+        // across three consecutive runs; the 80×24, 100×14, and 120×16 frames
+        // were read before this was touched.
+        // Rebaselined a fourth time when the status bar started telling the
+        // truth about a panel that was asked for and did not fit. `CTX hidden`
+        // used to fire only on a layout-collapsed pane, which missed the case
+        // found on a real terminal: the layout says there is room, the welcome
+        // panel then takes those rows, and the panel silently does not appear.
+        // The six sizes that now carry the segment moved; 80×24, which shows
+        // the panel, and the three wide-and-tall sizes, which show the rail,
+        // are byte-identical. Hashes reproduced across three consecutive runs;
+        // the 45×20, 80×24, 100×14, and 120×16 frames were read first.
         let expected = [
-            (36, 20, 13_812_581_967_948_532_461),
-            (45, 20, 10_867_498_953_966_715_543),
-            (60, 18, 14_614_356_305_927_070_958),
-            (60, 20, 13_128_974_092_938_649_675),
-            (80, 24, 10_889_260_809_988_049_922),
-            (100, 30, 10_178_337_125_861_219_773),
-            (120, 40, 6_403_931_847_013_668_550),
-            (160, 50, 913_345_411_169_358_918),
+            (36, 20, 10_993_650_595_741_144_642),
+            (45, 20, 17_384_499_503_187_027_622),
+            (60, 18, 11_558_688_284_225_948_033),
+            (60, 20, 1_455_096_483_603_950_913),
+            (80, 24, 17_843_421_910_808_649_627),
+            (100, 14, 4_202_616_081_264_061_873),
+            (120, 16, 6_383_065_140_103_738_961),
+            (100, 30, 11_649_898_669_383_203_317),
+            (120, 40, 10_496_186_880_083_422_686),
+            (160, 50, 10_700_549_245_251_536_142),
         ];
         assert_eq!(actual, expected);
     }
@@ -4421,6 +5345,9 @@ mod tests {
         let mut state = representative_state();
         state.timeline.clear();
         state.thinking_mode = nexus_core::ThinkingMode::Off;
+        // Isolate the axis under test: narration also folds raw tool rows, and
+        // this test is about `/thinking` not hiding operational events.
+        state.narration_mode = nexus_core::timeline::NarrationMode::Off;
         state.push_local_event(
             TimelineStatus::Completed,
             "reasoning".into(),

@@ -11,6 +11,7 @@
 //! ```
 
 pub mod app;
+pub mod boot;
 pub mod claude;
 pub mod clipboard;
 pub mod codex;
@@ -20,9 +21,12 @@ pub mod credentials;
 pub mod exec;
 pub mod gitx;
 pub mod parse;
+pub mod profile_capture;
+pub mod profile_port;
 pub mod providers;
 pub mod registry;
 pub mod report;
+pub mod rsi;
 pub mod services;
 pub mod status;
 pub mod uistate;

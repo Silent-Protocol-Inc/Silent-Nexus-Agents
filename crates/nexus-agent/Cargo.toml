@@ -18,6 +18,7 @@ nexus-memory.workspace = true
 nexus-context.workspace = true
 nexus-goals.workspace = true
 nexus-observability.workspace = true
+nexus-rsi.workspace = true
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true

@@ -169,10 +169,20 @@ fn build_spec(
                     != "deny"
         });
     if !ctx.sandbox.strong_isolation() && !sensitive_path_masks.is_empty() && !proved_write_only {
-        return Err(NexusError::PolicyDenied(
-            "host execution cannot prove restricted-file masking; enable the container sandbox"
-                .into(),
-        ));
+        // Name the constraint and both ways past it. The old message stated the
+        // rule and stopped, so an operator whose workspace holds restricted
+        // files — a password manager, a keystore, a repo with `.env` — saw the
+        // agent give up with no idea which files caused it or what still works.
+        // Counts only: the paths are the thing being protected.
+        let blocked = sensitive_path_masks.len();
+        return Err(NexusError::PolicyDenied(format!(
+            "host execution cannot prove restricted-file masking for {blocked} file{} in this \
+             workspace, so a host command could read {}. Use the per-file tools (`fs.read_file`, \
+             `fs.search`), which are checked individually, or enable the container sandbox \
+             (`/sandbox`) to run commands with those paths masked.",
+            if blocked == 1 { "" } else { "s" },
+            if blocked == 1 { "it" } else { "them" },
+        )));
     }
     Ok(ExecSpec {
         program,

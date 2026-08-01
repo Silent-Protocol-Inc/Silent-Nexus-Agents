@@ -154,6 +154,57 @@ impl Focus {
     }
 }
 
+/// Whether the ACTIVE CONTEXT panel is showing, and — when it is not — whether
+/// that was the operator's decision or the terminal's.
+///
+/// The distinction is the whole fix. The panel used to be one latched bool that
+/// nothing reconciled against the current size, so arming it on a roomy
+/// terminal (where it draws nothing, because the rail is already there) left a
+/// flag that only became visible once a software keyboard shrank the viewport —
+/// at which point it painted over the conversation. Now a pane that the layout
+/// took away comes back on its own, and a pane the operator closed stays closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextPane {
+    /// The operator closed it. It stays closed until they ask again.
+    Closed,
+    /// The operator opened it, and there is room to draw it.
+    Open,
+    /// The operator had it open, but the terminal no longer has room. It
+    /// reopens by itself when the room comes back.
+    Collapsed,
+}
+
+impl ContextPane {
+    /// Whether the panel should be drawn, given room to draw it.
+    pub fn is_open(self) -> bool {
+        matches!(self, ContextPane::Open)
+    }
+
+    /// The layout can no longer afford the panel.
+    pub fn constrain(self) -> Self {
+        match self {
+            ContextPane::Open => ContextPane::Collapsed,
+            other => other,
+        }
+    }
+
+    /// The layout can afford it again. Only what the layout took away is given
+    /// back — a pane the operator closed is not reopened for them.
+    pub fn relax(self) -> Self {
+        match self {
+            ContextPane::Collapsed => ContextPane::Open,
+            other => other,
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            ContextPane::Open => ContextPane::Closed,
+            _ => ContextPane::Open,
+        }
+    }
+}
+
 pub struct State {
     pub theme: Theme,
     pub theme_name: String,
@@ -214,7 +265,14 @@ pub struct State {
     pub event_row_offsets: std::collections::BTreeMap<String, usize>,
     pub(crate) wrap_layout_cache: std::collections::HashMap<String, WrapLayoutCacheEntry>,
     pub focus: Focus,
-    pub context_drawer: bool,
+    /// The layout the last frame was drawn with. Key handling needs to know
+    /// what is actually on screen — offering to open a panel that this size
+    /// cannot draw is worse than saying there is no room for it.
+    pub layout: crate::layout::ResponsiveLayout,
+    pub context_pane: ContextPane,
+    /// Scroll offset within the ACTIVE CONTEXT panel. Survives collapse and
+    /// restore, so a panel the keyboard took away comes back where it was.
+    pub context_scroll: u16,
     pub agent_drawer: bool,
     pub toasts: VecDeque<Toast>,
     pub spinner: usize,
@@ -251,6 +309,27 @@ pub struct State {
     pub summarize_provider_reasoning: bool,
     /// Timeline verbosity: Default (concise) hides reasoning/diagnostics.
     pub activity_mode: ActivityMode,
+    /// How much the agent narrates. A different axis from `activity_mode`, and
+    /// they compose in one direction: **narration folds, `/view` reveals.**
+    pub narration_mode: nexus_core::timeline::NarrationMode,
+    /// Reasoning effort the provider last reported, e.g. `high`. `None` when
+    /// the provider reported none — the status line then omits the field
+    /// rather than guessing a value.
+    pub provider_effort: Option<String>,
+    /// Steps in the intent plan for this turn, for the `verbose` step counter.
+    pub intent_steps: usize,
+    /// Startup facts for the welcome panel. `None` on a surface that never
+    /// gathered them; the panel simply does not render.
+    pub boot_snapshot: Option<nexus_app::boot::BootSnapshot>,
+    /// Whether the welcome panel has collapsed to its one-line form. Set once,
+    /// when the first turn starts, and never cleared — a panel that reopened
+    /// when the operator scrolled back would fight them for the screen.
+    pub welcome_collapsed: bool,
+    /// The status verb currently on screen and when it was committed. Held in
+    /// a `Cell` so the dwell window works from `&State` at render time; the
+    /// alternative was threading `&mut` through every render helper for a
+    /// presentation detail.
+    status_display: std::cell::Cell<Option<(nexus_core::brand::ActionState, Instant)>>,
     /// When the active turn started, for the live elapsed counter.
     pub turn_started: Option<Instant>,
     /// Cap on the NEXUS activity preview (`[tui.activity].reasoning_preview_lines`).
@@ -273,12 +352,14 @@ impl State {
         thinking_mode: nexus_core::ThinkingMode,
     ) -> Self {
         let active_work = ActiveWorkSnapshot::empty(bar.workspace.clone());
-        let mut s = Self {
+        let s = Self {
             theme: Theme::new(&theme_name, color_support),
             theme_name,
             color_support,
             reduced_motion,
             timeline: Vec::new(),
+            boot_snapshot: None,
+            welcome_collapsed: false,
             transcript_filter: TranscriptFilter::All,
             detail_level: TranscriptDetail::Compact,
             collapsed_cards: std::collections::BTreeSet::new(),
@@ -317,7 +398,9 @@ impl State {
             event_row_offsets: std::collections::BTreeMap::new(),
             wrap_layout_cache: std::collections::HashMap::new(),
             focus: Focus::Input,
-            context_drawer: false,
+            layout: crate::layout::classify(ratatui::layout::Rect::new(0, 0, 80, 24)),
+            context_pane: ContextPane::Closed,
+            context_scroll: 0,
             agent_drawer: false,
             toasts: VecDeque::new(),
             spinner: 0,
@@ -338,22 +421,111 @@ impl State {
             thinking_reason: None,
             summarize_provider_reasoning: true,
             activity_mode: ActivityMode::default(),
+            narration_mode: nexus_core::timeline::NarrationMode::default(),
+            provider_effort: None,
+            intent_steps: 0,
+            status_display: std::cell::Cell::new(None),
             turn_started: None,
             preview_lines: 3,
             animation: "nexus".into(),
             animation_rate: 2,
             active_work,
         };
-        s.system(format!("{} ONLINE :: {}", brand::MARK, brand::TAGLINE));
-        s.system("Type a message, `/` for commands, Ctrl+K for the palette, /help for keys.");
+        // No startup text here. The wake flow owns every line the operator
+        // sees on launch, in one ordered place — this used to push two rows
+        // while `event_loop` pushed a third, so nothing could guarantee their
+        // order or keep them consistent.
         s
     }
 
+    /// Hand the startup facts to the welcome panel.
+    ///
+    /// Deliberately **not** a timeline write. These four facts used to be
+    /// pushed through `system_sev`, which files them as completed `Notice`
+    /// events — so every session opened with four `✓ DONE  NOTICE` cards for
+    /// work nobody did. The panel owns them now, and the timeline starts empty.
+    pub fn boot(&mut self, snapshot: nexus_app::boot::BootSnapshot) {
+        self.boot_snapshot = Some(snapshot);
+        self.welcome_collapsed = false;
+    }
+
+    /// Collapse the welcome panel to its one-line form.
+    ///
+    /// Called when the first turn starts, not when the timeline first changes:
+    /// scrolling, resizing, or a background task landing must not disturb it,
+    /// and once collapsed it never reopens.
+    pub fn collapse_welcome(&mut self) {
+        self.welcome_collapsed = true;
+    }
+
     /// Whether an event appears in the main timeline: it must pass the
-    /// content-type filter and the verbosity mode. Default mode shows only
-    /// Essential events; reasoning/diagnostics live in the Ctrl+E detail.
+    /// content-type filter, the verbosity mode, and the narration fold.
+    /// Default mode shows only Essential events; reasoning/diagnostics live in
+    /// the Ctrl+E detail.
     pub fn event_visible(&self, event: &TimelineEvent) -> bool {
-        self.transcript_filter.matches(event) && self.activity_mode.shows(event.kind.visibility())
+        self.transcript_filter.matches(event)
+            && self.activity_mode.shows(event.kind.visibility())
+            && !self.folded_by_narration(event)
+    }
+
+    /// The action state the status line shows right now.
+    ///
+    /// Not simply the current phase: a label that changed on every frame would
+    /// strobe through four words in a second on a fast tool sequence, so a new
+    /// state has to survive the design language's dwell window before it is
+    /// committed to screen. The underlying state is still whatever it is —
+    /// only the display waits.
+    pub fn status_action(&self, skin: &nexus_core::brand::Skin) -> nexus_core::brand::ActionState {
+        let waiting_on_operator = !self.active_work.waiting_approvals.is_empty();
+        let actual = self.thinking_state().action_state(waiting_on_operator);
+        let now = Instant::now();
+        match self.status_display.get() {
+            Some((shown, since)) if shown != actual => {
+                let held_ms = now.duration_since(since).as_millis() as u64;
+                if skin.motion.may_change(held_ms) {
+                    self.status_display.set(Some((actual, now)));
+                    actual
+                } else {
+                    shown
+                }
+            }
+            Some((shown, _)) => shown,
+            None => {
+                self.status_display.set(Some((actual, now)));
+                actual
+            }
+        }
+    }
+
+    /// Forget the displayed status. Called when a turn ends so the next one
+    /// starts from its real first phase instead of inheriting a stale verb.
+    pub fn reset_status_display(&self) {
+        self.status_display.set(None);
+    }
+
+    /// Whether the debug layer is showing: `/view detailed` or `/view debug`.
+    /// The one switch that reveals machine detail — tool names, argument
+    /// payloads, plan provenance — on any surface.
+    pub fn reveals_machine_detail(&self) -> bool {
+        self.activity_mode != ActivityMode::Default
+    }
+
+    /// Whether narration folds this row away.
+    ///
+    /// A raw tool row is the same fact as the milestone above it, in worse
+    /// words — while the agent is narrating, showing both is the noise this
+    /// layer exists to remove. The fold is deliberately one-directional:
+    /// `/view detailed` or `/view debug` brings the rows back whatever the
+    /// narration mode says, so the machine detail is never more than one
+    /// keystroke away, and narration `off` folds nothing at all.
+    fn folded_by_narration(&self, event: &TimelineEvent) -> bool {
+        if !self.narration_mode.folds_tool_rows() || self.activity_mode != ActivityMode::Default {
+            return false;
+        }
+        matches!(
+            event.kind,
+            TimelineKind::ToolExecution { .. } | TimelineKind::ToolProgress { .. }
+        )
     }
 
     /// The current thinking phase, derived from structured runtime state
@@ -435,17 +607,6 @@ impl State {
     /// Set the timeline verbosity. Touches nothing else, for the same reason.
     pub fn set_activity_mode(&mut self, mode: ActivityMode) {
         self.activity_mode = mode;
-    }
-
-    /// True when the active turn carries a real provider reasoning channel.
-    /// Only then may the component claim to show reasoning — a summary the
-    /// harness derived from its own state is labelled ACTIVITY instead.
-    pub fn has_provider_reasoning(&self) -> bool {
-        let turn = self.active_turn_id.as_ref();
-        self.timeline.iter().rev().take(64).any(|event| {
-            matches!(event.kind, TimelineKind::ReasoningSummary { .. })
-                && turn.is_none_or(|id| &event.turn_id == id)
-        })
     }
 
     /// Text for the activity preview, most informative first. Returns the
@@ -925,7 +1086,7 @@ mod tests {
         let before = state.timeline.len();
         for _ in 0..25 {
             let _ = state.thinking_state();
-            let _ = state.thinking_state().title();
+            let _ = state.status_action(&nexus_core::brand::Skin::nexus());
         }
         assert_eq!(
             state.timeline.len(),
@@ -1067,5 +1228,99 @@ mod tests {
         assert_eq!(Focus::Timeline.next(), Focus::Context);
         assert_eq!(Focus::Context.next(), Focus::Drawer);
         assert_eq!(Focus::Drawer.next(), Focus::Input);
+    }
+    /// The composition rule, asserted: **narration folds, `/view` reveals.**
+    /// Every combination of the two axes has to stay meaningful, and neither
+    /// may quietly change the other.
+    #[test]
+    fn narration_folds_tool_rows_and_view_reveals_them() {
+        use nexus_core::timeline::NarrationMode;
+
+        let mut state = state();
+        state.timeline.clear();
+        state.push_local_event(
+            TimelineStatus::Completed,
+            "ran a tool".into(),
+            TimelineKind::ToolExecution {
+                tool: "fs.read_file".into(),
+                arguments: serde_json::json!({}),
+                output_preview: String::new(),
+                exit_status: Some("ok".into()),
+                affected_paths: Vec::new(),
+            },
+        );
+        let tool = state.timeline.last().expect("event").clone();
+
+        // Narrating: the raw row is folded into the segment above it.
+        state.narration_mode = NarrationMode::Auto;
+        state.activity_mode = ActivityMode::Default;
+        assert!(!state.event_visible(&tool));
+
+        // `/view` reveals it again, whatever narration says.
+        for mode in [ActivityMode::Detailed, ActivityMode::Debug] {
+            state.activity_mode = mode;
+            assert!(state.event_visible(&tool), "{mode:?} must reveal tool rows");
+        }
+
+        // Narration off restores the pre-narration timeline exactly.
+        state.activity_mode = ActivityMode::Default;
+        state.narration_mode = NarrationMode::Off;
+        assert!(state.event_visible(&tool));
+    }
+
+    #[test]
+    fn folding_never_touches_results_the_operator_needs() {
+        use nexus_core::timeline::NarrationMode;
+        let mut state = state();
+        state.narration_mode = NarrationMode::Auto;
+        state.activity_mode = ActivityMode::Default;
+
+        // Diffs, mutations, and errors are results, not raw tool logs.
+        for kind in [
+            TimelineKind::Diff {
+                path: Some("a.rs".into()),
+                insertions: 1,
+                deletions: 0,
+                preview: "+x".into(),
+            },
+            TimelineKind::FileMutation {
+                path: "a.rs".into(),
+                operation: "write".into(),
+                bytes: Some(3),
+            },
+            TimelineKind::Error {
+                class: "tool".into(),
+                message: "boom".into(),
+                retryable: false,
+            },
+        ] {
+            state.timeline.clear();
+            state.push_local_event(TimelineStatus::Completed, "result".into(), kind);
+            let event = state.timeline.last().expect("event");
+            assert!(
+                state.event_visible(event),
+                "folded a result: {:?}",
+                event.kind
+            );
+        }
+    }
+
+    #[test]
+    fn an_intent_is_essential_and_survives_the_concise_view() {
+        let mut state = state();
+        state.timeline.clear();
+        state.push_local_event(
+            TimelineStatus::Running,
+            "intent · 2 step(s)".into(),
+            TimelineKind::Intent {
+                steps: vec!["Read the module".into(), "Report".into()],
+                class: "coding".into(),
+                refined: false,
+            },
+        );
+        state.narration_mode = nexus_core::timeline::NarrationMode::Auto;
+        state.activity_mode = ActivityMode::Default;
+        let event = state.timeline.last().expect("event");
+        assert!(state.event_visible(event));
     }
 }

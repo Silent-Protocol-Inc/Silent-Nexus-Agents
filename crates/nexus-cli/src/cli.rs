@@ -101,6 +101,13 @@ pub enum Command {
         mode: Option<String>,
     },
 
+    /// Show or set how much the agent narrates its own work.
+    Narrate {
+        /// `off`, `compact`, `auto`, or `verbose` (omit, or `status`, to show
+        /// the current mode).
+        mode: Option<String>,
+    },
+
     /// Persistent, verifiable goals.
     #[command(subcommand)]
     Goal(GoalCmd),
@@ -120,6 +127,10 @@ pub enum Command {
     /// Long-term memory (approval-gated, secret-refusing).
     #[command(subcommand)]
     Memory(MemoryCmd),
+
+    /// Governed self-improvement: candidates, evidence, promotions, governance.
+    #[command(subcommand)]
+    Rsi(RsiCmd),
 
     /// Versioned, inspectable skills.
     #[command(subcommand)]
@@ -203,8 +214,8 @@ pub struct AboutArgs {
 pub struct RunArgs {
     /// The objective for the agent to accomplish.
     pub objective: Vec<String>,
-    /// Agent role: orchestrator, planner, implementer, researcher, debugger,
-    /// reviewer, verifier, security_reviewer, documentation.
+    /// Agent role, or the name of a custom agent. `nexus` is the flagship and
+    /// the default; `/agents` in the TUI lists them all with descriptions.
     #[arg(long)]
     pub agent: Option<String>,
     /// Continue an existing session by id.
@@ -404,6 +415,26 @@ pub enum ProfileCmd {
     RejectProposal {
         id: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RsiCmd {
+    /// Observation state, candidate queue, and the last promotion.
+    Status,
+    /// Every candidate with its declared and classified risk tier.
+    Candidates,
+    /// One candidate: evidence, success metrics, WARP classification.
+    Show { id: String },
+    /// Redacted harness events the candidates are built from.
+    Observations,
+    /// Multi-dimensional outcome scores for finished tasks.
+    Outcomes,
+    /// Promotions recorded for this workspace.
+    Promotions,
+    /// Rollbacks recorded against the latest promotion.
+    Rollbacks,
+    /// The compile-time governance ruleset.
+    Governance,
 }
 
 #[derive(Subcommand, Debug)]
