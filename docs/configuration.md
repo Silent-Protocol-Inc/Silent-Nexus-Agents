@@ -102,7 +102,20 @@ inherits your own read access, and nothing can stop it reading `.git`, `.env`,
 or a keystore — so terminal actions are refused instead, after approval, with a
 count of the restricted paths.
 
-`.git` is restricted, which means this refusal applies in **every Git
+Two things already count as the operator having decided, and neither needs the
+setting below:
+
+- **approving the action.** A host terminal action raises a prominent one-time
+  prompt that states the action is not isolated. Answering it runs that one
+  action; the next one asks again.
+- **full access.** `commands = "allow"` is the same answer given once instead of
+  per action, so a structured `program + argv` invocation runs and is audited
+  rather than prompting. Raw shell (`terminal.run`) still asks every time — an
+  arbitrary command line is worth reading before it runs, whatever the mode.
+  Full access applies only while someone is there to have chosen it: unattended
+  and background runs still cannot execute on a host backend.
+
+Otherwise `.git` is restricted, which means the refusal applies in **every Git
 repository**, not only unusual workspaces. Three ways forward:
 
 - use `fs.read_file` and `fs.search`, which are checked per file and are

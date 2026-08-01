@@ -181,10 +181,25 @@ fn build_spec(
                     .unwrap_or(ctx.config.policy.reads.as_str())
                     != "deny"
         });
+    // An operator who has just answered the prominent one-time prompt for this
+    // exact action has already decided. Asking for consent and then refusing
+    // the answer is not a second safety layer — the card that was approved says
+    // the action is not isolated, so the exposure was on screen when it was
+    // granted. The token comes only from an attended approval of this one
+    // action; unattended and background execution are refused before they can
+    // answer, so nothing automatic reaches this.
+    //
+    // Full access is the same decision made once instead of per action: the
+    // operator has said ordinary commands run without being asked. Refusing
+    // them anyway made full access *stricter* than default mode, which at
+    // least offered a prompt to answer.
+    let operator_consented =
+        ctx.authorization.is_unsafe_host_authorized() || ctx.config.policy.is_full_access();
     if !ctx.sandbox.strong_isolation()
         && !sensitive_path_masks.is_empty()
         && !proved_write_only
         && !ctx.config.sandbox.allow_unmasked_host_reads
+        && !operator_consented
     {
         // Name the constraint and every way past it. The old message stated the
         // rule and stopped, so an operator whose workspace holds restricted
@@ -234,8 +249,12 @@ fn build_spec(
             FilesystemAccess::WorkspaceWrite
         },
         sensitive_path_masks,
+        // The one-shot token is still spent when present, so an approval never
+        // carries to a second action. Full access stands on its own: it is the
+        // operator's standing answer to the same question.
         unsafe_host_approved: ctx.sandbox.strong_isolation()
-            || ctx.authorization.consume_unsafe_host_once(),
+            || ctx.authorization.consume_unsafe_host_once()
+            || ctx.config.policy.is_full_access(),
         timeout_secs: timeout,
         cpu_limit_secs: sandbox_cfg.cpu_limit_secs,
         memory_limit_mb: sandbox_cfg.memory_limit_mb,
@@ -485,6 +504,9 @@ mod tests {
             std::fs::write(root.join(relative), "x").expect("write");
         }
         let ctx = context(root);
+        // The shared fixture pre-authorizes an unsafe-host action so terminal
+        // tests can run; spend it, so this exercises the unapproved path.
+        ctx.authorization.consume_unsafe_host_once();
         let mut registry = ToolRegistry::new();
         register(&mut registry);
         let error = registry
@@ -507,6 +529,84 @@ mod tests {
         assert!(error.contains("allow_unmasked_host_reads"), "{error}");
     }
 
+    /// Asking for consent and then refusing the answer is not a safety layer.
+    ///
+    /// The operator answers a prominent one-time prompt that states the action
+    /// is not isolated, and the turn then failed anyway with a policy denial —
+    /// so approving did nothing and there was no way to tell that in advance.
+    /// The token is granted only by an attended approval of this one action, so
+    /// honouring it cannot let anything unattended through.
+    #[tokio::test]
+    async fn approving_the_action_is_the_decision_and_is_honoured() {
+        let directory = tempfile::tempdir().expect("directory");
+        std::fs::create_dir_all(directory.path().join(".git")).expect("mkdir");
+        std::fs::write(directory.path().join(".git/config"), "x").expect("write");
+
+        let ctx = context(directory.path());
+        ctx.authorization.consume_unsafe_host_once();
+        let mut registry = ToolRegistry::new();
+        register(&mut registry);
+        let tool = registry.get("terminal.run_program").expect("tool");
+
+        // Nothing approved: still refused, as before.
+        tool.execute(&ctx, json!({"program": "echo", "args": ["blocked"]}))
+            .await
+            .expect_err("an unapproved action is still refused");
+
+        // The operator answers the prompt for this one action.
+        ctx.authorization.authorize_unsafe_host_once();
+        let out = tool
+            .execute(&ctx, json!({"program": "echo", "args": ["approved"]}))
+            .await
+            .expect("the approval the operator gave must mean something");
+        assert!(out.content.contains("approved"), "{}", out.content);
+
+        // …and it was spent on that action alone. The next one asks again.
+        tool.execute(&ctx, json!({"program": "echo", "args": ["again"]}))
+            .await
+            .expect_err("one approval must not authorize a second action");
+    }
+
+    /// Full access made terminal execution *stricter* than default mode.
+    ///
+    /// Default mode asks, and the operator can answer. Full access sets
+    /// `commands = "allow"`, so nothing asked — and with nothing asked there
+    /// was no approval to point at, so both the masking check and the host
+    /// backend refused. Choosing the most permissive mode left the operator
+    /// with no way to run a command at all.
+    #[tokio::test]
+    async fn full_access_is_the_same_consent_given_once() {
+        let directory = tempfile::tempdir().expect("directory");
+        std::fs::create_dir_all(directory.path().join(".git")).expect("mkdir");
+        std::fs::write(directory.path().join(".git/config"), "x").expect("write");
+
+        let mut ctx = context(directory.path());
+        ctx.authorization.consume_unsafe_host_once();
+        let mut registry = ToolRegistry::new();
+        register(&mut registry);
+        let tool = registry.get("terminal.run_program").expect("tool");
+        tool.execute(&ctx, json!({"program": "echo", "args": ["blocked"]}))
+            .await
+            .expect_err("refused outside full access with nothing approved");
+
+        let mut config = (*ctx.config).clone();
+        config.policy.writes = "allow".into();
+        config.policy.commands = "allow".into();
+        config.policy.downloads = "allow".into();
+        assert!(config.policy.is_full_access());
+        ctx.config = std::sync::Arc::new(config);
+
+        // Runs, and keeps running — a standing decision is not a one-shot
+        // token, so it is not spent by the first command.
+        for attempt in ["first", "second"] {
+            let out = tool
+                .execute(&ctx, json!({"program": "echo", "args": [attempt]}))
+                .await
+                .unwrap_or_else(|e| panic!("full access refused the {attempt} command: {e}"));
+            assert!(out.content.contains(attempt), "{}", out.content);
+        }
+    }
+
     /// Masking is a bind-mount, so only the container backend can do it. With
     /// no container the choice is refuse or accept the exposure, and accepting
     /// it has to be the operator's explicit decision — a host command can then
@@ -518,6 +618,7 @@ mod tests {
         std::fs::write(directory.path().join(".git/config"), "x").expect("write");
 
         let mut ctx = context(directory.path());
+        ctx.authorization.consume_unsafe_host_once();
         assert!(
             !ctx.config.sandbox.allow_unmasked_host_reads,
             "the default must keep refusing"
@@ -532,11 +633,21 @@ mod tests {
         let mut config = (*ctx.config).clone();
         config.sandbox.allow_unmasked_host_reads = true;
         ctx.config = std::sync::Arc::new(config);
-        let out = tool
+        let error = tool
             .execute(&ctx, json!({"program": "echo", "args": ["allowed"]}))
             .await
-            .expect("the operator accepted the exposure");
-        assert!(out.content.contains("allowed"), "{}", out.content);
+            .expect_err("the host backend still wants its own approval")
+            .to_string();
+
+        // The masking refusal is gone — which is all this setting governs. What
+        // remains is the separate unsafe-host approval, which every terminal
+        // action on a host backend needs and which the operator answers per
+        // action. Two gates, not one, and this key was never the second.
+        assert!(
+            !error.contains("restricted-file masking"),
+            "the setting did not clear the masking refusal: {error}"
+        );
+        assert!(error.contains("unsafe-host approval"), "{error}");
     }
 
     #[tokio::test]

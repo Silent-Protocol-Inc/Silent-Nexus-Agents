@@ -66,17 +66,19 @@ impl App {
         nexus_core::permissions::repair_private_tree(&bootstrap_paths.global_dir)?;
         nexus_core::permissions::repair_private_tree(&bootstrap_paths.auth_dir)?;
         nexus_core::permissions::repair_private_tree(&bootstrap_paths.state_dir)?;
+        // Full access used to be silently reverted to the defaults here, on
+        // every start. `/permissions` wrote it to the managed overrides, the
+        // file kept saying `full-access`, and the running process quietly did
+        // not — so the mode could not be turned on at all, and nothing on any
+        // surface said why. `snx config show` reported the defaults over a file
+        // that said otherwise.
+        //
+        // Persisting it is what the operator asked for by choosing it. What
+        // full access does not do is grow while nobody is watching: it never
+        // makes destructive or external side effects automatic, and terminal
+        // execution on a host backend still requires an attended session, so an
+        // unattended or background run cannot inherit it into a host command.
         let (mut config, paths) = Config::load(&workspace)?;
-        if crate::services::permission_mode(&config.policy) == "full-access" {
-            let defaults = nexus_core::config::PolicyConfig::default();
-            config.policy.reads = defaults.reads;
-            config.policy.writes = defaults.writes;
-            config.policy.commands = defaults.commands;
-            config.policy.network = defaults.network;
-            config.policy.downloads = defaults.downloads;
-            config.policy.destructive = defaults.destructive;
-            config.policy.external = defaults.external;
-        }
         let credentials = CredentialStore::new(&paths.auth_dir);
         let ui_state = UiStateFile::load(&paths.ui_state_file)?;
         let allow_existing_codex = ui_state.state.codex_use_existing;

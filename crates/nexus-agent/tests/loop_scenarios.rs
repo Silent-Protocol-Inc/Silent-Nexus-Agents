@@ -92,6 +92,21 @@ fn runtime_with(script: Vec<MockScript>, dir: &std::path::Path) -> (AgentRuntime
     runtime_with_provider(Arc::new(MockProvider::new(script)), dir)
 }
 
+/// `runtime_with`, with the workspace in full access.
+fn runtime_with_full_access(
+    script: Vec<MockScript>,
+    dir: &std::path::Path,
+) -> (AgentRuntime, SessionId) {
+    let (mut runtime, session) = runtime_with(script, dir);
+    let mut config = (*runtime.tool_ctx.config).clone();
+    config.policy.writes = "allow".into();
+    config.policy.commands = "allow".into();
+    config.policy.downloads = "allow".into();
+    assert!(config.policy.is_full_access());
+    runtime.tool_ctx.config = Arc::new(config);
+    (runtime, session)
+}
+
 fn runtime_with_provider(
     provider: Arc<MockProvider>,
     dir: &std::path::Path,
@@ -353,6 +368,34 @@ async fn unattended_approval_cannot_run_host_terminal_actions() {
         .await
         .expect("loop recovers");
     assert!(!dir.path().join("unattended-marker").exists());
+}
+
+/// Full access is a standing answer from a present operator, so it must not
+/// answer for one who is absent. Unattended and background runs cannot respond
+/// to a prompt, and a stored setting speaking on their behalf would quietly
+/// turn full access into "background agents may run host commands" — a reading
+/// nobody chose.
+#[tokio::test]
+async fn full_access_does_not_authorize_unattended_host_execution() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (runtime, session) = runtime_with_full_access(
+        vec![
+            MockScript::ToolCall {
+                name: "terminal.run_program".into(),
+                arguments: json!({"program":"touch","args":["unattended-full-access"]}).to_string(),
+            },
+            MockScript::Text("host action stayed denied".into()),
+        ],
+        dir.path(),
+    );
+    AgentLoop::new(runtime, AgentRole::Orchestrator)
+        .run(&session, "create a marker", Arc::new(AutoApprove))
+        .await
+        .expect("loop recovers");
+    assert!(
+        !dir.path().join("unattended-full-access").exists(),
+        "full access let an unattended run execute on the host"
+    );
 }
 
 #[tokio::test]

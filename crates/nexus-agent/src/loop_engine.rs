@@ -4552,8 +4552,24 @@ impl AgentLoop {
         // Policy evaluation.
         let outcome = self.runtime.policy.evaluate(&action_req);
         let needs_terminal_isolation = action_requires_terminal_isolation(&action_req);
-        let weak_host_terminal =
-            needs_terminal_isolation && !self.runtime.tool_ctx.sandbox.strong_isolation();
+        // A host backend cannot hide anything from a command, so a terminal
+        // action on one normally earns a prominent one-time approval.
+        //
+        // Full access is the operator answering that in advance for ordinary
+        // commands, so it does not re-ask for a structured `program + argv`
+        // invocation — those run and are audited. Raw shell still asks, because
+        // `one_time_only` forces it below on its own: an arbitrary command line
+        // is the case worth reading before it runs, whatever the mode.
+        //
+        // Attended only. Unattended and background runs cannot answer a prompt,
+        // so letting a stored setting speak for an absent operator would make
+        // full access mean something different with nobody watching — the one
+        // reading of it that was never chosen deliberately.
+        let full_access_attended =
+            self.runtime.tool_ctx.config.policy.is_full_access() && approver.interactive();
+        let weak_host_terminal = needs_terminal_isolation
+            && !self.runtime.tool_ctx.sandbox.strong_isolation()
+            && !full_access_attended;
         let one_time_only = action_req
             .command_analysis
             .as_ref()
@@ -4564,7 +4580,16 @@ impl AgentLoop {
         if outcome.decision != Decision::Deny && forced_one_time {
             effective_decision = Decision::Ask;
             effective_reason = if weak_host_terminal {
-                "host-process fallback is approval-only; this terminal action requires a prominent one-time unsafe-host approval".into()
+                // Name the exposure here, because approving this is what
+                // permits it. Only the container backend can hide a path from
+                // a host process, so without one the command can read whatever
+                // the operator can — including restricted files the per-file
+                // tools refuse. Approving is the decision; it should be made
+                // against the real terms.
+                "host-process fallback is approval-only; nothing can hide restricted files \
+                 (`.git`, `.env`, keystores) from a host command, so approving this runs it \
+                 with your own read access"
+                    .into()
             } else {
                 "raw shell, interpreter, wrapper, or unprovable command requires one-time approval"
                     .into()

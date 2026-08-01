@@ -1,5 +1,47 @@
 # Changelog
 
+## [2.12.1] — 2026-08-02
+
+### Fixed
+
+- **Approving a terminal action did nothing.** A host terminal action raises a
+  prominent one-time prompt that states the action is not isolated; answering it
+  recorded `✓ Approved once` and the turn then failed anyway with
+  `action denied by policy: host execution cannot prove restricted-file
+  masking…`. Consent was asked for, given, and then refused, with no way to tell
+  in advance that answering would not help. The masking check now honours that
+  approval. The token behind it is granted only by an attended approval of that
+  one action and is still spent on it, so the next action asks again and nothing
+  unattended can reach it.
+- **Full access was stricter than default mode.** Full access sets
+  `commands = "allow"`, so nothing asked — and with nothing asked there was no
+  approval to point at, so the masking check and the host backend both refused.
+  Choosing the most permissive mode left no way to run a command at all. Full
+  access is now read as the same consent given once: a structured
+  `program + argv` invocation runs and is audited. Raw shell (`terminal.run`)
+  still raises the one-time prompt every time, because an arbitrary command line
+  is the case worth reading before it runs whatever the mode.
+
+  This applies only while someone is there to have chosen it. Unattended and
+  background runs cannot answer a prompt, and a stored setting is not allowed to
+  answer on their behalf — so full access never becomes "background agents may
+  run host commands", and `automatic/background terminal execution requires
+  strong container isolation` still holds.
+- **Full access could not be turned on at all.** `App::bootstrap` reset the
+  seven policy decisions back to the defaults on every start whenever they
+  matched the full-access preset. `/permissions` wrote the choice to the managed
+  overrides and the file kept saying `full-access`, but every new process
+  quietly disagreed — `snx config show` reported the defaults over a file that
+  said otherwise, and the status bar read `default`. The setting now persists,
+  as choosing it asks for. It still never makes destructive or external side
+  effects automatic, and terminal execution on a host backend still requires an
+  attended session.
+- **The approval prompt now names the exposure it is asking about.** It cited
+  the host-process fallback rule; it now says plainly that nothing can hide
+  restricted files (`.git`, `.env`, keystores) from a host command, so approving
+  runs it with your own read access. Approving is the decision, so it should be
+  made against the real terms.
+
 ## [2.12.0] — 2026-08-02
 
 ### Added

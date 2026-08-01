@@ -127,6 +127,18 @@ impl ExecutionAuthorization {
     pub fn consume_unsafe_host_once(&self) -> bool {
         self.unsafe_host_once.swap(false, Ordering::AcqRel)
     }
+
+    /// Whether a human has just approved this one action, without spending the
+    /// token.
+    ///
+    /// Granted only from the attended one-time unsafe-host approval — not from
+    /// a session or workspace grant, and never from unattended or background
+    /// execution, which are refused before they can answer. Callers that need
+    /// to *act* on the authorization still consume it; this is for deciding
+    /// whether a check the operator has already answered still applies.
+    pub fn is_unsafe_host_authorized(&self) -> bool {
+        self.unsafe_host_once.load(Ordering::Acquire)
+    }
 }
 
 /// Sanitized, truncated result surfaced to the model and UI.

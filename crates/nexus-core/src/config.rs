@@ -565,6 +565,63 @@ pub struct PolicyConfig {
     pub denied_paths: Vec<String>,
 }
 
+impl PolicyConfig {
+    /// Whether the operator has put this workspace in full access.
+    ///
+    /// Full access is a deliberate standing decision that ordinary actions run
+    /// without being asked each time. It never covers destructive or external
+    /// side effects — those stay `ask` in the preset and can never be `allow` —
+    /// and it never relaxes a hard safety rule.
+    ///
+    /// Matched on the decisions rather than a stored mode name so a config that
+    /// spells the preset out by hand counts too. Kept here, beside the fields,
+    /// so the tool layer can consult it without depending on the app layer that
+    /// owns the preset table.
+    pub fn is_full_access(&self) -> bool {
+        self.reads == "allow"
+            && self.writes == "allow"
+            && self.commands == "allow"
+            && self.network == "allow"
+            && self.downloads == "allow"
+    }
+}
+
+#[cfg(test)]
+mod policy_mode_tests {
+    use super::PolicyConfig;
+
+    /// Full access is matched on the decisions, not a stored name, so a config
+    /// that spells the preset out by hand counts. Destructive and external stay
+    /// `ask` in the preset and are deliberately not part of the match — they
+    /// can never be `allow`, so requiring them would make it unmatchable.
+    #[test]
+    fn full_access_is_recognised_and_nothing_weaker_is() {
+        let mut policy = PolicyConfig::default();
+        assert!(!policy.is_full_access(), "the default asks for writes");
+
+        policy.writes = "allow".into();
+        policy.commands = "allow".into();
+        policy.downloads = "allow".into();
+        assert!(policy.is_full_access());
+
+        // auto-edit still asks before commands, and must not read as full.
+        let auto_edit = PolicyConfig {
+            writes: "allow".into(),
+            downloads: "allow".into(),
+            ..PolicyConfig::default()
+        };
+        assert!(!auto_edit.is_full_access());
+
+        // read-only is nowhere near it.
+        let read_only = PolicyConfig {
+            writes: "deny".into(),
+            commands: "deny".into(),
+            ..PolicyConfig::default()
+        };
+        assert!(!read_only.is_full_access());
+    }
+}
+
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
