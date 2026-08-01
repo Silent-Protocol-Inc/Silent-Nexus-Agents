@@ -687,6 +687,31 @@ fn apply_turn_done(
     true
 }
 
+/// The pinned tracker for `work`, as both the planning and the promotion paths
+/// need it. Built in one place so a promoted plan cannot end up displayed
+/// differently from a planned one.
+fn pinned_plan_for(
+    st: &State,
+    work: &nexus_core::orchestration::WorkBreakdown,
+) -> state::PinnedPlan {
+    state::PinnedPlan {
+        plan_id: work.id.as_str().to_string(),
+        agent: st.bar.agent.clone(),
+        objective: work.objective.clone(),
+        version: work.version,
+        steps: work
+            .stages
+            .iter()
+            .map(|stage| state::PinnedStep {
+                sequence: stage.sequence,
+                title: stage.title.clone(),
+                status: stage.status,
+            })
+            .collect(),
+        awaiting_approval: false,
+    }
+}
+
 fn pressed_key(event: Event) -> Option<KeyEvent> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => Some(key),
@@ -4075,22 +4100,7 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
         // recorded there once, and repeating it every transition would bury the
         // conversation under copies of the same list.
         LoopEvent::WorkPlanned { work } => {
-            st.pinned_plan = Some(state::PinnedPlan {
-                plan_id: work.id.as_str().to_string(),
-                agent: st.bar.agent.clone(),
-                objective: work.objective.clone(),
-                version: work.version,
-                steps: work
-                    .stages
-                    .iter()
-                    .map(|stage| state::PinnedStep {
-                        sequence: stage.sequence,
-                        title: stage.title.clone(),
-                        status: stage.status,
-                    })
-                    .collect(),
-                awaiting_approval: false,
-            });
+            st.pinned_plan = Some(pinned_plan_for(st, &work));
         }
         LoopEvent::PlanReviewRequested { request } => {
             // The pop-up itself is opened when the request arrives on the plan
@@ -4171,6 +4181,13 @@ fn apply_loop_event(st: &mut State, turn_id: &TurnId, ev: LoopEvent) {
             to,
             reason,
         } => {
+            // A promotion replaces the plan. Without this the tracker kept the
+            // superseded version for the rest of the turn — and since stage
+            // updates are matched by title, none of the new stages could ever
+            // land on it. A turn that finished one of two stages then signed
+            // off as `COMPLETE · 0/1 tasks`, reporting a plan that no longer
+            // existed while the context panel beside it read `v2 · 1/2`.
+            st.pinned_plan = Some(pinned_plan_for(st, &work));
             st.push_local_event_for_turn(
                 turn_id.clone(),
                 if work.kind == nexus_core::orchestration::WorkBreakdownKind::Planned
@@ -4567,6 +4584,76 @@ mod tests {
             Vec::new(),
             nexus_core::ThinkingMode::Auto,
         )
+    }
+
+    /// Found by reading a real turn's sign-off: `COMPLETE · 0/1 tasks` next to
+    /// a context panel that read `tracked v2 · 1/2`.
+    ///
+    /// A turn that grows mid-flight is promoted to a bigger plan, and the
+    /// tracker only ever refreshed on `WorkPlanned`. So it kept the superseded
+    /// version — and because stage updates are matched by title, the new
+    /// stages could never land on it either. Both numbers in the sign-off were
+    /// wrong, and they were wrong in the direction that reads as "nothing got
+    /// done".
+    #[test]
+    fn a_promoted_plan_replaces_the_one_the_tracker_is_showing() {
+        use nexus_core::orchestration::{StageStatus, WorkBreakdown, WorkEstimate};
+
+        let mut st = turn_test_state();
+        let turn = TurnId::generate();
+
+        // A bounded request gets a one-stage direct plan.
+        let objective = "read main.rs and review it";
+        let mut work = WorkBreakdown::generate(objective, WorkEstimate::from_objective(objective));
+        apply_loop_event(
+            &mut st,
+            &turn,
+            LoopEvent::WorkPlanned { work: work.clone() },
+        );
+        assert_eq!(st.pinned_plan.as_ref().expect("tracker").steps.len(), 1);
+
+        // It then turns out to need real work, exactly as the loop discovers
+        // mid-turn, and the harness promotes the plan.
+        let mut observed = WorkEstimate::from_objective(objective);
+        observed.predicted_actions = 4;
+        observed.writes = true;
+        observed.multi_file = true;
+        let promotion = work.promote(observed).expect("a bigger turn promotes");
+        assert!(work.stages.len() > 1, "promotion produces a bigger plan");
+
+        apply_loop_event(
+            &mut st,
+            &turn,
+            LoopEvent::PlanPromoted {
+                work: work.clone(),
+                from: promotion.from.as_str().into(),
+                to: promotion.to.as_str().into(),
+                reason: "4 observed actions".into(),
+            },
+        );
+        let plan = st.pinned_plan.as_ref().expect("tracker");
+        assert_eq!(plan.version, work.version, "the tracker kept the old plan");
+        assert_eq!(plan.steps.len(), work.stages.len());
+
+        // …and a stage transition now matches a title that actually exists,
+        // which is what makes the sign-off able to count anything at all.
+        apply_loop_event(
+            &mut st,
+            &turn,
+            LoopEvent::StageChanged {
+                plan_id: work.id.as_str().to_string(),
+                stage_id: work.stages[0].id.clone(),
+                title: work.stages[0].title.clone(),
+                status: StageStatus::Completed,
+                next_action: None,
+            },
+        );
+        let (done, total) = st.pinned_plan.as_ref().expect("tracker").progress();
+        assert_eq!(
+            (done, total),
+            (1, work.stages.len()),
+            "the sign-off would report {done}/{total}",
+        );
     }
 
     /// A panel the terminal took away comes back when the terminal gives the

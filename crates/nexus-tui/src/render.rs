@@ -328,7 +328,13 @@ fn draw_welcome(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     };
     let unicode = crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii;
     let lines = if st.welcome_collapsed {
-        vec![crate::welcome::collapsed_line(snapshot, t, unicode)]
+        vec![crate::welcome::collapsed_line(
+            snapshot,
+            &st.bar.agent,
+            &st.bar.model_label,
+            t,
+            unicode,
+        )]
     } else {
         crate::welcome::panel_lines(snapshot, area.width, area.height, t, unicode)
     };

@@ -35,11 +35,17 @@ const BORDER_MIN_WIDTH: u16 = 44;
 const LABEL_WIDTH: usize = 10;
 
 /// The collapsed one-line form, shown from the first turn onward.
-pub fn collapsed_line(snapshot: &BootSnapshot, t: &Theme, unicode: bool) -> Line<'static> {
+pub fn collapsed_line(
+    snapshot: &BootSnapshot,
+    agent: &str,
+    model: &str,
+    t: &Theme,
+    unicode: bool,
+) -> Line<'static> {
     let mark = if unicode { "◢ " } else { "> " };
     Line::from(vec![
         Span::styled(format!(" {mark}"), t.brand()),
-        Span::styled(snapshot.compact(), t.secondary()),
+        Span::styled(snapshot.compact_with(agent, model), t.secondary()),
     ])
 }
 
@@ -708,15 +714,36 @@ mod tests {
 
     #[test]
     fn the_collapsed_line_keeps_identity_and_fits_one_row() {
-        let line = collapsed_line(&snapshot(), &Theme::plain(), true);
-        let text = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
+        let snapshot = snapshot();
+        let text = collapsed_text(&snapshot, &snapshot.agent, &snapshot.model);
         assert!(text.contains("NEXUS"), "{text}");
         assert!(text.contains("implementer"), "{text}");
         assert!(!text.contains('\n'), "{text}");
+    }
+
+    /// The collapsed panel sits directly under the header, which shows the
+    /// live agent and model. Rendering the boot values there put two
+    /// contradictory lines next to each other as soon as anyone ran `/model`.
+    #[test]
+    fn the_collapsed_line_follows_the_session_not_the_startup_snapshot() {
+        let snapshot = snapshot();
+        let text = collapsed_text(&snapshot, "reviewer", "Codex / gpt-5.6-luna");
+        assert!(text.contains("reviewer"), "{text}");
+        assert!(text.contains("Codex / gpt-5.6-luna"), "{text}");
+        assert!(
+            !text.contains(&snapshot.model),
+            "the startup model is still being claimed: {text}"
+        );
+        // Facts about startup are still facts about startup.
+        assert!(text.contains("NEXUS"), "{text}");
+    }
+
+    fn collapsed_text(snapshot: &BootSnapshot, agent: &str, model: &str) -> String {
+        collapsed_line(snapshot, agent, model, &Theme::plain(), true)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     /// Terminals that report no color still have to be readable: every state is

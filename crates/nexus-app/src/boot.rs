@@ -133,11 +133,19 @@ impl BootSnapshot {
 
     /// The collapsed form, for after the first turn: identity and the four
     /// facts that stay true all session.
-    pub fn compact(&self) -> String {
+    /// The one-line form, with the agent and model the session is on *now*.
+    ///
+    /// Those two are the only fields here that change after startup, and they
+    /// are also shown in the header one row above. Rendering the boot values
+    /// put two contradictory lines next to each other the moment anyone ran
+    /// `/model` or `/agent` — the header reading `Codex / gpt-5.6-luna` over a
+    /// collapsed panel still claiming `Ollama / gemma4:e2b`. Everything else
+    /// here is a fact about startup and stays as recorded.
+    pub fn compact_with(&self, agent: &str, model: &str) -> String {
         let mut parts = vec![
             nexus_core::brand::PRODUCT.to_string(),
-            self.agent.clone(),
-            self.model.clone(),
+            agent.to_string(),
+            model.to_string(),
         ];
         if let Some(branch) = self.session.as_ref().and_then(|s| s.branch.clone()) {
             parts.push(branch);
@@ -146,6 +154,12 @@ impl BootSnapshot {
             parts.push("restored".into());
         }
         parts.join(" · ")
+    }
+
+    /// [`compact_with`](Self::compact_with) using the values recorded at
+    /// startup, for callers with no live state to offer.
+    pub fn compact(&self) -> String {
+        self.compact_with(&self.agent, &self.model)
     }
 
     /// Plain-text lines for a surface with no panel to draw — `--inline` under a
