@@ -181,8 +181,12 @@ fn build_spec(
                     .unwrap_or(ctx.config.policy.reads.as_str())
                     != "deny"
         });
-    if !ctx.sandbox.strong_isolation() && !sensitive_path_masks.is_empty() && !proved_write_only {
-        // Name the constraint and both ways past it. The old message stated the
+    if !ctx.sandbox.strong_isolation()
+        && !sensitive_path_masks.is_empty()
+        && !proved_write_only
+        && !ctx.config.sandbox.allow_unmasked_host_reads
+    {
+        // Name the constraint and every way past it. The old message stated the
         // rule and stopped, so an operator whose workspace holds restricted
         // files saw the agent give up with no idea what caused it or what still
         // works. It also read as a discovery about their files, when the usual
@@ -198,8 +202,10 @@ fn build_spec(
         return Err(NexusError::PolicyDenied(format!(
             "host execution cannot prove restricted-file masking for {blocked} path{} in this \
              workspace, so a host command could read {}.{} Use the per-file tools \
-             (`fs.read_file`, `fs.search`), which are checked individually, or enable the \
-             container sandbox (`/sandbox`) — the only backend that can mask a path.",
+             (`fs.read_file`, `fs.search`), which are checked individually; or enable the \
+             container sandbox (`/sandbox`), the only backend that can mask a path; or set \
+             `[sandbox].allow_unmasked_host_reads = true` to accept that host commands here can \
+             read those paths.",
             if blocked == 1 { "" } else { "s" },
             if blocked == 1 { "it" } else { "them" },
             if git {
@@ -495,8 +501,42 @@ mod tests {
             error.contains("for 2 paths"),
             "the count still includes covered children: {error}"
         );
-        // …and it says why, so the operator is not left inferring it.
+        // …and it says why, so the operator is not left inferring it, and names
+        // every way past it rather than leaving the third undiscoverable.
         assert!(error.contains("every Git repository"), "{error}");
+        assert!(error.contains("allow_unmasked_host_reads"), "{error}");
+    }
+
+    /// Masking is a bind-mount, so only the container backend can do it. With
+    /// no container the choice is refuse or accept the exposure, and accepting
+    /// it has to be the operator's explicit decision — a host command can then
+    /// read paths `fs.read_file` refuses one at a time.
+    #[tokio::test]
+    async fn accepting_unmasked_host_reads_is_opt_in_and_then_honoured() {
+        let directory = tempfile::tempdir().expect("directory");
+        std::fs::create_dir_all(directory.path().join(".git")).expect("mkdir");
+        std::fs::write(directory.path().join(".git/config"), "x").expect("write");
+
+        let mut ctx = context(directory.path());
+        assert!(
+            !ctx.config.sandbox.allow_unmasked_host_reads,
+            "the default must keep refusing"
+        );
+        let mut registry = ToolRegistry::new();
+        register(&mut registry);
+        let tool = registry.get("terminal.run_program").expect("tool");
+        tool.execute(&ctx, json!({"program": "echo", "args": ["blocked"]}))
+            .await
+            .expect_err("refused while unset");
+
+        let mut config = (*ctx.config).clone();
+        config.sandbox.allow_unmasked_host_reads = true;
+        ctx.config = std::sync::Arc::new(config);
+        let out = tool
+            .execute(&ctx, json!({"program": "echo", "args": ["allowed"]}))
+            .await
+            .expect("the operator accepted the exposure");
+        assert!(out.content.contains("allowed"), "{}", out.content);
     }
 
     #[tokio::test]
