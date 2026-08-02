@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.12.3] — 2026-08-02
+
+### Fixed
+
+- **Plan mode had no keyboard way out.** `/plan exit` worked, but it had to be
+  typed into the very composer whose behavior the operator was trying to leave —
+  and nothing said so below Desktop width, so on a small terminal the only exit
+  was a command nobody had been shown. **`Esc` on an empty composer now leaves
+  plan mode**, and the way out is named in the composer title, in the toast that
+  announces the mode, and in `?`.
+
+  Esc is honored only when the composer is empty, so a half-typed instruction is
+  never traded away for a mode change. While there is text in it, the title
+  offers `/plan exit` instead of promising a key that would do nothing.
+
+- **The composer title told the operator the wrong thing about Enter while
+  planning.** On layouts where the context rail is gone, the title showed
+  `→ context · Enter send` — and it won exactly when the composer was empty,
+  which is the moment someone is deciding what to do. In plan mode Enter does
+  not send an instruction, so the hint answered the right question with the
+  wrong answer and plan mode named neither itself nor its exit. Plan mode now
+  outranks the context hint.
+
 ## [2.12.2] — 2026-08-02
 
 ### Fixed

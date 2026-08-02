@@ -1132,6 +1132,20 @@ fn handle_key(
         }
     }
 
+    // Plan mode is entered *before* anything has been decided, so changing your
+    // mind about it has to cost as little as entering it did. `/plan exit`
+    // worked but had to be typed, and the mode changes what the next message
+    // does — so an operator who wanted out had to compose a command in the very
+    // composer whose behavior they were trying to leave. Esc is where everyone
+    // reaches first and it is free here: every modal context above (approval,
+    // palette, search, overlay, timeline, context panel) has already claimed
+    // its own Esc and returned. Requiring an empty composer keeps Esc as
+    // "discard what I typed" while there is something to discard.
+    if esc_leaves_plan_mode(key.code, st.bar.plan_mode, st.input.is_empty()) {
+        run_command(st, "plan exit", app, session, ui_tx);
+        return;
+    }
+
     match key.code {
         KeyCode::PageUp => {
             transcript_scroll_up(st, st.viewport_rows.max(4) / 2, app, session.as_ref());
@@ -1229,6 +1243,16 @@ fn handle_key(
         KeyCode::Char(c) => st.input.insert(c),
         _ => {}
     }
+}
+
+/// Whether Esc should leave plan mode instead of falling through to the
+/// composer's ordinary handling.
+///
+/// Only an *empty* composer qualifies. With text in it, Esc keeps whatever
+/// meaning the composer gives it, so nobody loses a half-typed instruction to
+/// a key they pressed for a different reason.
+fn esc_leaves_plan_mode(code: KeyCode, plan_mode: bool, composer_empty: bool) -> bool {
+    matches!(code, KeyCode::Esc) && plan_mode && composer_empty
 }
 
 fn activate_selected_event(st: &mut State, app: &Arc<App>) {
@@ -2300,7 +2324,7 @@ fn handle_effect(
         Effect::SetPlanMode(on) => {
             st.bar.plan_mode = on;
             if on {
-                st.toast("plan mode on — describe the change; nothing is written until you approve the plan", Sev::Ok);
+                st.toast("plan mode on — describe the change; nothing is written until you approve the plan · Esc leaves plan mode", Sev::Ok);
             } else {
                 st.toast("plan mode off", Sev::Ok);
             }
@@ -3519,6 +3543,7 @@ fn help_report() -> Report {
         .line("in menus: ↑/↓ or j/k · Enter · Space toggle · / search")
         .line("Tab/Shift+Tab focus · ? controls · Ctrl+R refresh · Esc back")
         .line("approvals: [y]es · [s]ession · [n]o (deny is the default)")
+        .line("plan mode: Esc on an empty composer leaves it · /plan exit does the same")
         .header("activity")
         .line("Ctrl+E open/close the activity detail (tabs, search, copy mode)")
         .line("Ctrl+S full status · on the timeline: d cycle verbosity · Enter inspect")
@@ -4584,6 +4609,32 @@ mod tests {
             Vec::new(),
             nexus_core::ThinkingMode::Auto,
         )
+    }
+
+    /// Plan mode had no keyboard way out. `/plan exit` existed, but it had to
+    /// be typed into the very composer whose behavior the operator was trying
+    /// to leave — and nothing on screen named it at Narrow or Mobile width.
+    #[test]
+    fn esc_leaves_plan_mode_only_when_there_is_nothing_to_discard() {
+        // The whole point: changed my mind, empty composer, one key.
+        assert!(esc_leaves_plan_mode(KeyCode::Esc, true, true));
+
+        // Half-typed text keeps Esc's ordinary meaning, so an instruction is
+        // never traded away for a mode change nobody asked for in that moment.
+        assert!(!esc_leaves_plan_mode(KeyCode::Esc, true, false));
+
+        // Outside plan mode Esc is not ours to take.
+        assert!(!esc_leaves_plan_mode(KeyCode::Esc, false, true));
+
+        // And no other key leaves the mode by accident.
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Backspace,
+            KeyCode::Char('e'),
+            KeyCode::Left,
+        ] {
+            assert!(!esc_leaves_plan_mode(code, true, true), "{code:?}");
+        }
     }
 
     /// Found by reading a real turn's sign-off: `COMPLETE · 0/1 tasks` next to

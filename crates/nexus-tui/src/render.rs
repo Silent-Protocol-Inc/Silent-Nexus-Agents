@@ -1867,6 +1867,42 @@ fn draw_input(
         (" context · ↑/↓ scroll · Esc close ".to_string(), t.muted())
     } else if st.focus != Focus::Input {
         (" F6 focus · input inactive ".to_string(), t.muted())
+    } else if st.bar.plan_mode {
+        // The title is where the operator looks before typing, so plan mode
+        // says what typing will do here rather than only in the status bar.
+        //
+        // This outranks the context hint below deliberately. That hint claims
+        // `Enter send`, and it wins exactly when the composer is empty — the
+        // moment someone is deciding what to do. While planning, Enter does not
+        // send an instruction, so the hint was answering the right question
+        // with the wrong answer, and plan mode named neither itself nor its way
+        // out. Reaching the context panel is a convenience; knowing what Enter
+        // will do is not.
+        (
+            // The way out is named on every width that has room for words. A
+            // mode you cannot see how to leave is worse than one you cannot
+            // enter, so `Esc` comes before the typed command everywhere.
+            //
+            // But only while it is true: Esc leaves the mode from an *empty*
+            // composer, so with text in it the title names the command instead
+            // of a key that would do nothing. A hint that lies once is worth
+            // less than no hint at all.
+            match (rl.width_class, st.input.is_empty()) {
+                (WidthClass::Wide, true) => {
+                    " plan mode · nothing is written until you approve · Esc or /plan exit "
+                }
+                (WidthClass::Wide, false) => {
+                    " plan mode · nothing is written until you approve · /plan exit "
+                }
+                (WidthClass::Desktop | WidthClass::Compact, true) => " plan mode · Esc exits ",
+                (WidthClass::Desktop | WidthClass::Compact, false) => " plan mode · /plan exit ",
+                (WidthClass::Narrow, true) => " PLAN · Esc ",
+                (WidthClass::Narrow, false) => " PLAN · /plan exit ",
+                (WidthClass::Mobile, _) => " PLAN ",
+            }
+            .to_string(),
+            t.warning(),
+        )
     } else if rl.context_placement == crate::layout::ContextPlacement::Overlay
         && !context_visible
         && st.input.is_empty()
@@ -1875,20 +1911,6 @@ fn draw_input(
         // which nothing said anywhere. On the layouts where the rail is gone,
         // that is the difference between hidden and unreachable.
         (" → context · Enter send ".to_string(), t.muted())
-    } else if st.bar.plan_mode {
-        // The title is where the operator looks before typing, so plan mode
-        // says what typing will do here rather than only in the status bar.
-        (
-            match rl.width_class {
-                WidthClass::Wide => {
-                    " plan mode · nothing is written until you approve · /plan exit "
-                }
-                WidthClass::Desktop | WidthClass::Compact => " plan mode · /plan exit ",
-                WidthClass::Narrow | WidthClass::Mobile => " PLAN ",
-            }
-            .to_string(),
-            t.warning(),
-        )
     } else {
         (
             match rl.width_class {
@@ -5022,6 +5044,40 @@ mod tests {
             assert_ne!(
                 plain, planning,
                 "plan mode changed nothing on screen at {width}x{height}"
+            );
+        }
+    }
+
+    /// Being able to leave is part of the mode. The composer title said
+    /// `/plan exit` on the roomy widths and nothing at all below them, so on a
+    /// phone-sized terminal the only way out was a command no one had been
+    /// shown. `Esc` is named wherever there is room for a word.
+    #[test]
+    fn plan_mode_names_the_way_out_wherever_there_is_room_for_words() {
+        for (width, height) in [(60, 20), (80, 24), (120, 32)] {
+            let mut on = representative_state();
+            on.focus = Focus::Input;
+            on.bar.plan_mode = true;
+            let planning = render_state_text(&mut on, width, height);
+            assert!(
+                planning.contains("Esc"),
+                "plan mode does not say how to leave at {width}x{height}:\n{planning}"
+            );
+
+            // Esc only leaves from an empty composer, so with text in it the
+            // title must offer the command rather than a key that does nothing.
+            let mut typing = representative_state();
+            typing.focus = Focus::Input;
+            typing.bar.plan_mode = true;
+            typing.input.insert('x');
+            let composing = render_state_text(&mut typing, width, height);
+            assert!(
+                composing.contains("/plan exit"),
+                "no way out offered while composing at {width}x{height}:\n{composing}"
+            );
+            assert!(
+                !composing.contains("Esc exits") && !composing.contains("Esc or"),
+                "title promises Esc while it would do nothing at {width}x{height}:\n{composing}"
             );
         }
     }
