@@ -346,7 +346,7 @@ fn execute_sync(
                     continue;
                 };
                 if entry.file_type().is_some_and(|kind| kind.is_file())
-                    && read_format_decision(policy, &real) == "deny"
+                    && read_format_decision(guard, policy, &real) == "deny"
                 {
                     skipped += 1;
                     continue;
@@ -373,7 +373,7 @@ fn execute_sync(
         }
         FsOp::ReadFile => {
             let path = guard.resolve_existing(arg_str(args, "path")?)?;
-            ensure_readable(policy, &path)?;
+            ensure_readable(guard, policy, &path)?;
             let content = std::fs::read_to_string(&path).map_err(|e| NexusError::ToolFailed {
                 tool: "fs.read_file".into(),
                 message: format!("{}: {e}", path.display()),
@@ -425,7 +425,7 @@ fn execute_sync(
                 let Ok(real) = guard.resolve_existing(entry.path()) else {
                     continue;
                 };
-                if read_format_decision(policy, &real) == "deny" {
+                if read_format_decision(guard, policy, &real) == "deny" {
                     skipped += 1;
                     continue;
                 }
@@ -489,7 +489,7 @@ fn execute_sync(
                     continue;
                 };
                 if entry.file_type().is_some_and(|kind| kind.is_file())
-                    && read_format_decision(policy, &real) == "deny"
+                    && read_format_decision(guard, policy, &real) == "deny"
                 {
                     skipped += 1;
                     continue;
@@ -515,7 +515,7 @@ fn execute_sync(
         }
         FsOp::Stat => {
             let path = guard.resolve_existing(arg_str(args, "path")?)?;
-            ensure_readable(policy, &path)?;
+            ensure_readable(guard, policy, &path)?;
             let m = std::fs::metadata(&path)?;
             let modified = m
                 .modified()
@@ -543,7 +543,7 @@ fn execute_sync(
         }
         FsOp::Hash => {
             let path = guard.resolve_existing(arg_str(args, "path")?)?;
-            ensure_readable(policy, &path)?;
+            ensure_readable(guard, policy, &path)?;
             let bytes = std::fs::read(&path)?;
             let hash = hex::encode(sha2::Sha256::digest(&bytes));
             Ok((
@@ -734,9 +734,17 @@ fn execute_sync(
 }
 
 fn read_format_decision<'a>(
+    guard: &nexus_core::workspace::WorkspaceGuard,
     policy: &'a nexus_core::config::PolicyConfig,
     path: &std::path::Path,
 ) -> &'a str {
+    // A session that has answered full access's one question has already been
+    // asked about exactly these paths. Refusing here anyway is how the operator
+    // approved a read and was then told the file did not exist — the listing
+    // hid it too, so the model never even attempted it.
+    if guard.denied_paths_unlocked() {
+        return "allow";
+    }
     let classified = nexus_core::file_formats::classify(path);
     if classified.hard_denied {
         return "deny";
@@ -750,10 +758,11 @@ fn read_format_decision<'a>(
 }
 
 fn ensure_readable(
+    guard: &nexus_core::workspace::WorkspaceGuard,
     policy: &nexus_core::config::PolicyConfig,
     path: &std::path::Path,
 ) -> Result<()> {
-    if read_format_decision(policy, path) == "deny" {
+    if read_format_decision(guard, policy, path) == "deny" {
         return Err(NexusError::PathDenied(format!(
             "read denied for `{}` (format {})",
             path.display(),

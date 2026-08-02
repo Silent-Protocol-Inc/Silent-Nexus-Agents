@@ -73,9 +73,12 @@ about once per session — see
 `silent`, and `other` to `allow`, `ask`, or `deny`. Workspace keys override
 global defaults. Sensitive environment files, credentials, private keys,
 `.git`, and `.nexus` are locked denials, and the file tools refuse them by path
-before policy is consulted. Full Access permits ordinary format rules for the
-current attended session; a locked path is part of the safety class and is asked
-about rather than allowed silently.
+before policy is consulted — both when reading one and when listing, so a
+locked file does not appear in `fs.list`, `fs.search`, or `fs.tree` either.
+Full Access permits ordinary format rules for the current attended session; a
+locked path is part of the safety class and is asked about rather than allowed
+silently. Answering that one question lifts the lock for the rest of the
+session, reads and listings alike.
 
 ## Sandbox
 
@@ -155,6 +158,13 @@ action, so no mode absorbs them silently. Under full access they are asked about
 **once**, and the answer covers the rest of the session; it is held in the
 running process and never written down, so exiting, disconnecting, or crashing
 asks again.
+
+Approval is not disclosure. Redaction runs after the decision and has no mode:
+a secret-shaped value inside a file you approved is still masked before it
+reaches the model, the transcript, or the audit log. Reading `.env` therefore
+shows its ordinary keys and the shape of the rest, not the credentials
+themselves — which is what keeps an approved local read from becoming a secret
+sent to a hosted provider.
 
 Full access is a standing answer from someone who is present. Unattended and
 background runs cannot answer a prompt, and a stored setting is not permitted to

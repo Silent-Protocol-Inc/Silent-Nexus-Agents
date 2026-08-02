@@ -8,10 +8,22 @@
 use crate::error::{NexusError, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Guards a single workspace root.
 #[derive(Debug, Clone)]
 pub struct WorkspaceGuard {
+    /// Set once the operator has answered full access's question about the
+    /// safety class, unlocking the *denied-path* refusal for this session.
+    ///
+    /// It never touches workspace confinement or the symlink-escape checks:
+    /// those answer "is this file inside the workspace at all", which is not a
+    /// preference and has no mode. This only lifts "this path is one you told
+    /// me to keep away from", which is exactly what full access is asking
+    /// about. Shared with the owning application, so it is live and dies with
+    /// the process.
+    unlocked: Option<Arc<AtomicBool>>,
     root: PathBuf,
     denied: GlobSet,
     denied_patterns: Vec<String>,
@@ -79,10 +91,27 @@ impl WorkspaceGuard {
             .build()
             .map_err(|e| NexusError::Config(format!("denied path set: {e}")))?;
         Ok(Self {
+            unlocked: None,
             root,
             denied,
             denied_patterns,
         })
+    }
+
+    /// Share the session's safety answer, so an approved session can reach the
+    /// paths this guard otherwise keeps away from. Confinement is unaffected.
+    pub fn with_unlock(mut self, unlocked: Arc<AtomicBool>) -> Self {
+        self.unlocked = Some(unlocked);
+        self
+    }
+
+    /// Whether this session has answered full access's question about the
+    /// safety class. Callers with their own path refusal consult it so the
+    /// answer is not contradicted one layer further in.
+    pub fn denied_paths_unlocked(&self) -> bool {
+        self.unlocked
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
     }
 
     pub fn root(&self) -> &Path {
@@ -212,6 +241,9 @@ impl WorkspaceGuard {
     }
 
     fn check_denied(&self, path: &Path) -> Result<()> {
+        if self.denied_paths_unlocked() {
+            return Ok(());
+        }
         if is_private_env_variant(path) {
             return Err(NexusError::PathDenied(path.display().to_string()));
         }
@@ -324,6 +356,53 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("sub/deep")).expect("mkdir");
         let g = WorkspaceGuard::new(dir.path(), &[]).expect("guard");
         (dir, g)
+    }
+
+    /// A session that has answered full access's one question can read the
+    /// paths the guard keeps away from — that question is precisely "may this
+    /// session touch the safety class".
+    ///
+    /// What the answer cannot do is move the workspace boundary. Confinement
+    /// and symlink-escape answer "is this file inside the workspace at all",
+    /// which is not a preference and has no mode, so they are unaffected.
+    #[test]
+    fn the_session_answer_unlocks_denied_paths_and_nothing_else() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(directory.path().join(".env"), "SECRET=1").expect("write");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("elsewhere.txt"), "x").expect("write");
+
+        let unlocked = Arc::new(AtomicBool::new(false));
+        let guard = WorkspaceGuard::new(directory.path(), &[])
+            .expect("guard")
+            .with_unlock(unlocked.clone());
+
+        // Unanswered: refused, as always.
+        assert!(guard.resolve_existing(".env").is_err());
+
+        unlocked.store(true, Ordering::Release);
+        assert!(
+            guard.resolve_existing(".env").is_ok(),
+            "the approved session still cannot read the file it approved"
+        );
+
+        // …and the boundary has not moved.
+        assert!(
+            guard
+                .resolve_existing(outside.path().join("elsewhere.txt"))
+                .is_err(),
+            "the unlock escaped the workspace"
+        );
+        assert!(
+            guard.resolve_existing("../elsewhere.txt").is_err(),
+            "the unlock allowed traversal out of the workspace"
+        );
+        let linked = directory.path().join("escape");
+        std::os::unix::fs::symlink(outside.path(), &linked).expect("link");
+        assert!(
+            guard.resolve_existing("escape/elsewhere.txt").is_err(),
+            "the unlock allowed a symlink out of the workspace"
+        );
     }
 
     #[test]

@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.12.2] — 2026-08-02
+
+### Fixed
+
+- **Full access could not reach the files it had asked about.** The permission
+  ladder made the safety class — privilege escalation, denied commands, terminal
+  Git side effects, and reads of locked paths — a single question per session.
+  It worked for commands, but not for reads: `.env`, `.git`, keystores, and
+  `credentials.*` are refused by the workspace guard *by path*, before policy is
+  consulted at all. So the operator was asked, answered, and the agent still
+  reported `No .env file exists in the workspace` — which is worse than a
+  refusal, because it is not true.
+
+  The guard now shares the session's answer, and the file tools consult that
+  one decision in every place they used to make it themselves — the per-file
+  read check *and* the three listing paths (`fs.list`, `fs.search`,
+  `fs.tree`), which silently skipped restricted entries and are why the model
+  concluded the file was absent. Approving full access's one question lets that
+  session read those paths; leaving the session locks them again, since the
+  answer is process state and is never written down.
+
+  Redaction is a separate layer and is unchanged: a secret-shaped value inside
+  an approved file is still masked before it reaches the model or the audit log,
+  so reading `.env` shows its shape and its ordinary keys, not its credentials.
+
+  **Workspace confinement is untouched and has no mode.** The unlock lifts only
+  "this path is one you told me to keep away from". It does not move the
+  boundary: absolute paths outside the workspace, `..` traversal, and symlinks
+  pointing out of the tree are refused exactly as before, with a test that pins
+  each of them against an unlocked guard.
+
 ## [2.12.1] — 2026-08-02
 
 ### Changed

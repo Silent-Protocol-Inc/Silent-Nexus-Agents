@@ -185,10 +185,14 @@ impl App {
         }
         let redactor = Arc::new(redactor);
 
-        let guard = Arc::new(WorkspaceGuard::new(
-            &workspace,
-            &config.policy.denied_paths,
-        )?);
+        // Created here so the guard shares the session's safety answer: a
+        // session that has answered full access's one question can reach the
+        // paths the guard otherwise keeps away from. Confinement is untouched.
+        let full_access_safety_granted = Arc::new(AtomicBool::new(false));
+        let guard = Arc::new(
+            WorkspaceGuard::new(&workspace, &config.policy.denied_paths)?
+                .with_unlock(full_access_safety_granted.clone()),
+        );
         let artifacts = ArtifactStore::new(&paths.state_dir, store.clone())?;
 
         let sandbox_mgr =
@@ -217,7 +221,7 @@ impl App {
             ui_state: Mutex::new(ui_state),
             pinned_model,
             session_full_access: AtomicBool::new(false),
-            full_access_safety_granted: Arc::new(AtomicBool::new(false)),
+            full_access_safety_granted,
         })
     }
 
@@ -414,10 +418,10 @@ impl App {
         workspace: &std::path::Path,
     ) -> Result<AgentRuntime> {
         let mut runtime = self.runtime(session)?;
-        runtime.tool_ctx.workspace = Arc::new(WorkspaceGuard::new(
-            workspace,
-            &runtime.tool_ctx.config.policy.denied_paths,
-        )?);
+        runtime.tool_ctx.workspace = Arc::new(
+            WorkspaceGuard::new(workspace, &runtime.tool_ctx.config.policy.denied_paths)?
+                .with_unlock(self.full_access_safety_granted.clone()),
+        );
         Ok(runtime)
     }
 
