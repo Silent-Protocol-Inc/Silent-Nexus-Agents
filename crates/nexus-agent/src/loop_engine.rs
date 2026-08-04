@@ -2852,10 +2852,12 @@ impl AgentLoop {
             let request = CompletionRequest {
                 messages: messages.clone(),
                 tools: if native { tool_specs.clone() } else { vec![] },
-                // The active persona's sampling, when it asked for any. `None`
-                // leaves the provider's own configuration alone rather than
-                // resetting it to a default nobody chose.
-                temperature: persona_sampling.temperature,
+                // The active persona decides sampling for its own turns. An
+                // unset temperature still resolves to a value here, so the
+                // per-model `temperature` fallback in the adapters is not
+                // reached — voice stays the same across models. An unset output
+                // ceiling stays `None` and the parameter is omitted entirely.
+                temperature: Some(persona_sampling.effective_temperature()),
                 max_tokens: persona_sampling
                     .max_output_tokens
                     .map(|value| value as usize),
@@ -3080,7 +3082,7 @@ impl AgentLoop {
                 &CompletionRequest {
                     messages: messages.clone(),
                     tools: if native { tool_specs.clone() } else { vec![] },
-                    temperature: persona_sampling.temperature,
+                    temperature: Some(persona_sampling.effective_temperature()),
                     max_tokens: persona_sampling
                         .max_output_tokens
                         .map(|value| value as usize),

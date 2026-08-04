@@ -1041,15 +1041,17 @@ pub fn persona_effective_report(app: &App) -> Result<Report> {
         )
         .field(
             "persona temperature",
-            effective
-                .persona_temperature
-                .map_or_else(|| "model default".to_string(), |t| t.to_string()),
+            if effective.persona_temperature_is_default {
+                format!("{} (persona default)", effective.persona_temperature)
+            } else {
+                effective.persona_temperature.to_string()
+            },
         )
         .field(
             "persona max output tokens",
             effective
                 .persona_max_output_tokens
-                .map_or_else(|| "model default".to_string(), |t| t.to_string()),
+                .map_or_else(|| "server default".to_string(), |t| t.to_string()),
         )
         .field("next turn shape", &effective.turn_shape);
     if !effective.channel_limitation.is_empty() {

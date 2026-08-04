@@ -277,6 +277,15 @@ async fn the_persona_opens_the_system_block() {
         "the persona section is not named: {}",
         request.messages[persona].content
     );
+    // One continuous instruction, not a label followed by prose: the directive
+    // and the persona text are separated by a single space.
+    assert!(
+        request.messages[persona]
+            .content
+            .contains(&format!("Your name is cartographer. {CARTOGRAPHER}")),
+        "the directive and the persona text must join as one sentence stream: {}",
+        request.messages[persona].content
+    );
 }
 
 #[tokio::test]
@@ -728,13 +737,25 @@ async fn a_personas_sampling_reaches_the_request() {
     assert_eq!(request.max_tokens, Some(777));
 }
 
-/// A persona that asks for nothing must not reset what the operator configured.
+/// A persona that names no temperature still sends one.
+///
+/// The persona layer, not the model configuration, decides how a persona
+/// sounds — otherwise the same character reads differently on every model.
+/// The output ceiling is the opposite case: unset means omit the parameter and
+/// let the server pick, which is a real third state rather than a zero.
 #[tokio::test]
-async fn a_persona_without_sampling_leaves_the_model_configuration_alone() {
+async fn a_persona_without_sampling_still_fixes_the_temperature() {
     let dir = tempfile::tempdir().expect("dir");
     let requests = run_once(dir.path(), Some(CARTOGRAPHER), AgentRole::Nexus).await;
-    assert_eq!(requests[0].temperature, None);
-    assert_eq!(requests[0].max_tokens, None);
+    assert_eq!(
+        requests[0].temperature,
+        Some(nexus_core::persona::DEFAULT_PERSONA_TEMPERATURE),
+        "a persona turn must carry a temperature the persona layer chose"
+    );
+    assert_eq!(
+        requests[0].max_tokens, None,
+        "an unset output ceiling must omit the parameter, not send a zero"
+    );
 }
 
 /// Out-of-range sampling is refused when the persona is written, not when a

@@ -58,9 +58,11 @@ given *to* that character rather than as a competing description of one. Rank is
 unchanged.
 
 The section opens with one short sentence naming the persona — `Your name is
-<name>.` — and then the stored text, byte for byte. It is short on purpose: a
-persona's own text already establishes who it is, so the directive only has to
-remove the ambiguity a provider's default identity would otherwise fill. It
+<name>.` — followed, after a single space, by the stored text byte for byte. It
+is short on purpose: a persona's own text already establishes who it is, so the
+directive only has to remove the ambiguity a provider's default identity would
+otherwise fill. The two run together as one continuous instruction rather than a
+heading above some prose, which is the framing this layer exists to avoid. It
 grants nothing; everything above the persona is enforced in code before a token
 is generated.
 
@@ -77,17 +79,31 @@ want genuinely different sampling, and running both at whatever the model config
 happens to say makes the second read flat and drift back toward assistant-speak.
 
 A persona can therefore set `temperature` (0.0–2.0) and `max_output_tokens`,
-which override the model's values for turns where that persona is active and for
-nothing else:
+which govern the turns where that persona is active and nothing else:
 
 ```
 snx persona create "Cartographer" --temperature 1.1 --max-output-tokens 2048 …
 ```
 
-Both are optional and independent. An unset field is not a zero — it leaves the
-operator's own model configuration alone. Values a provider would reject are
-refused when the persona is saved, not halfway through the first turn that uses
-it.
+The two fields are independent, and their defaults differ on purpose:
+
+| | unset means |
+|---|---|
+| `temperature` | **1.0** — the persona layer's default |
+| `max_output_tokens` | omit the parameter; the server picks its own ceiling |
+
+**Temperature is always decided by the persona layer.** A turn carrying a
+persona always carries a temperature, so the per-model `temperature` in
+`models.toml` is not consulted on that turn. That is deliberate: the point of a
+persona is that the same character reads the same way everywhere, and inheriting
+sampling from whichever model happens to be pinned is what made that untrue. If
+you want a specific model to run hotter or cooler for a given character, set it
+on the persona.
+
+An output ceiling is the opposite case — leaving it unset is a real third state,
+not a zero, and a persona asking for zero output tokens is refused. Values a
+provider would reject are caught when the persona is saved, not halfway through
+the first turn that uses it.
 
 ## Conversational turns
 

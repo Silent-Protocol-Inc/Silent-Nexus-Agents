@@ -266,22 +266,35 @@ pub struct BehavioralPersona {
     /// The exact text sent to the model. Verbatim from storage: composed by
     /// declared inheritance, never summarized, filtered, or reworded.
     pub prompt: String,
-    /// Sampling settings this persona wants, if any.
+    /// Sampling settings this persona wants.
     ///
     /// Voice is not only wording. A terse analytical persona and a florid
     /// roleplay one want genuinely different sampling, and running both at
     /// whatever the model config happens to say makes the second read flat and
-    /// drift back toward assistant-speak. These override the model's values for
-    /// turns where the persona is active, and nothing else.
+    /// drift back toward assistant-speak. These govern the turns where the
+    /// persona is active, and nothing else.
     #[serde(default)]
     pub sampling: PersonaSampling,
 }
 
-/// Per-persona sampling overrides.
+/// Temperature used when the active persona does not name one.
 ///
-/// `None` means "leave the model's own setting alone" — an unset field is not a
-/// zero, and a persona that says nothing about temperature must not silently
-/// reset one the operator configured.
+/// A persona that says nothing about sampling still gets a definite value
+/// rather than inheriting whatever the model happens to be configured for.
+/// The point of the persona layer is that voice is reproducible: the same
+/// persona should read the same way on every model, and leaving temperature to
+/// per-model configuration is what made that untrue.
+pub const DEFAULT_PERSONA_TEMPERATURE: f32 = 1.0;
+
+/// Per-persona sampling.
+///
+/// `temperature` unset resolves to [`DEFAULT_PERSONA_TEMPERATURE`], so a
+/// request always carries a temperature the persona layer chose.
+///
+/// `max_output_tokens` unset means *omit the parameter* and let the server pick
+/// its own ceiling. That is a genuine third state, not a zero — a persona
+/// asking for zero output tokens is a broken persona, which is why `validate`
+/// refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct PersonaSampling {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -293,6 +306,14 @@ pub struct PersonaSampling {
 impl PersonaSampling {
     pub const fn is_empty(&self) -> bool {
         self.temperature.is_none() && self.max_output_tokens.is_none()
+    }
+
+    /// The temperature to send: the persona's own, or the default.
+    ///
+    /// Always resolves to a value, so the per-model `temperature` fallback in
+    /// the provider adapters is not reached on a turn that carries a persona.
+    pub fn effective_temperature(&self) -> f32 {
+        self.temperature.unwrap_or(DEFAULT_PERSONA_TEMPERATURE)
     }
 
     /// Reject values a provider would refuse, so a bad persona is caught when
@@ -391,8 +412,12 @@ impl BehavioralPersona {
     /// The persona text is never rewritten, summarized, softened, or reordered
     /// — `docs/persona.md` promises that and a test asserts it byte for byte.
     /// The directive is a prefix, not an edit.
+    /// The directive and the persona text form one continuous instruction,
+    /// joined by a single space. A blank line between them reads as two
+    /// separate statements — a label, then some prose — which is the framing
+    /// this layer exists to avoid.
     pub fn section_body(&self) -> String {
-        format!("{}\n\n{}", self.adoption_directive(), self.prompt)
+        format!("{} {}", self.adoption_directive(), self.prompt)
     }
 
     /// Status-bar text at the widest layout.

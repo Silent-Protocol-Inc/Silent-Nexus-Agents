@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.16.0] — 2026-08-05
+
+Two corrections to how 2.15.0 delivers a persona. Both are small; the second
+changes output on every turn.
+
+### Changed
+
+- **The persona layer now decides temperature outright.** A persona that names
+  no `temperature` used to send none, leaving the per-model value in
+  `models.toml` to apply. It now resolves to **1.0**, so a turn carrying a
+  persona always carries a temperature the persona layer chose.
+
+  The reasoning: a persona is supposed to read the same way wherever it runs,
+  and inheriting sampling from whichever model happens to be pinned is exactly
+  what made that untrue — the same character came out clipped on one model and
+  florid on another. The cost is real and worth stating plainly: **the
+  `temperature` key in `models.toml` no longer applies to turns that carry a
+  persona**, which is every user turn. Set it on the persona instead.
+
+  `max_output_tokens` is unchanged and deliberately asymmetric: unset still
+  means *omit the parameter* and let the server choose its own ceiling. That is
+  a real third state, not a zero, and a persona asking for zero output tokens is
+  still refused.
+
+- **The directive and the persona text join with a single space**, not a blank
+  line — one continuous instruction rather than a heading followed by prose.
+  The persona text itself is still passed byte for byte.
+
+### Note
+
+`/persona inspect-effective` now reports `persona_temperature` as the value that
+would actually be sent, plus `persona_temperature_is_default` so the number can
+be told apart from a persona that chose 1.0 itself. The field is no longer
+nullable.
+
 ## [2.15.0] — 2026-08-05
 
 Personas again. 2.14.0 delivered the persona as an instruction; this release

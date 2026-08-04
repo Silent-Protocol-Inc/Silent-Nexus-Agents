@@ -147,9 +147,15 @@ pub struct EffectiveRequest {
     pub adoption_directive_present: bool,
     /// The persona opens the system block, before every other instruction.
     pub persona_emitted_first: bool,
-    /// Sampling this persona imposes while active; empty means the model's own
-    /// configuration is left alone.
-    pub persona_temperature: Option<f32>,
+    /// The temperature that would actually be sent — the persona's own, or the
+    /// persona-layer default. Never null, because a turn carrying a persona
+    /// always carries a temperature.
+    pub persona_temperature: f32,
+    /// Whether the persona named that temperature itself, or inherited the
+    /// default. The number alone cannot distinguish the two.
+    pub persona_temperature_is_default: bool,
+    /// Output ceiling, or null when the parameter is omitted and the server
+    /// picks its own.
     pub persona_max_output_tokens: Option<u32>,
     /// Which sections the *next* turn would carry, decided by the same function
     /// the loop calls.
@@ -843,7 +849,8 @@ pub fn effective_request(app: &App) -> Result<EffectiveRequest> {
         // block. Reported here so the operator can see the intent alongside the
         // test that holds it.
         persona_emitted_first: true,
-        persona_temperature: persona_sampling.temperature,
+        persona_temperature: persona_sampling.effective_temperature(),
+        persona_temperature_is_default: persona_sampling.temperature.is_none(),
         persona_max_output_tokens: persona_sampling.max_output_tokens,
         turn_shape: shape.describe().to_string(),
         provider_caveat: PROVIDER_CAVEAT.into(),
