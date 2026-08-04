@@ -1,5 +1,91 @@
 # Changelog
 
+## [2.13.0] — 2026-08-04
+
+### Changed
+
+- **The selected persona is now the sole behavioral identity of a turn.**
+  Previously a persona was an *additional* instruction: the flagship role's
+  charter opened with "You are NEXUS…" and stayed in the prompt no matter what
+  the operator had selected, so a custom persona arrived beside a built-in one
+  and had to argue with it. There is now exactly one behavioral persona in every
+  request — the selected one, or the built-in `Nexus` identity when none is
+  selected. Never both, never zero.
+
+  The resolution happens in one place (`BehavioralPersona::resolve`), so the
+  invariant holds by construction rather than by each call site remembering it.
+  The persona layer is pinned above the operational agent contract and every
+  task section, and it is delivered through the strongest channel the provider
+  actually has.
+
+- **Agent charters carry obligations, not identity.** The Nexus charter kept its
+  responsibilities — carry the objective, prove it with evidence, keep
+  self-improvement approval-gated — and gave up its "You are NEXUS" preamble and
+  its restatement of the safety bounds. Identity and manner belong to the persona
+  layer; the bounds were already pinned above both and enforced in code, so
+  repeating them made a custom persona look as if it were dropping protections it
+  never had the power to drop.
+
+### Added
+
+- **`/persona` opens a real manager, and `PERSONA FORGE` is a real editor.** The
+  old manager's "Create persona…" pasted `/persona create name instructions`
+  into the message composer for the operator to finish typing. It now opens a
+  multi-step editor with multiline entry, paste, cursor movement, undo/redo, a
+  live character and token count, a structured section view, and a raw view
+  showing the exact text that will be stored and sent. Switching between the two
+  views never loses a character, and a first `Esc` on unsaved work asks before a
+  second one discards it.
+
+- **`/persona inspect-effective` (`PERSONA MATRIX`).** Reports which persona is
+  being sent, its revision, how many behavioral personas the request contains,
+  whether the built-in identity is included, whether the persona travels as a
+  system instruction or as a user message, which channel the provider offers,
+  and what that channel costs. It shows the three prompt layers separately. It
+  never shows credentials, provider-internal instructions, or anything the
+  application cannot see.
+
+- **Persona metadata and derivation.** Content profile, category, tags, base
+  persona, inheritance mode, persistence policy, compatibility notes,
+  recommendations, and revision. Deriving a persona defaults to a snapshot — an
+  independent copy that a later edit to the source cannot reach — with `extend`
+  available for a live link. Content profile is a label: it is never consulted
+  when the prompt is built, so it cannot add, remove, or reword a character of
+  persona text.
+
+- **Provider instruction channels are reported honestly.** Each adapter declares
+  whether it offers a true system role, a dedicated instructions field, a prefix
+  fallback, or nothing. The Claude CLI bridge serializes the conversation into
+  one prompt and now says so, rather than implying system-level authority it
+  does not have.
+
+- **`snx persona` covers the same ground as the TUI** — `list`, `create`,
+  `duplicate`, `derive`, `edit`, `select`, `disable`, `status`, `inspect`,
+  `inspect-effective`, `test`, `export`, `import`, `delete` — through the same
+  services, so neither surface owns its own notion of what a persona is.
+
+- **A persona segment in the status bar.** Shown only when a custom persona is
+  active; the built-in identity is the default and needs no announcement.
+
+### Fixed
+
+- **A persona could previously be dropped entirely.** A selection that resolved
+  to empty text left the turn with no behavioral identity at all, which is as
+  wrong as having two. Resolution now falls back to the built-in identity, and
+  the layer is pinned so budget pressure cannot shed it either.
+
+- **Persona validation no longer has anything to say about content.** Personas
+  are rejected only for technical reasons: empty, oversized, malformed encoding,
+  terminal control sequences, invalid inheritance, or an embedded credential
+  under the existing secret-handling policy. Mature, explicit, profane, romantic,
+  or otherwise unconventional text is stored and transmitted exactly as written.
+  The provider or model may still refuse to answer; that refusal is reported as
+  the provider's, and Silent Nexus does not reroute around it.
+
+  Personas remain behavioral only. Persona text cannot grant tools, shell,
+  network, credentials, sandbox scope, approval bypass, budgets, or any other
+  runtime capability, and a persona that asks for them receives none.
+
 ## [2.12.3] — 2026-08-02
 
 ### Fixed

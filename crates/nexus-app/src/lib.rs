@@ -21,6 +21,7 @@ pub mod credentials;
 pub mod exec;
 pub mod gitx;
 pub mod parse;
+pub mod persona_service;
 pub mod profile_capture;
 pub mod profile_port;
 pub mod providers;

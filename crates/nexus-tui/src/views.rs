@@ -48,6 +48,14 @@ pub enum UiAction {
     ResumeGoal(String),
     SetTheme(String),
     SubmitGoal(GoalSpec),
+    /// Open PERSONA FORGE. `edit` names an existing persona to load; `None`
+    /// starts a new one.
+    OpenPersonaForge {
+        edit: Option<String>,
+    },
+    /// Save the persona the forge produced, activating it when the operator
+    /// chose that on the review step.
+    SubmitPersona(Box<nexus_app::persona_service::PersonaSpec>),
     SubmitCustomEndpoint(CustomEndpointSpec),
     TestCustomEndpoint(CustomEndpointSpec),
     /// Store a provider API key (credential store; `provider/default`).
@@ -1910,6 +1918,8 @@ pub enum Overlay {
     ActivityDetail(Box<ActivityDetail>),
     Aside(AsideChat),
     PlanReview(Box<PlanReview>),
+    /// The persona editor. Boxed because it carries the full prompt buffer.
+    PersonaForge(Box<crate::persona::PersonaForge>),
 }
 
 impl Overlay {
@@ -1926,6 +1936,13 @@ impl Overlay {
             Overlay::ActivityDetail(d) => d.handle_key(key),
             Overlay::Aside(a) => a.handle_key(key),
             Overlay::PlanReview(p) => p.handle_key(key),
+            Overlay::PersonaForge(forge) => match forge.handle_key(key) {
+                crate::persona::ForgeOutcome::Consumed => Outcome::Consumed,
+                crate::persona::ForgeOutcome::Cancel => Outcome::Close,
+                crate::persona::ForgeOutcome::Submit(spec) => {
+                    Outcome::Action(UiAction::SubmitPersona(spec))
+                }
+            },
         }
     }
 }

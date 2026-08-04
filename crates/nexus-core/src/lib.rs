@@ -24,6 +24,7 @@ pub mod instructions;
 pub mod maintenance;
 pub mod orchestration;
 pub mod permissions;
+pub mod persona;
 pub mod redact;
 pub mod risk;
 pub mod sanitize;

@@ -759,16 +759,43 @@ impl<'a> HarnessControlPlane<'a> {
         Ok(())
     }
 
+    /// Every canonical persona revision visible to this workspace.
+    pub fn workspace_persona_versions(&self) -> Result<Vec<PersonaVersion>> {
+        self.workspace.persona_versions(None, None)
+    }
+
     pub fn sync_persona(&self, id_or_name: &str) -> Result<PersonaVersion> {
+        self.sync_persona_with(id_or_name, None)
+    }
+
+    /// Mirror the editable persona record into an immutable canonical revision.
+    ///
+    /// `metadata` carries the fields the editable record has no column for
+    /// (content profile, base, recommendations, …). When it is `None` the
+    /// latest revision's metadata is carried forward — otherwise editing a
+    /// persona's text would silently reset it to `General` with no base, which
+    /// is exactly the kind of quiet downgrade the persona rules forbid.
+    pub fn sync_persona_with(
+        &self,
+        id_or_name: &str,
+        metadata: Option<PersonaMetadata>,
+    ) -> Result<PersonaVersion> {
         let legacy = self.app.personas().get(id_or_name)?;
         let prompt = self.app.personas().resolved_instructions(&legacy.id)?;
         let versions = self.workspace.persona_versions(None, None)?;
+        let latest = versions
+            .iter()
+            .filter(|version| version.persona_id == legacy.id)
+            .max_by_key(|version| version.version);
+        let metadata =
+            metadata.unwrap_or_else(|| latest.map(PersonaMetadata::from).unwrap_or_default());
         if let Some(existing) = versions.iter().find(|version| {
             version.persona_id == legacy.id
                 && version.name == legacy.name
                 && version.description == legacy.description
                 && version.system_prompt == prompt
                 && version.scope_kind == persona_scope_kind(&legacy.scope)
+                && metadata.matches(version)
         }) {
             return Ok(existing.clone());
         }
@@ -793,6 +820,7 @@ impl<'a> HarnessControlPlane<'a> {
         persona.status = PersonaStatus::Active;
         persona.created_at = legacy.created_at;
         persona.updated_at = legacy.updated_at;
+        metadata.apply(&mut persona);
         self.workspace.save_persona_version(&persona)?;
         Ok(persona)
     }
@@ -1230,6 +1258,82 @@ fn legacy_memory_type(kind: nexus_memory::MemoryKind) -> MemoryType {
             MemoryType::Episodic
         }
         _ => MemoryType::Semantic,
+    }
+}
+
+/// Persona fields the editable record has no column for.
+///
+/// Metadata only: none of it is consulted when the prompt is built, so no value
+/// here can add, remove, or reword a single character of persona text.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PersonaMetadata {
+    pub content_profile: nexus_core::persona::ContentProfile,
+    pub category: String,
+    pub base_persona_id: Option<String>,
+    pub inheritance_mode: nexus_core::persona::InheritanceMode,
+    pub persistence_policy: nexus_core::persona::PersistencePolicy,
+    pub enabled: bool,
+    pub compatibility_notes: String,
+    pub recommended_providers: Vec<String>,
+    pub recommended_models: Vec<String>,
+    pub recommended_agents: Vec<String>,
+    pub adult_acknowledgment: Option<String>,
+}
+
+impl PersonaMetadata {
+    /// A brand-new persona's metadata. `Default` cannot serve here: it would
+    /// leave `enabled` false and the persona would never reach a prompt.
+    pub fn new() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+
+    fn matches(&self, version: &PersonaVersion) -> bool {
+        self == &Self::from(version)
+    }
+
+    fn apply(&self, version: &mut PersonaVersion) {
+        version.content_profile = self.content_profile;
+        version.category.clone_from(&self.category);
+        version.base_persona_id.clone_from(&self.base_persona_id);
+        version.inheritance_mode = self.inheritance_mode;
+        version.persistence_policy = self.persistence_policy;
+        version.enabled = self.enabled;
+        version
+            .compatibility_notes
+            .clone_from(&self.compatibility_notes);
+        version
+            .recommended_providers
+            .clone_from(&self.recommended_providers);
+        version
+            .recommended_models
+            .clone_from(&self.recommended_models);
+        version
+            .recommended_agents
+            .clone_from(&self.recommended_agents);
+        version
+            .adult_acknowledgment
+            .clone_from(&self.adult_acknowledgment);
+    }
+}
+
+impl From<&PersonaVersion> for PersonaMetadata {
+    fn from(version: &PersonaVersion) -> Self {
+        Self {
+            content_profile: version.content_profile,
+            category: version.category.clone(),
+            base_persona_id: version.base_persona_id.clone(),
+            inheritance_mode: version.inheritance_mode,
+            persistence_policy: version.persistence_policy,
+            enabled: version.enabled,
+            compatibility_notes: version.compatibility_notes.clone(),
+            recommended_providers: version.recommended_providers.clone(),
+            recommended_models: version.recommended_models.clone(),
+            recommended_agents: version.recommended_agents.clone(),
+            adult_acknowledgment: version.adult_acknowledgment.clone(),
+        }
     }
 }
 

@@ -298,6 +298,10 @@ impl ModelProvider for OllamaProvider {
                 provenance: ReasoningProvenance::ConfiguredDefault,
             },
             system_prompt: true,
+            // A real system role in `messages`. Ollama drops the model's own
+            // Modelfile SYSTEM when the request supplies one, so the selected
+            // persona is the only application instruction the model sees.
+            instruction_channel: nexus_core::persona::InstructionChannel::SystemRole,
             parallel_tool_calls: false,
             json_schema: false,
             local,

@@ -349,6 +349,7 @@ impl ModelProvider for OpenAiCompatProvider {
                 })
                 .unwrap_or_default(),
             system_prompt: true,
+            instruction_channel: nexus_core::persona::InstructionChannel::SystemRole,
             // Only the dedicated OpenAI adapter has a contract strong enough
             // to advertise parallel calls. Generic compatible endpoints vary.
             parallel_tool_calls: native_tool_calls && self.kind == "openai",

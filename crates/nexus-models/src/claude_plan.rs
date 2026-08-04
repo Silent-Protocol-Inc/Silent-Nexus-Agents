@@ -126,6 +126,10 @@ impl ModelProvider for ClaudePlanProvider {
             // The CLI receives one serialized prompt rather than a dedicated
             // system channel, so callers must use compatibility prompting.
             system_prompt: false,
+            // The bridge serializes the whole conversation into one prompt, so
+            // the persona arrives as labelled text rather than through a
+            // system channel. Weaker, and reported as such.
+            instruction_channel: nexus_core::persona::InstructionChannel::PrefixFallback,
             parallel_tool_calls: false,
             json_schema: false,
             local: false,

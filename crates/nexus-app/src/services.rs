@@ -3,6 +3,7 @@
 //! logs, audit, and side notes. Everything works on real stored data.
 
 use crate::app::App;
+use crate::persona_service;
 use crate::report::{Report, Sev};
 use nexus_agent::AgentRole;
 use nexus_core::config::ModelConfig;
@@ -797,19 +798,23 @@ pub fn agents_report(app: &App) -> Result<Report> {
 // ---------------------------------------------------------- persona/profile
 
 pub fn personas_report(app: &App) -> Result<Report> {
-    let selected = app.read_ui_state(|state| state.selected_persona.clone());
-    let list = app.personas().list()?;
-    let report = Report::new("personas").field("selected", selected.as_deref().unwrap_or("none"));
-    if list.is_empty() {
-        return Ok(
-            report.warn("no personas yet — create one with /persona create <name> <instructions>")
+    let personas = persona_service::list(app)?;
+    let active = persona_service::active(app)?;
+    let report = Report::new("personas")
+        .field("active", format!("{} v{}", active.name, active.revision))
+        .field(
+            "kind",
+            if active.is_built_in() {
+                "built-in Nexus identity"
+            } else {
+                "custom persona"
+            },
         );
-    }
-    let rows = list
+    let rows = personas
         .into_iter()
         .map(|persona| {
             vec![
-                if selected.as_deref() == Some(persona.id.as_str()) {
+                if persona.selected {
                     "●".into()
                 } else {
                     " ".into()
@@ -817,86 +822,159 @@ pub fn personas_report(app: &App) -> Result<Report> {
                 persona.id,
                 persona.name,
                 persona.scope,
-                persona.parent_id.unwrap_or_default(),
+                format!("v{}", persona.revision),
+                persona.content_profile.label().into(),
+                if persona.enabled { "" } else { "disabled" }.into(),
                 persona.description,
             ]
         })
         .collect();
     Ok(report.table(
-        &["", "id", "name", "scope", "inherits", "description"],
+        &[
+            "",
+            "id",
+            "name",
+            "scope",
+            "rev",
+            "profile",
+            "state",
+            "description",
+        ],
         rows,
     ))
 }
 
-pub fn persona_create(
-    app: &App,
-    name: &str,
-    scope: &str,
-    parent: Option<&str>,
-    description: &str,
-    instructions: &str,
-) -> Result<Report> {
-    let id = app
-        .personas()
-        .create(name, scope, parent, description, instructions)?;
-    app.harness().sync_persona(&id)?;
-    Ok(Report::untitled().ok(format!("created persona `{name}` ({id})")))
+pub fn persona_create(app: &App, spec: &persona_service::PersonaSpec) -> Result<Report> {
+    let created = persona_service::create(app, spec)?;
+    let mut report = Report::untitled().ok(format!(
+        "created persona `{}` ({}) v{}",
+        created.name, created.id, created.revision
+    ));
+    if created.selected {
+        report = report.ok(format!(
+            "`{}` is now the only behavioral persona; the built-in Nexus identity is omitted",
+            created.name
+        ));
+    }
+    Ok(report)
 }
 
 pub fn persona_select(app: &App, id_or_name: Option<&str>) -> Result<Report> {
-    match id_or_name {
-        Some(value) if !matches!(value, "none" | "off" | "clear") => {
-            let persona = app.personas().get(value)?;
-            let id = persona.id.clone();
-            app.update_ui_state(move |state| state.selected_persona = Some(id))?;
-            Ok(Report::untitled().ok(format!(
-                "selected persona `{}` for new sessions",
-                persona.name
-            )))
-        }
-        _ => {
-            app.update_ui_state(|state| state.selected_persona = None)?;
-            Ok(Report::untitled().ok("persona cleared for new sessions"))
-        }
-    }
+    let persona = persona_service::select(app, id_or_name)?;
+    Ok(if persona.is_built_in() {
+        Report::untitled()
+            .ok("custom persona cleared — the built-in Nexus identity is active again")
+    } else {
+        Report::untitled().ok(format!(
+            "`{}` v{} is the active behavioral persona; Nexus is omitted from requests",
+            persona.name, persona.revision
+        ))
+    })
 }
 
-pub fn persona_clone(app: &App, source: &str, new_name: &str, scope: &str) -> Result<Report> {
-    let id = app.personas().clone_persona(source, new_name, scope)?;
-    app.harness().sync_persona(&id)?;
-    Ok(Report::untitled().ok(format!("cloned persona as `{new_name}` ({id})")))
+pub fn persona_disable(app: &App) -> Result<Report> {
+    persona_select(app, None)
+}
+
+pub fn persona_duplicate(app: &App, source: &str, new_name: &str, scope: &str) -> Result<Report> {
+    let mut spec = persona_service::PersonaSpec::new(new_name, "");
+    spec.scope = scope.to_string();
+    spec.inheritance_mode = nexus_core::persona::InheritanceMode::Snapshot;
+    let created = persona_service::derive(app, source, spec)?;
+    Ok(Report::untitled().ok(format!(
+        "copied `{source}` as `{}` ({}) — the copy is independent",
+        created.name, created.id
+    )))
+}
+
+pub fn persona_derive(
+    app: &App,
+    source: &str,
+    new_name: &str,
+    scope: &str,
+    instructions: &str,
+) -> Result<Report> {
+    let mut spec = persona_service::PersonaSpec::new(new_name, instructions);
+    spec.scope = scope.to_string();
+    spec.inheritance_mode = nexus_core::persona::InheritanceMode::Extend;
+    let created = persona_service::derive(app, source, spec)?;
+    Ok(Report::untitled().ok(format!(
+        "derived `{}` ({}) from `{source}`; the base is resolved at prompt time",
+        created.name, created.id
+    )))
 }
 
 pub fn persona_edit(app: &App, id: &str, instructions: &str) -> Result<Report> {
-    let persona = app.personas().get(id)?;
-    app.personas().update(
-        &persona.id,
-        &persona.description,
-        instructions,
-        persona.parent_id.as_deref(),
-    )?;
-    app.harness().sync_persona(&persona.id)?;
-    Ok(Report::untitled().ok(format!("updated persona `{}`", persona.name)))
+    let existing = app.personas().get(id)?;
+    let versions = app.harness().workspace_persona_versions()?;
+    let latest = versions
+        .iter()
+        .filter(|version| version.persona_id == existing.id)
+        .max_by_key(|version| version.version);
+    let mut spec = persona_service::PersonaSpec::new(&existing.name, instructions);
+    spec.description.clone_from(&existing.description);
+    spec.scope.clone_from(&existing.scope);
+    spec.base_persona_id.clone_from(&existing.parent_id);
+    if let Some(version) = latest {
+        spec.content_profile = version.content_profile;
+        spec.category.clone_from(&version.category);
+        spec.inheritance_mode = version.inheritance_mode;
+        spec.compatibility_notes
+            .clone_from(&version.compatibility_notes);
+        spec.recommended_providers
+            .clone_from(&version.recommended_providers);
+        spec.recommended_models
+            .clone_from(&version.recommended_models);
+        spec.recommended_agents
+            .clone_from(&version.recommended_agents);
+        spec.adult_acknowledged = version.adult_acknowledgment.is_some();
+    }
+    let updated = persona_service::edit(app, id, &spec)?;
+    Ok(Report::untitled().ok(format!(
+        "updated persona `{}` to v{}",
+        updated.name, updated.revision
+    )))
 }
 
 /// Full detail for one persona, including the instructions actually composed
 /// into prompts (with inheritance resolved) — what you see is what runs.
 pub fn persona_show_report(app: &App, id_or_name: &str) -> Result<Report> {
+    if persona_service::is_built_in(id_or_name) {
+        return Ok(Report::new("persona Nexus")
+            .field("id", nexus_core::persona::BUILTIN_NEXUS_ID)
+            .field("kind", "built-in — inspectable, duplicable, not deletable")
+            .field("content profile", "General")
+            .header("system prompt")
+            .line(nexus_core::persona::BUILTIN_NEXUS_PROMPT));
+    }
     let personas = app.personas();
     let persona = personas.get(id_or_name)?;
     let resolved = personas.resolved_instructions(&persona.id)?;
-    let selected = app.read_ui_state(|state| state.selected_persona.clone());
+    let summary = persona_service::list(app)?
+        .into_iter()
+        .find(|entry| entry.id == persona.id);
     let mut report = Report::new(format!("persona {}", persona.name))
         .field("id", &persona.id)
         .field("scope", &persona.scope)
         .field(
             "selected",
-            if selected.as_deref() == Some(persona.id.as_str()) {
-                "yes (new sessions)"
+            if summary.as_ref().is_some_and(|entry| entry.selected) {
+                "yes — this is the active behavioral persona"
             } else {
                 "no"
             },
         );
+    if let Some(entry) = &summary {
+        report = report
+            .field("revision", format!("v{}", entry.revision))
+            .field("content profile", entry.content_profile.label())
+            .field("inheritance", entry.inheritance_mode.as_str())
+            .field("persistence", entry.persistence_policy.as_str())
+            .field("enabled", if entry.enabled { "yes" } else { "no" });
+        if !entry.category.is_empty() {
+            report = report.field("category", &entry.category);
+        }
+    }
     if let Some(parent) = &persona.parent_id {
         report = report.field("inherits", parent);
     }
@@ -904,6 +982,106 @@ pub fn persona_show_report(app: &App, id_or_name: &str) -> Result<Report> {
         report = report.field("description", &persona.description);
     }
     Ok(report.header("resolved instructions").line(resolved))
+}
+
+/// What the next request actually contains — the check that makes "the persona
+/// replaced Nexus" a verifiable claim rather than an assurance.
+pub fn persona_effective_report(app: &App) -> Result<Report> {
+    let effective = persona_service::effective_request(app)?;
+    let mut report = Report::new("persona matrix // effective request")
+        .field("persona", &effective.persona_name)
+        .field("persona id", &effective.persona_id)
+        .field("revision", format!("v{}", effective.persona_revision))
+        .field("content profile", effective.content_profile.label())
+        .field("provider", &effective.provider)
+        .field("model", &effective.model)
+        .field(
+            "instruction mechanism",
+            effective.instruction_channel.as_str(),
+        )
+        .field(
+            "custom persona active",
+            yes_no(effective.custom_persona_active),
+        )
+        .field(
+            "default Nexus persona included",
+            yes_no(effective.builtin_nexus_included),
+        )
+        .field(
+            "behavioral persona count",
+            effective.behavioral_persona_count.to_string(),
+        )
+        .field(
+            "persona sent as system instruction",
+            yes_no(effective.persona_is_system_instruction),
+        )
+        .field(
+            "persona sent as user message",
+            yes_no(effective.persona_is_user_message),
+        )
+        .field(
+            "true provider system role supported",
+            yes_no(effective.true_system_role_supported),
+        )
+        .field(
+            "provider restrictions may still apply",
+            yes_no(effective.provider_restrictions_may_apply),
+        )
+        .field(
+            "duplicate persona sections",
+            effective.duplicate_persona_sections.to_string(),
+        );
+    if !effective.channel_limitation.is_empty() {
+        report = report.warn(&effective.channel_limitation);
+    }
+    if effective.behavioral_persona_count != 1 {
+        report = report.warn(format!(
+            "expected exactly one behavioral persona, found {}",
+            effective.behavioral_persona_count
+        ));
+    }
+    Ok(report
+        .header("layer 1 — active behavioral persona")
+        .line(&effective.persona_prompt)
+        .header("layer 2 — operational agent contract")
+        .line(&effective.operational_contract)
+        .header("layer 3 — task and execution context")
+        .line(&effective.task_layer))
+}
+
+/// The short answer to "what am I talking to right now".
+pub fn persona_status_report(app: &App) -> Result<Report> {
+    let effective = persona_service::effective_request(app)?;
+    let mut report = Report::new("persona status")
+        .field("active", &effective.persona_name)
+        .field("revision", format!("v{}", effective.persona_revision))
+        .field(
+            "kind",
+            if effective.custom_persona_active {
+                "custom persona"
+            } else {
+                "built-in Nexus identity"
+            },
+        )
+        .field("content profile", effective.content_profile.label())
+        .field("delivered through", effective.instruction_channel.as_str());
+    if !effective.channel_limitation.is_empty() {
+        report = report.warn(&effective.channel_limitation);
+    }
+    Ok(report)
+}
+
+pub fn persona_export(app: &App, id_or_name: &str) -> Result<String> {
+    let document = persona_service::export(app, id_or_name)?;
+    serde_json::to_string_pretty(&document).map_err(Into::into)
+}
+
+pub fn persona_import(app: &App, raw: &str, activate: bool) -> Result<Report> {
+    let imported = persona_service::import(app, raw, activate)?;
+    Ok(Report::untitled().ok(format!(
+        "imported persona `{}` ({}) with its text unchanged",
+        imported.name, imported.id
+    )))
 }
 
 pub fn profile_report(app: &App, include_pending: bool) -> Result<Report> {

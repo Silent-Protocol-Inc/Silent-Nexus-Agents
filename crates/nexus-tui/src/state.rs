@@ -115,6 +115,13 @@ pub struct StatusBar {
     /// it overrides: while it is set, the turn refuses to change anything
     /// regardless of what the permission preset would otherwise allow.
     pub plan_mode: bool,
+    /// The active behavioral persona's name, and whether it is a custom one.
+    /// Empty means the built-in Nexus identity, which the bar leaves unstated:
+    /// the default needs no announcement, a replacement does.
+    pub persona: String,
+    /// The persona's content profile asks for a subtle marker. It says the
+    /// persona is adults-only; it never shows any of its text.
+    pub persona_marked: bool,
 }
 
 pub struct TimelineEventUpdate {
@@ -1013,6 +1020,8 @@ mod tests {
                 tokens_cached: 0,
                 permission_mode: "default".into(),
                 plan_mode: false,
+                persona: String::new(),
+                persona_marked: false,
             },
             Vec::new(),
             nexus_core::ThinkingMode::Off,

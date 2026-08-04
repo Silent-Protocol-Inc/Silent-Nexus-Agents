@@ -607,17 +607,53 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
                 sync_session_persona_profile(app, ctx.session_id.as_deref())?;
                 Effect::Report(report)
             }
-            ["create", name, rest @ ..] if !rest.is_empty() => Effect::Report(
-                services::persona_create(app, name, "project", None, "", &rest.join(" "))?,
+            ["create", name, rest @ ..] if !rest.is_empty() => {
+                Effect::Report(services::persona_create(
+                    app,
+                    &crate::persona_service::PersonaSpec::new(*name, rest.join(" ")),
+                )?)
+            }
+            ["clone" | "duplicate", source, new_name] => Effect::Report(
+                services::persona_duplicate(app, source, new_name, "project")?,
             ),
-            ["clone", source, new_name] => {
-                Effect::Report(services::persona_clone(app, source, new_name, "project")?)
+            ["clone" | "duplicate", source, new_name, scope] => {
+                Effect::Report(services::persona_duplicate(app, source, new_name, scope)?)
             }
-            ["clone", source, new_name, scope] => {
-                Effect::Report(services::persona_clone(app, source, new_name, scope)?)
-            }
+            ["derive", source, new_name, rest @ ..] if !rest.is_empty() => Effect::Report(
+                services::persona_derive(app, source, new_name, "project", &rest.join(" "))?,
+            ),
             ["edit", id, rest @ ..] if !rest.is_empty() => {
                 Effect::Report(services::persona_edit(app, id, &rest.join(" "))?)
+            }
+            ["inspect", id] => Effect::Report(services::persona_show_report(app, id)?),
+            ["inspect-effective"] | ["effective"] => {
+                Effect::Report(services::persona_effective_report(app)?)
+            }
+            ["status"] => Effect::Report(services::persona_status_report(app)?),
+            ["off" | "disable"] => {
+                let report = services::persona_disable(app)?;
+                app.harness()
+                    .execute(crate::control_plane::HarnessAction::SelectPersona {
+                        session_id: ctx.session_id.clone(),
+                        persona_id: None,
+                        version: None,
+                    })?;
+                sync_session_persona_profile(app, ctx.session_id.as_deref())?;
+                Effect::Report(report)
+            }
+            ["use", id] => {
+                let report = services::persona_select(app, Some(id))?;
+                app.harness()
+                    .execute(crate::control_plane::HarnessAction::SelectPersona {
+                        session_id: ctx.session_id.clone(),
+                        persona_id: Some(id.to_string()),
+                        version: None,
+                    })?;
+                sync_session_persona_profile(app, ctx.session_id.as_deref())?;
+                Effect::Report(report)
+            }
+            ["export", id] => {
+                Effect::Report(Report::untitled().line(services::persona_export(app, id)?))
             }
             ["delete", id] => Effect::Confirm(ConfirmedAction::DeletePersona(id.to_string())),
             _ => usage(def),
@@ -1545,13 +1581,11 @@ pub fn apply_confirmed(app: &App, action: &ConfirmedAction) -> Result<Report> {
             }
         }
         ConfirmedAction::ForgetMemory(id) => services::memory_forget(app, id),
+        // Through the service, so the built-in identity is refused by name here
+        // too and a deleted selection falls back rather than dangling.
         ConfirmedAction::DeletePersona(id) => {
-            app.personas().delete(id)?;
-            let selected = app.read_ui_state(|state| state.selected_persona.clone());
-            if selected.as_deref() == Some(id.as_str()) {
-                app.update_ui_state(|state| state.selected_persona = None)?;
-            }
-            Ok(Report::untitled().ok(format!("deleted persona {id}")))
+            let name = crate::persona_service::delete(app, id)?;
+            Ok(Report::untitled().ok(format!("deleted persona `{name}`")))
         }
         ConfirmedAction::DeleteProfileTrait(id) => services::profile_delete_fact(app, id),
         ConfirmedAction::SetProfileStatus { profile_id, status } => {

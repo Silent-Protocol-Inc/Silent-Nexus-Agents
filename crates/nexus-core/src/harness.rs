@@ -762,6 +762,11 @@ impl PersonaStatus {
     }
 }
 
+/// One immutable revision of a persona definition.
+///
+/// Stored as payload JSON, so fields added after a release deserialize from
+/// older rows through their `#[serde(default)]` — a persona written by 2.12
+/// still loads, it simply reports `General` and no base.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersonaVersion {
     pub persona_id: String,
@@ -778,6 +783,38 @@ pub struct PersonaVersion {
     pub schema_version: u32,
     pub created_at: String,
     pub updated_at: String,
+    /// Audience label. Never consulted when the prompt is built.
+    #[serde(default)]
+    pub content_profile: crate::persona::ContentProfile,
+    #[serde(default)]
+    pub category: String,
+    /// The persona this one derives from, when the derivation is live.
+    #[serde(default)]
+    pub base_persona_id: Option<String>,
+    #[serde(default)]
+    pub inheritance_mode: crate::persona::InheritanceMode,
+    #[serde(default)]
+    pub persistence_policy: crate::persona::PersistencePolicy,
+    /// A disabled persona stays selectable in the manager but never reaches a
+    /// prompt; resolution treats it as "no custom persona".
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub compatibility_notes: String,
+    #[serde(default)]
+    pub recommended_providers: Vec<String>,
+    #[serde(default)]
+    pub recommended_models: Vec<String>,
+    #[serde(default)]
+    pub recommended_agents: Vec<String>,
+    /// Set once when an adults-only persona is accepted. Only the fact and the
+    /// timestamp — no identity data is requested or kept.
+    #[serde(default)]
+    pub adult_acknowledgment: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl PersonaVersion {
@@ -805,7 +842,33 @@ impl PersonaVersion {
             schema_version: HARNESS_SCHEMA_VERSION,
             created_at: now.clone(),
             updated_at: now,
+            content_profile: crate::persona::ContentProfile::default(),
+            category: String::new(),
+            base_persona_id: None,
+            inheritance_mode: crate::persona::InheritanceMode::default(),
+            persistence_policy: crate::persona::PersistencePolicy::default(),
+            enabled: true,
+            compatibility_notes: String::new(),
+            recommended_providers: Vec::new(),
+            recommended_models: Vec::new(),
+            recommended_agents: Vec::new(),
+            adult_acknowledgment: None,
         })
+    }
+
+    /// The behavioral persona this revision produces, given already-resolved
+    /// prompt text (inheritance is composed by the caller that owns the store).
+    pub fn behavioral(
+        &self,
+        resolved_prompt: impl Into<String>,
+    ) -> crate::persona::BehavioralPersona {
+        crate::persona::BehavioralPersona::custom(
+            self.persona_id.clone(),
+            self.name.clone(),
+            self.version,
+            self.content_profile,
+            resolved_prompt,
+        )
     }
 }
 

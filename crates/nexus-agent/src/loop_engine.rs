@@ -19,6 +19,7 @@ use nexus_core::orchestration::{
     InterruptionKind, OrchestrationStore, PlanScopeDiff, SessionInterruption, Stage, StageStatus,
     WorkBreakdown, WorkBreakdownKind, WorkEstimate,
 };
+use nexus_core::persona::BehavioralPersona;
 use nexus_core::store::Store;
 use nexus_core::timeline::{
     ActivityPhase, ArtifactReference, LifecyclePhase, TimelineEvent, TimelineKind, TimelineStatus,
@@ -5347,15 +5348,19 @@ impl AgentLoop {
                 profile,
             ));
         }
-        if let Some((label, instructions)) =
-            self.persona_context(&workspace_harness, active_context.as_ref(), &session)?
-        {
-            sections.push(ContextSection::optional(
-                AuthorityLayer::ActivePersona,
-                label,
-                instructions,
-            ));
-        }
+        // Exactly one behavioral persona, always, pushed from exactly one place.
+        // A custom selection replaces the built-in Nexus identity here rather
+        // than sitting beside it, which is what stops two identities reaching
+        // the model at once. It is pinned so a long turn cannot budget away the
+        // assistant's identity, and it precedes the operational contract and
+        // every task section below.
+        let persona =
+            self.behavioral_persona(&workspace_harness, active_context.as_ref(), &session)?;
+        sections.push(ContextSection::pinned(
+            AuthorityLayer::ActivePersona,
+            persona.section_label(),
+            persona.prompt.clone(),
+        ));
 
         let mut agent_contract = format!(
             "role={}\nbase={}\noutput_contract={}\nallowed_categories={}\nmax_risk={}\nwrite={}\ndelegation={}",
@@ -5383,11 +5388,10 @@ impl AgentLoop {
             "selected agent contract",
             agent_contract,
         ));
-        // The flagship's charter is identity, not a contract: it says how the
-        // role works rather than what the turn must produce. It is pinned at
-        // the same authority as the contract, which sits *below* the immutable
-        // safety rules — so it can shape conduct and can never relax
-        // confinement, approval, or the evidence requirement.
+        // The charter is the role's *operational* obligation — what this turn
+        // owes and how it must be evidenced. Identity, voice, and manner are
+        // not here: they belong to the persona layer above, and duplicating
+        // them would give the model two answers to "who are you".
         let charter = self.role.charter();
         if !charter.is_empty() {
             sections.push(ContextSection::pinned(
@@ -5675,12 +5679,33 @@ impl AgentLoop {
         Ok((!legacy.is_empty()).then(|| self.safe_model_text(&legacy)))
     }
 
-    fn persona_context(
+    /// The one behavioral persona this turn runs under.
+    ///
+    /// Always returns exactly one: the operator's selection when it resolves to
+    /// usable text, the built-in Nexus identity otherwise. Callers never get an
+    /// `Option`, because "no persona selected" is not the same as "no
+    /// behavioral identity" — the second is a defect and used to be reachable.
+    fn behavioral_persona(
         &self,
         workspace_harness: &HarnessRepository,
         active_context: Option<&ActiveHarnessContext>,
         session: &crate::SessionMeta,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<BehavioralPersona> {
+        Ok(BehavioralPersona::resolve(self.selected_persona(
+            workspace_harness,
+            active_context,
+            session,
+        )?))
+    }
+
+    /// The operator's selected persona, if one is selected, enabled, and has
+    /// text. Every `None` here means the built-in identity applies.
+    fn selected_persona(
+        &self,
+        workspace_harness: &HarnessRepository,
+        active_context: Option<&ActiveHarnessContext>,
+        session: &crate::SessionMeta,
+    ) -> Result<Option<BehavioralPersona>> {
         if let Some(context) = active_context {
             match (context.persona_id.as_deref(), context.persona_version) {
                 (Some(persona_id), Some(version)) => {
@@ -5690,10 +5715,14 @@ impl AgentLoop {
                             "active persona `{persona_id}` version {version} is not available"
                         )));
                     }
-                    return Ok(Some((
-                        format!("active persona {persona_id} version {version}"),
-                        self.safe_model_text(&persona.system_prompt),
-                    )));
+                    // A disabled persona is a deliberate "not right now", not an
+                    // error: fall back to the built-in identity rather than
+                    // refusing the turn.
+                    if !persona.enabled {
+                        return Ok(None);
+                    }
+                    let prompt = self.safe_model_text(&persona.system_prompt);
+                    return Ok(Some(persona.behavioral(prompt)));
                 }
                 // A persona id without a canonical version is a legacy active
                 // selection. It may use the compatibility store below, but it
@@ -5714,7 +5743,7 @@ impl AgentLoop {
         else {
             return Ok(None);
         };
-        let instructions = nexus_memory::PersonaStore::new(
+        let personas = nexus_memory::PersonaStore::new(
             self.runtime.store.clone(),
             self.runtime
                 .tool_ctx
@@ -5722,10 +5751,17 @@ impl AgentLoop {
                 .root()
                 .to_string_lossy()
                 .as_ref(),
-        )
-        .resolved_instructions(persona_id)?;
-        Ok(Some((
-            format!("active legacy persona {persona_id}"),
+        );
+        let instructions = personas.resolved_instructions(persona_id)?;
+        let name = personas
+            .get(persona_id)
+            .map(|record| record.name)
+            .unwrap_or_else(|_| persona_id.to_string());
+        Ok(Some(BehavioralPersona::custom(
+            persona_id,
+            name,
+            1,
+            nexus_core::persona::ContentProfile::default(),
             self.safe_model_text(&instructions),
         )))
     }

@@ -971,7 +971,10 @@ pub async fn persona(app: &App, cmd: PersonaCmd, json: bool) -> Result<()> {
     match cmd {
         PersonaCmd::List => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&app.personas().list()?)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&nexus_app::persona_service::list(app)?)?
+                );
             } else {
                 ui.render_report(&services::personas_report(app)?);
             }
@@ -982,19 +985,56 @@ pub async fn persona(app: &App, cmd: PersonaCmd, json: bool) -> Result<()> {
             scope,
             parent,
             description,
-        } => ui.render_report(&services::persona_create(
-            app,
-            &name,
-            &scope,
-            parent.as_deref(),
-            &description,
-            &instructions.join(" "),
-        )?),
-        PersonaCmd::Clone {
+            content_profile,
+            category,
+            adult_ack,
+            activate,
+        } => {
+            let profile =
+                nexus_core::persona::ContentProfile::parse(&content_profile).ok_or_else(|| {
+                    nexus_core::NexusError::Config(format!(
+                        "unknown content profile `{content_profile}` \
+                         (general, mature, adults-only, custom)"
+                    ))
+                })?;
+            let mut spec =
+                nexus_app::persona_service::PersonaSpec::new(&name, instructions.join(" "));
+            spec.scope = scope;
+            spec.description = description;
+            spec.category = category;
+            spec.content_profile = profile;
+            spec.adult_acknowledged = adult_ack;
+            spec.activate = activate;
+            if let Some(parent) = parent {
+                spec.base_persona_id = Some(parent);
+                spec.inheritance_mode = nexus_core::persona::InheritanceMode::Extend;
+            }
+            ui.render_report(&services::persona_create(app, &spec)?)
+        }
+        PersonaCmd::Duplicate {
             source,
             new_name,
             scope,
-        } => ui.render_report(&services::persona_clone(app, &source, &new_name, &scope)?),
+        }
+        | PersonaCmd::Clone {
+            source,
+            new_name,
+            scope,
+        } => ui.render_report(&services::persona_duplicate(
+            app, &source, &new_name, &scope,
+        )?),
+        PersonaCmd::Derive {
+            source,
+            new_name,
+            instructions,
+            scope,
+        } => ui.render_report(&services::persona_derive(
+            app,
+            &source,
+            &new_name,
+            &scope,
+            &instructions.join(" "),
+        )?),
         PersonaCmd::Edit { id, instructions } => {
             ui.render_report(&services::persona_edit(app, &id, &instructions.join(" "))?)
         }
@@ -1006,6 +1046,48 @@ pub async fn persona(app: &App, cmd: PersonaCmd, json: bool) -> Result<()> {
         }
         PersonaCmd::Select { id } => {
             ui.render_report(&services::persona_select(app, id.as_deref())?)
+        }
+        PersonaCmd::Disable => ui.render_report(&services::persona_disable(app)?),
+        PersonaCmd::Status => ui.render_report(&services::persona_status_report(app)?),
+        PersonaCmd::Inspect { id } => ui.render_report(&services::persona_show_report(app, &id)?),
+        PersonaCmd::InspectEffective => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&nexus_app::persona_service::effective_request(
+                        app
+                    )?)?
+                );
+            } else {
+                ui.render_report(&services::persona_effective_report(app)?);
+            }
+        }
+        PersonaCmd::Test { model, prompt } => {
+            let question = if prompt.is_empty() {
+                nexus_app::persona_service::PERSONA_TEST_PROMPT.to_string()
+            } else {
+                prompt.join(" ")
+            };
+            let model = model.unwrap_or_else(|| app.any_model_name());
+            ui.render_report(&nexus_app::persona_service::run_test(app, &model, &question).await?)
+        }
+        PersonaCmd::Export { id, path } => {
+            let document = services::persona_export(app, &id)?;
+            match path {
+                Some(path) => {
+                    std::fs::write(&path, &document)?;
+                    ui.ok(&format!("wrote persona `{id}` to {path}"));
+                }
+                None => println!("{document}"),
+            }
+        }
+        PersonaCmd::Import { path, activate } => {
+            let raw = if path == "-" {
+                std::io::read_to_string(std::io::stdin())?
+            } else {
+                std::fs::read_to_string(&path)?
+            };
+            ui.render_report(&services::persona_import(app, &raw, activate)?)
         }
     }
     Ok(())

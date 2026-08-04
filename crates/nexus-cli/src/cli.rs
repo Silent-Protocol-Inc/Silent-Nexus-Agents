@@ -350,6 +350,7 @@ pub enum SessionCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum PersonaCmd {
+    /// Every persona, including the built-in Nexus identity.
     List,
     Create {
         name: String,
@@ -360,7 +361,37 @@ pub enum PersonaCmd {
         parent: Option<String>,
         #[arg(long, default_value = "")]
         description: String,
+        /// Audience label only: general, mature, adults-only, custom. It never
+        /// changes the persona's text.
+        #[arg(long, default_value = "general")]
+        content_profile: String,
+        #[arg(long, default_value = "")]
+        category: String,
+        /// Confirms an adults-only persona is intended for adult participants
+        /// and adult fictional characters. No identity data is collected.
+        #[arg(long)]
+        adult_ack: bool,
+        /// Select it as the active behavioral persona once created.
+        #[arg(long)]
+        activate: bool,
     },
+    /// Copy a persona. The copy is independent; editing it cannot change the
+    /// source.
+    Duplicate {
+        source: String,
+        new_name: String,
+        #[arg(long, default_value = "project")]
+        scope: String,
+    },
+    /// Derive a persona that keeps a live link to its base.
+    Derive {
+        source: String,
+        new_name: String,
+        instructions: Vec<String>,
+        #[arg(long, default_value = "project")]
+        scope: String,
+    },
+    /// Alias of `duplicate`, kept for existing scripts.
     Clone {
         source: String,
         new_name: String,
@@ -376,8 +407,35 @@ pub enum PersonaCmd {
         #[arg(long)]
         yes: bool,
     },
-    Select {
-        id: Option<String>,
+    /// Select a persona, or pass no id to restore the built-in Nexus identity.
+    Select { id: Option<String> },
+    /// Turn the active custom persona off; the built-in Nexus identity returns.
+    Disable,
+    /// The active persona and how it is delivered.
+    Status,
+    /// One persona's stored definition and resolved prompt.
+    Inspect { id: String },
+    /// Exactly how the next request is composed: which behavioral persona, how
+    /// many, through which provider channel.
+    InspectEffective,
+    /// Ask the model to state the persona it is running under.
+    Test {
+        #[arg(long)]
+        model: Option<String>,
+        /// Custom test input; defaults to a neutral identity question.
+        prompt: Vec<String>,
+    },
+    /// Write a portable persona document to stdout or a file.
+    Export {
+        id: String,
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Read a persona document from a file or stdin (`-`).
+    Import {
+        path: String,
+        #[arg(long)]
+        activate: bool,
     },
 }
 

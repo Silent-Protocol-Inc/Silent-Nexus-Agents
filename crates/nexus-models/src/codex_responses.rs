@@ -476,6 +476,9 @@ impl ModelProvider for CodexResponsesProvider {
                 provenance: ReasoningProvenance::ConfiguredDefault,
             },
             system_prompt: true,
+            // The Responses API carries them in `instructions`, separate from
+            // the input item list.
+            instruction_channel: nexus_core::persona::InstructionChannel::InstructionsField,
             parallel_tool_calls: self.config.native_tool_calls.unwrap_or(true),
             json_schema: false,
             local: false,

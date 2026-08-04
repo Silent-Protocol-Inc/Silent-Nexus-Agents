@@ -345,6 +345,7 @@ See the [`CHANGELOG`](CHANGELOG.md) for release-by-release detail.
 | [`docs/cli-reference.md`](docs/cli-reference.md) | Public CLI surface |
 | [`docs/operator-guide.md`](docs/operator-guide.md) | Safe daily operation |
 | [`docs/presentation.md`](docs/presentation.md) | Boot, status, timeline, debug — the four layers and the design language |
+| [`docs/persona.md`](docs/persona.md) | The active behavioral persona: what it controls and what it cannot |
 | [`docs/goals.md`](docs/goals.md) · [`docs/memory-and-skills.md`](docs/memory-and-skills.md) · [`docs/mcp.md`](docs/mcp.md) · [`docs/rsi.md`](docs/rsi.md) | Feature deep-dives |
 | [`docs/data-management.md`](docs/data-management.md) | State, backup, restore, retention |
 | [`docs/compatibility.md`](docs/compatibility.md) | The 1.x compatibility contract |

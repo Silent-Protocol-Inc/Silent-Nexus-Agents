@@ -34,12 +34,12 @@ jobs:
         shell: bash
         run: |
           version="$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
-          if [[ "$version" != "2.12.3" ]]; then
-            echo "release workflow certifies workspace version 2.12.3 only (got $version)" >&2
+          if [[ "$version" != "2.13.0" ]]; then
+            echo "release workflow certifies workspace version 2.13.0 only (got $version)" >&2
             exit 1
           fi
-          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v2.12.3" ]]; then
-            echo "release workflow accepts tag v2.12.3 only (got $GITHUB_REF_NAME)" >&2
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v2.13.0" ]]; then
+            echo "release workflow accepts tag v2.13.0 only (got $GITHUB_REF_NAME)" >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"

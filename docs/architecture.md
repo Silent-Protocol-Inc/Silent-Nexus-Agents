@@ -22,9 +22,11 @@ objective
   → classify Direct / Tracked / Planned work and persist its stages
   → load enforced policy and sandbox scope
   → select agent role + minimal tool subset (role ∩ task class)
-  → build prompt (immutable safety → provider policy → sandbox/policy
-                  → project instructions → agent → persona → approved profile
-                  → memory → approved plan/tasks → session context)
+  → resolve the one active behavioral persona (selected, or built-in Nexus)
+  → build prompt (immutable safety → provider protocol → sandbox/policy
+                  → project instructions → approved profile → active persona
+                  → operational agent contract → goal → approved plan/tasks
+                  → memory → session context → user request)
   → persist the redacted ContextManifest for the exact provider request
   → stream model text/tool deltas into stable timeline cards
   → parse action (native call, strict compat JSON action, or terminal prose)

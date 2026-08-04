@@ -1044,47 +1044,93 @@ pub fn agents_menu(active: &str, custom: &[nexus_agent::CustomAgentDefinition]) 
         .hint("Enter sets the active agent for new sessions · Esc close")
 }
 
-pub fn personas_menu(personas: &[nexus_memory::PersonaRecord], selected: Option<&str>) -> Menu {
-    let mut items = vec![
+/// The persona manager.
+///
+/// Every row runs something. Nothing here writes a half-finished command into
+/// the message composer for the operator to complete — that behavior is what
+/// made persona creation feel like a chore rather than a feature, and it is
+/// gone.
+pub fn personas_menu(
+    personas: &[nexus_app::persona_service::PersonaSummary],
+    active_name: &str,
+) -> Menu {
+    let has_custom = personas.iter().any(|persona| !persona.built_in);
+    let custom_active = personas
+        .iter()
+        .any(|persona| persona.selected && !persona.built_in);
+    let mut items =
+        vec![
+            MenuItem::new("Create persona…", UiAction::OpenPersonaForge { edit: None }).detail(
+                "open PERSONA FORGE: a real multiline editor for identity, tone, and conduct",
+            ),
+        ];
+    if has_custom {
+        items.push(
+            MenuItem::new(
+                "Create from existing…",
+                UiAction::OpenPersonaForge { edit: None },
+            )
+            .detail("start from a base persona; copy it outright or keep a live link"),
+        );
+    }
+    items.push(
         MenuItem::new(
-            "Create persona…",
-            UiAction::InsertInput("/persona create name instructions".into()),
+            "Inspect effective request",
+            UiAction::RunCommand("persona inspect-effective".into()),
         )
-        .detail("edit the inserted command; personas cannot override safety or project rules"),
-        MenuItem::new(
-            "Clear persona",
-            UiAction::RunCommand("persona select none".into()),
-        ),
-    ];
+        .detail("which persona is sent, how many, and through which provider channel"),
+    );
+    items.push(
+        MenuItem::new("Test persona", UiAction::RunCommand("persona test".into()))
+            .detail("ask the model to state the persona it is running under"),
+    );
+    if custom_active {
+        items.push(
+            MenuItem::new(
+                "Disable custom persona",
+                UiAction::RunCommand("persona off".into()),
+            )
+            .detail("the built-in Nexus identity returns on the next request"),
+        );
+    }
     items.extend(personas.iter().map(|persona| {
+        let mut badges = vec![persona.scope.clone()];
+        if persona.content_profile.requires_acknowledgment() {
+            badges.push("+".into());
+        }
+        if !persona.enabled {
+            badges.push("disabled".into());
+        }
         MenuItem::new(
             format!(
                 "{} {}",
-                if selected == Some(persona.id.as_str()) {
-                    "●"
-                } else {
-                    " "
-                },
+                if persona.selected { "●" } else { " " },
                 persona.name
             ),
-            UiAction::RunCommand(format!("persona select {}", persona.id)),
+            UiAction::RunCommand(format!("persona use {}", persona.id)),
         )
-        .badge(persona.scope.clone())
+        .badge(badges.join(" "))
         .detail(format!(
-            "{}{}",
-            persona.description,
+            "v{} · {}{}{}",
+            persona.revision,
+            persona.content_profile.label(),
+            if persona.description.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", persona.description)
+            },
             persona
-                .parent_id
+                .base_persona_id
                 .as_ref()
                 .map(|parent| format!(" · inherits {parent}"))
                 .unwrap_or_default()
         ))
     }));
-    Menu::new("persona", items)
+    Menu::new(format!("persona//active · {active_name}"), items)
         .route("/persona")
         .branded(BrandVariant::Compact)
         .searchable()
-        .hint("Enter selects for new sessions · create/clone/edit/delete also work as commands")
+        .hint("Enter selects · personas set voice and manner, never permissions")
 }
 
 /// Structured profile cards backed by the canonical harness repository.

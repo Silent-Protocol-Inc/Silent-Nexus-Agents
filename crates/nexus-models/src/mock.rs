@@ -39,6 +39,9 @@ pub struct MockProvider {
     /// Capability toggle so the tool-call compatibility layer can be tested.
     pub native_tool_calls: bool,
     pub system_prompt: bool,
+    /// Overridable so a test can exercise a weak-channel provider without a
+    /// real CLI bridge.
+    pub instruction_channel: nexus_core::persona::InstructionChannel,
     pub structured_output: bool,
     pub locality: ModelLocality,
     pub privacy: ModelPrivacy,
@@ -57,6 +60,7 @@ impl MockProvider {
             provider_kind: "mock",
             native_tool_calls: true,
             system_prompt: true,
+            instruction_channel: nexus_core::persona::InstructionChannel::SystemRole,
             structured_output: true,
             locality: ModelLocality::Local,
             privacy: ModelPrivacy::LocalOnly,
@@ -198,6 +202,7 @@ impl ModelProvider for MockProvider {
             reasoning_controls: false,
             reasoning: ReasoningProfile::default(),
             system_prompt: self.system_prompt,
+            instruction_channel: self.instruction_channel,
             parallel_tool_calls: self.native_tool_calls,
             json_schema: true,
             local: self.locality == ModelLocality::Local,

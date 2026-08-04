@@ -714,6 +714,60 @@ mod tests {
             .all(|message| !message.content.contains("bypass approval")));
     }
 
+    /// Budget pressure sheds optional context. The behavioral persona is not
+    /// optional context: a turn that drops it has no identity at all, and a
+    /// turn that re-adds it while rebuilding has two.
+    #[test]
+    fn the_behavioral_persona_survives_a_budget_squeeze_exactly_once() {
+        let compiler = ContextCompiler::new(700, 100);
+        let compiled = compiler.compile(
+            &[
+                ContextSection::pinned(
+                    AuthorityLayer::CoreSafety,
+                    "core safety",
+                    "Approvals are mandatory.",
+                ),
+                ContextSection::pinned(
+                    AuthorityLayer::ActivePersona,
+                    "active persona odysseus v3",
+                    "You are Odysseus, a wandering strategist.",
+                ),
+                ContextSection::optional(
+                    AuthorityLayer::ScopedMemory,
+                    "memory",
+                    "recalled detail ".repeat(400),
+                ),
+                ContextSection::optional(
+                    AuthorityLayer::Observations,
+                    "observations",
+                    "observed output ".repeat(400),
+                ),
+            ],
+            &[ChatMessage::user("continue")],
+        );
+        let persona_sections = compiled
+            .messages
+            .iter()
+            .filter(|message| message.content.contains("You are Odysseus"))
+            .count();
+        assert_eq!(persona_sections, 1, "{:#?}", compiled.messages);
+        assert!(compiled
+            .included
+            .iter()
+            .any(|(layer, _, _)| *layer == AuthorityLayer::ActivePersona));
+        // …and the squeeze was real: the optional layers were cut to fit while
+        // the persona was left whole.
+        assert!(
+            compiled
+                .messages
+                .iter()
+                .any(|message| message.content.contains("[context excerpt truncated]")),
+            "the budget was never actually under pressure"
+        );
+        assert!(compiled.messages.iter().any(|message| message.content
+            == "[active persona odysseus v3]\nYou are Odysseus, a wandering strategist."));
+    }
+
     #[test]
     fn constrained_compiler_keeps_pinned_sections() {
         let compiler = ContextCompiler::new(600, 100).constrained(true);

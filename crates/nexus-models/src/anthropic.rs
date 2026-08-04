@@ -270,6 +270,8 @@ impl ModelProvider for AnthropicProvider {
                 })
                 .unwrap_or_default(),
             system_prompt: true,
+            // A top-level `system` block, outside the message list.
+            instruction_channel: nexus_core::persona::InstructionChannel::InstructionsField,
             parallel_tool_calls: self.config.native_tool_calls.unwrap_or(true),
             json_schema: false,
             local: false,

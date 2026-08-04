@@ -6,6 +6,7 @@
 //! a compact activity strip; narrow stacks a single column. Panels never
 //! overlap and text never renders outside the terminal.
 
+use crate::persona::{ForgeCommit, ForgeStage, PersonaForge};
 use crate::state::{Focus, Mode, State, WrapLayoutCacheEntry};
 use crate::theme::Theme;
 use crate::views::{
@@ -2116,6 +2117,26 @@ fn draw_footer(
             false,
         ));
     }
+    // A custom persona changes who is answering, which is at least as visible
+    // a change as the agent role beside it. The built-in identity contributes
+    // no segment: the default needs no announcement. The adults-only marker is
+    // a bare `+` — enough to explain the difference in `/persona`, never enough
+    // to disclose what the persona says on a shared screen.
+    if !st.bar.persona.is_empty() {
+        segs.push(mk(
+            "PERSONA",
+            "P",
+            "P",
+            format!(
+                "{}{}",
+                san(&st.bar.persona),
+                if st.bar.persona_marked { " +" } else { "" }
+            ),
+            SegColor::Primary,
+            1,
+            true,
+        ));
+    }
     if let Some(branch) = &st.bar.git_branch {
         segs.push(mk(
             "BRANCH",
@@ -2243,6 +2264,7 @@ fn draw_overlay(f: &mut Frame, area: Rect, overlay: &Overlay, st: &State, t: &Th
         Overlay::ActivityDetail(d) => draw_activity_detail(f, area, d, t),
         Overlay::Aside(a) => draw_aside(f, area, a, t),
         Overlay::PlanReview(p) => draw_plan_review(f, area, p, t),
+        Overlay::PersonaForge(forge) => draw_persona_forge(f, area, forge, t),
     }
 }
 
@@ -3250,6 +3272,241 @@ fn draw_aside(f: &mut Frame, area: Rect, a: &AsideChat, t: &Theme) {
     f.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), rows[1]);
 }
 
+/// PERSONA FORGE.
+///
+/// The instructions editor is the point of the screen, so it gets whatever
+/// height is left after the wizard rail and the key hints. On a phone-sized
+/// terminal the panel takes the whole area — a floating box would leave the
+/// editor three rows tall.
+fn draw_persona_forge(f: &mut Frame, area: Rect, forge: &PersonaForge, t: &Theme) {
+    let mobile = area.width < 60 || area.height < 18;
+    let rect = if mobile {
+        area
+    } else {
+        overlay_rect(
+            area,
+            area.width.saturating_sub(6).min(100),
+            area.height.saturating_sub(2),
+        )
+    };
+    f.render_widget(Clear, rect);
+
+    let stages = forge.stages();
+    let hint = match forge.stage {
+        ForgeStage::Instructions => {
+            " type freely · Enter newline · ^R raw/structured · ^Z undo · ^S save · PgUp/PgDn step · Esc cancel "
+        }
+        ForgeStage::Review => " Enter save · ←→ activation · PgUp back · Esc cancel ",
+        _ => " Tab field · ←→ choose · Enter next · ^S save · Esc cancel ",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(t.primary())
+        .title(Span::styled(format!(" {} ", forge.header()), t.brand()))
+        .title_bottom(Span::styled(hint, t.muted()));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    // Step rail: where you are, and how much is left.
+    let rail: Vec<Span> = stages
+        .iter()
+        .enumerate()
+        .flat_map(|(index, stage)| {
+            let style = if *stage == forge.stage {
+                t.primary()
+            } else {
+                t.muted()
+            };
+            [
+                Span::styled(format!("{}·{}", index + 1, stage.title()), style),
+                Span::styled("  ", t.muted()),
+            ]
+        })
+        .collect();
+
+    let mut lines: Vec<Line> = vec![Line::from(rail), Line::from("")];
+    match forge.stage {
+        ForgeStage::Instructions => {
+            let mode = if forge.structured {
+                "structured"
+            } else {
+                "raw"
+            };
+            let prompt = forge.prompt();
+            lines.push(Line::from(vec![
+                Span::styled(format!("{mode} editor"), t.primary()),
+                Span::styled(
+                    format!(
+                        "  ·  {} chars  ·  ~{} tokens  ·  {} lines",
+                        prompt.chars().count(),
+                        prompt.len().div_ceil(4),
+                        prompt.lines().count().max(1)
+                    ),
+                    t.muted(),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            if forge.structured {
+                for (index, (name, value)) in forge.sections.iter().enumerate() {
+                    let focused = index == forge.section_focus;
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{} {name}", if focused { "▸" } else { " " }),
+                            if focused { t.primary() } else { t.muted() },
+                        ),
+                        Span::styled(
+                            if value.trim().is_empty() {
+                                "  (empty)".to_string()
+                            } else {
+                                format!("  {}", first_line_of(value))
+                            },
+                            t.text(),
+                        ),
+                    ]));
+                }
+            } else {
+                let (row, column) = forge.raw.position();
+                let height = inner.height.saturating_sub(6) as usize;
+                let start = row.saturating_sub(height.saturating_sub(1));
+                for (index, line) in forge
+                    .raw
+                    .text()
+                    .split('\n')
+                    .enumerate()
+                    .skip(start)
+                    .take(height.max(1))
+                {
+                    let marker = if index == row { "▸" } else { " " };
+                    lines.push(Line::from(vec![
+                        Span::styled(marker, t.primary()),
+                        Span::styled(format!(" {line}"), t.text()),
+                    ]));
+                }
+                lines.push(Line::from(Span::styled(
+                    format!("  line {} col {}", row + 1, column + 1),
+                    t.muted(),
+                )));
+            }
+        }
+        ForgeStage::Base => {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if forge.focus == 0 {
+                        "▸ base "
+                    } else {
+                        "  base "
+                    },
+                    if forge.focus == 0 {
+                        t.primary()
+                    } else {
+                        t.muted()
+                    },
+                ),
+                Span::styled(
+                    forge
+                        .base
+                        .and_then(|index| forge.bases.get(index))
+                        .map(|base| base.name.clone())
+                        .unwrap_or_else(|| "none".into()),
+                    t.text(),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if forge.focus == 1 {
+                        "▸ mode "
+                    } else {
+                        "  mode "
+                    },
+                    if forge.focus == 1 {
+                        t.primary()
+                    } else {
+                        t.muted()
+                    },
+                ),
+                Span::styled(forge.inheritance.as_str(), t.text()),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "snapshot copies the text once and cuts the link; extend resolves the base at prompt time",
+                t.muted(),
+            )));
+        }
+        ForgeStage::Review => {
+            lines.push(Line::from(vec![
+                Span::styled("name        ", t.muted()),
+                Span::styled(forge.name.clone(), t.text()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("profile     ", t.muted()),
+                Span::styled(forge.content_profile.label(), t.text()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("base        ", t.muted()),
+                Span::styled(
+                    forge
+                        .base
+                        .and_then(|index| forge.bases.get(index))
+                        .map(|base| format!("{} ({})", base.name, forge.inheritance.as_str()))
+                        .unwrap_or_else(|| "none".into()),
+                    t.text(),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("persistence ", t.muted()),
+                Span::styled(forge.persistence.as_str(), t.text()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("on save     ", t.muted()),
+                Span::styled(
+                    match forge.commit {
+                        ForgeCommit::CreateAndActivate => "create and activate",
+                        ForgeCommit::CreateOnly => "create only",
+                    },
+                    t.primary(),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "exact prompt to be stored",
+                t.primary(),
+            )));
+            let budget = inner.height.saturating_sub(lines.len() as u16 + 2) as usize;
+            for line in forge.prompt().lines().take(budget.max(1)) {
+                lines.push(Line::from(Span::styled(format!("  {line}"), t.text())));
+            }
+        }
+        ForgeStage::Identity | ForgeStage::Metadata => {
+            for (index, (label, value)) in forge.stage_fields().iter().enumerate() {
+                let focused = index == forge.focus;
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} {label:<22}", if focused { "▸" } else { " " }),
+                        if focused { t.primary() } else { t.muted() },
+                    ),
+                    Span::styled(value.clone(), t.text()),
+                ]));
+            }
+        }
+    }
+
+    if let Some(error) = &forge.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(error.clone(), t.warning())));
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn first_line_of(value: &str) -> String {
+    value
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(48)
+        .collect()
+}
+
 fn draw_form(f: &mut Frame, area: Rect, form: &Form, t: &Theme) {
     // Chrome: two border rows, a blank line, an optional error line, and the
     // key hint. Whatever is left belongs to the fields.
@@ -4219,6 +4476,8 @@ mod tests {
                     tokens_cached: 0,
                     permission_mode: "default".into(),
                     plan_mode: false,
+                    persona: String::new(),
+                    persona_marked: false,
                 },
                 vec![],
                 nexus_core::ThinkingMode::Auto,
@@ -4896,6 +5155,8 @@ mod tests {
                 tokens_cached: 0,
                 permission_mode: "default".into(),
                 plan_mode: false,
+                persona: String::new(),
+                persona_marked: false,
             },
             vec![],
             nexus_core::ThinkingMode::Auto,

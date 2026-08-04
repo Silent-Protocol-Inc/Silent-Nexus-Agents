@@ -19,6 +19,7 @@ mod intro;
 mod layout;
 mod markdown;
 mod menus;
+pub mod persona;
 mod render;
 mod state;
 mod theme;
@@ -266,6 +267,25 @@ fn build_bar(app: &App) -> StatusBar {
         tokens_cached: 0,
         permission_mode: nexus_app::services::permission_mode(&app.config.policy).to_string(),
         plan_mode: app.read_ui_state(|s| s.plan_mode),
+        // A failed lookup must not blank the bar into claiming the built-in
+        // identity is active when a custom one might be. Resolution already
+        // falls back to built-in on every recoverable problem, so the only way
+        // here is an unreadable store — report nothing rather than something
+        // wrong.
+        persona: persona_segment(app).0,
+        persona_marked: persona_segment(app).1,
+    }
+}
+
+/// The active persona's bar text: empty for the built-in identity, which needs
+/// no announcement.
+fn persona_segment(app: &App) -> (String, bool) {
+    match nexus_app::persona_service::active(app) {
+        Ok(persona) if !persona.is_built_in() => (
+            persona.name,
+            persona.content_profile.requires_acknowledgment(),
+        ),
+        _ => (String::new(), false),
     }
 }
 
@@ -801,7 +821,12 @@ fn handle_key(
             return;
         }
         Event::Paste(text) => {
-            if st.overlays.is_empty() && st.focus == Focus::Input && st.pending.is_none() {
+            // A persona is usually pasted, not typed, so the forge takes the
+            // paste whenever it is on top. Without this the text would land in
+            // the message composer behind the editor and look lost.
+            if let Some(Overlay::PersonaForge(forge)) = st.overlays.last_mut() {
+                forge.paste(&text);
+            } else if st.overlays.is_empty() && st.focus == Focus::Input && st.pending.is_none() {
                 st.input.insert_paste(&text);
             }
             return;
@@ -1251,6 +1276,42 @@ fn handle_key(
 /// Only an *empty* composer qualifies. With text in it, Esc keeps whatever
 /// meaning the composer gives it, so nobody loses a half-typed instruction to
 /// a key they pressed for a different reason.
+/// Build PERSONA FORGE for a new persona, or load an existing one into it.
+///
+/// The base list is the personas that could serve as a base. When it is empty
+/// the forge hides that step entirely rather than showing a selector with
+/// nothing in it.
+fn build_persona_forge(
+    app: &nexus_app::App,
+    edit: Option<&str>,
+) -> nexus_core::Result<crate::persona::PersonaForge> {
+    let bases: Vec<crate::persona::BaseChoice> = nexus_app::persona_service::eligible_bases(app)?
+        .into_iter()
+        .filter(|persona| Some(persona.id.as_str()) != edit)
+        .map(|persona| crate::persona::BaseChoice {
+            id: persona.id,
+            name: persona.name,
+            content_profile: persona.content_profile,
+        })
+        .collect();
+    let Some(id) = edit else {
+        return Ok(crate::persona::PersonaForge::create(bases));
+    };
+    let summary = nexus_app::persona_service::list(app)?
+        .into_iter()
+        .find(|persona| persona.id == id || persona.name == id)
+        .ok_or_else(|| nexus_core::NexusError::NotFound(format!("persona `{id}`")))?;
+    let prompt = nexus_app::persona_service::resolved_prompt(app, &summary.id)?;
+    Ok(crate::persona::PersonaForge::edit(
+        summary.id,
+        summary.name,
+        summary.description,
+        prompt,
+        summary.content_profile,
+        bases,
+    ))
+}
+
 fn esc_leaves_plan_mode(code: KeyCode, plan_mode: bool, composer_empty: bool) -> bool {
     matches!(code, KeyCode::Esc) && plan_mode && composer_empty
 }
@@ -2123,6 +2184,12 @@ fn handle_ui_msg(
             st.busy = st.busy.saturating_sub(1);
             let _ = generation; // effects apply regardless; views check their own
             handle_effect(st, effect, app, session, ui_tx);
+            // Selecting or clearing a persona changes who is answering, and the
+            // bar has to say so before the next message rather than after the
+            // next restart.
+            let (persona, marked) = persona_segment(app);
+            st.bar.persona = persona;
+            st.bar.persona_marked = marked;
         }
         UiMsg::Device(ev) => apply_device_event(st, ev),
         UiMsg::DeviceDone(result) => {
@@ -2537,6 +2604,41 @@ fn handle_action(
             let _ = app.update_ui_state(move |s| s.theme = Some(name2));
             st.set_theme(&name);
             st.toast(format!("theme: {name} (persisted)"), Sev::Ok);
+        }
+        UiAction::OpenPersonaForge { edit } => match build_persona_forge(app, edit.as_deref()) {
+            Ok(forge) => st.overlays.push(Overlay::PersonaForge(Box::new(forge))),
+            Err(error) => st.system_sev(format!("persona: {error}"), Sev::Err),
+        },
+        UiAction::SubmitPersona(spec) => {
+            let editing = nexus_app::persona_service::list(app)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|persona| !persona.built_in && persona.name == spec.name.trim())
+                .map(|persona| persona.id);
+            let saved = match editing {
+                Some(id) => nexus_app::persona_service::edit(app, &id, &spec),
+                None => nexus_app::persona_service::create(app, &spec),
+            };
+            match saved {
+                Ok(persona) => {
+                    st.toast(
+                        format!("persona {} v{} saved", persona.name, persona.revision),
+                        Sev::Ok,
+                    );
+                    if spec.activate {
+                        run_command(
+                            st,
+                            &format!("persona use {}", persona.id),
+                            app,
+                            session,
+                            ui_tx,
+                        );
+                    } else {
+                        run_command(st, "persona", app, session, ui_tx);
+                    }
+                }
+                Err(error) => st.system_sev(format!("persona: {error}"), Sev::Err),
+            }
         }
         UiAction::SubmitGoal(spec) => match nexus_app::services::goal_create(app, spec) {
             Ok(id) => {
@@ -3165,14 +3267,12 @@ fn start_load(
                 Err(error) => st.system_sev(format!("subagents: {error}"), Sev::Err),
             }
         }
-        LoadRequest::Persona => match app.personas().list() {
+        LoadRequest::Persona => match nexus_app::persona_service::list(app) {
             Ok(personas) => {
-                let selected = app.read_ui_state(|state| state.selected_persona.clone());
-                push_menu(
-                    st,
-                    app,
-                    menus::personas_menu(&personas, selected.as_deref()),
-                );
+                let active = nexus_app::persona_service::active(app)
+                    .map(|persona| persona.name)
+                    .unwrap_or_else(|_| nexus_core::persona::BUILTIN_NEXUS_NAME.into());
+                push_menu(st, app, menus::personas_menu(&personas, &active));
             }
             Err(e) => st.system_sev(format!("persona: {e}"), Sev::Err),
         },
@@ -4605,6 +4705,8 @@ mod tests {
                 tokens_cached: 0,
                 permission_mode: "default".into(),
                 plan_mode: false,
+                persona: String::new(),
+                persona_marked: false,
             },
             Vec::new(),
             nexus_core::ThinkingMode::Auto,

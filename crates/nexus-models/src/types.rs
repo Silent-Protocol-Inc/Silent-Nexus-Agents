@@ -411,6 +411,12 @@ pub struct ModelCapabilities {
     /// Whether the adapter preserves dedicated system-role instructions.
     #[serde(default)]
     pub system_prompt: bool,
+    /// How application instructions — the behavioral persona above all — reach
+    /// this endpoint. Reported honestly so the effective-request inspector can
+    /// disclose a weak channel instead of implying system-level authority the
+    /// adapter does not have.
+    #[serde(default = "default_instruction_channel")]
+    pub instruction_channel: nexus_core::persona::InstructionChannel,
     /// Whether multiple tool calls may be requested in one model turn.
     #[serde(default)]
     pub parallel_tool_calls: bool,
@@ -434,6 +440,12 @@ pub struct ModelCapabilities {
     pub cost_class: ModelCostClass,
     #[serde(default)]
     pub fallback_eligibility: FallbackEligibility,
+}
+
+/// Older serialized capability rows predate the field; a system-role adapter
+/// is the shape every built-in adapter but the CLI bridge has.
+fn default_instruction_channel() -> nexus_core::persona::InstructionChannel {
+    nexus_core::persona::InstructionChannel::SystemRole
 }
 
 impl ModelCapabilities {
