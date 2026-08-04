@@ -671,12 +671,13 @@ async fn prompt_precedence_matches_the_audited_contract() {
         .set_persona_profile(session.as_str(), Some(&persona), "default")
         .expect("session context");
 
+    // Deliberately work-shaped. The full instruction stack — contract, charter,
+    // plan — is only attached to a turn that has work to do; a bare
+    // "precedence marker objective" now classifies as conversational and
+    // correctly carries none of it. This test is about the working turn.
+    let objective = "implement the precedence marker fix in the repository and run the tests";
     AgentLoop::new(runtime, AgentRole::Planner)
-        .run(
-            &session,
-            "precedence marker objective",
-            Arc::new(AutoApprove),
-        )
+        .run(&session, objective, Arc::new(AutoApprove))
         .await
         .expect("run");
     let request = provider
@@ -691,13 +692,21 @@ async fn prompt_precedence_matches_the_audited_contract() {
             .position(|message| message.content.contains(marker))
             .unwrap_or_else(|| panic!("missing {marker}"))
     };
+    // Authority order, unchanged: every layer still precedes the ones below it.
+    //
+    // The persona is deliberately absent from this list. Its *authority* is
+    // still `AuthorityLayer::ActivePersona` (rank 4) — asserted directly in
+    // `nexus-context`, where rank is what resolves conflicts and what decides
+    // shed order — but its *emission* is last, so that a provider reading the
+    // prompt top to bottom meets the identity next to the request it is
+    // answering rather than buried in setup. Position stopped being a valid
+    // proxy for precedence the moment those two came apart.
     let order = [
         position("Immutable safety rules"),
         position("Provider protocol requirements"),
         position("Active policy and sandbox constraints"),
         position("PROJECT_PRECEDENCE_MARKER"),
         position("PROFILE_PRECEDENCE_MARKER"),
-        position("PERSONA_PRECEDENCE_MARKER"),
         position("[selected agent contract]"),
         position("[approved plan and current phase]"),
         position("MEMORY_PRECEDENCE_MARKER"),
@@ -705,12 +714,50 @@ async fn prompt_precedence_matches_the_audited_contract() {
             .messages
             .iter()
             .position(|message| {
-                message.role == nexus_models::types::Role::User
-                    && message.content == "precedence marker objective"
+                message.role == nexus_models::types::Role::User && message.content == objective
             })
             .expect("recent user objective"),
     ];
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+
+    // The persona is the last system message: after every other instruction,
+    // immediately before the conversation.
+    let last_system = request
+        .messages
+        .iter()
+        .rposition(|message| message.role == nexus_models::types::Role::System)
+        .expect("system messages");
+    assert_eq!(
+        position("PERSONA_PRECEDENCE_MARKER"),
+        last_system,
+        "the persona must be the final system instruction"
+    );
+    assert!(
+        last_system
+            < request
+                .messages
+                .iter()
+                .position(|message| message.role == nexus_models::types::Role::User)
+                .expect("user message"),
+        "the persona must still precede the conversation"
+    );
+
+    // And the directive that makes it an instruction travels with it, exactly
+    // once.
+    let persona_message = &request.messages[last_system].content;
+    assert!(
+        persona_message.contains("Adopt the following identity"),
+        "persona section carries no adoption directive: {persona_message}"
+    );
+    assert_eq!(
+        request
+            .messages
+            .iter()
+            .filter(|message| message.content.contains("Adopt the following identity"))
+            .count(),
+        1,
+        "the adoption directive must appear exactly once"
+    );
 }
 
 #[tokio::test]

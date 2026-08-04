@@ -137,13 +137,41 @@ async fn run_once(
     persona: Option<&str>,
     role: AgentRole,
 ) -> Vec<nexus_models::ModelRequest> {
+    run_once_with(dir, persona, role, "say hello").await
+}
+
+/// A turn whose objective is work, so the full instruction stack is attached.
+///
+/// "say hello" is now a conversational turn and deliberately carries no plan,
+/// contract, charter, or tool inventory — so a test about those sections has to
+/// ask for work.
+async fn run_once_working(
+    dir: &std::path::Path,
+    persona: Option<&str>,
+    role: AgentRole,
+) -> Vec<nexus_models::ModelRequest> {
+    run_once_with(
+        dir,
+        persona,
+        role,
+        "implement the requested change in the repository and run the tests",
+    )
+    .await
+}
+
+async fn run_once_with(
+    dir: &std::path::Path,
+    persona: Option<&str>,
+    role: AgentRole,
+    objective: &str,
+) -> Vec<nexus_models::ModelRequest> {
     let provider = Arc::new(MockProvider::new(vec![MockScript::Text("done".into())]));
     let (runtime, session, store) = runtime(provider.clone(), dir);
     if let Some(prompt) = persona {
         select_persona(&store, &dir.to_string_lossy(), &session, prompt);
     }
     AgentLoop::new(runtime, role)
-        .run(&session, "say hello", Arc::new(AutoApprove))
+        .run(&session, objective, Arc::new(AutoApprove))
         .await
         .expect("run");
     provider.recorded_requests()
@@ -213,36 +241,53 @@ async fn the_persona_is_a_system_instruction_and_never_a_user_message() {
     }
 }
 
+/// The persona is the last instruction the model reads before the request.
+///
+/// This used to assert `persona < contract`, reading wire position as
+/// authority. Those are different things, and conflating them is what let a
+/// correctly-ranked persona arrive buried in the middle of a coding-agent
+/// prompt where models simply did not treat it as their identity. Authority is
+/// `AuthorityLayer::ActivePersona` (rank 4) and is asserted where rank actually
+/// decides something, in `nexus-context`. Here we assert the wire contract:
+/// after every other instruction, still before the conversation.
 #[tokio::test]
-async fn the_persona_precedes_the_operational_contract_and_the_task() {
+async fn the_persona_is_the_final_instruction_before_the_task() {
     let dir = tempfile::tempdir().expect("dir");
     let requests = run_once(dir.path(), Some(ODYSSEUS), AgentRole::Nexus).await;
     let request = &requests[0];
-    let position = |needle: &str| {
-        request
-            .messages
-            .iter()
-            .position(|message| message.content.contains(needle))
-            .unwrap_or_else(|| panic!("missing section: {needle}"))
-    };
-    let persona = position("You are Odysseus");
-    let contract = position("selected agent contract");
+    let persona = request
+        .messages
+        .iter()
+        .position(|message| message.content.contains("You are Odysseus"))
+        .expect("missing persona");
+    let last_system = request
+        .messages
+        .iter()
+        .rposition(|message| message.role == Role::System)
+        .expect("system messages");
     let task = request
         .messages
         .iter()
         .position(|message| message.role == Role::User)
         .expect("the user request");
-    assert!(
-        persona < contract,
-        "the persona must outrank the operational contract"
+    assert_eq!(
+        persona, last_system,
+        "the persona must be the final system instruction"
     );
     assert!(persona < task, "the persona must precede the task");
+    assert!(
+        request.messages[persona]
+            .content
+            .contains("Answer as odysseus"),
+        "the persona section carries no adoption directive: {}",
+        request.messages[persona].content
+    );
 }
 
 #[tokio::test]
 async fn the_operational_contract_carries_no_competing_identity() {
     let dir = tempfile::tempdir().expect("dir");
-    let requests = run_once(dir.path(), Some(ODYSSEUS), AgentRole::Nexus).await;
+    let requests = run_once_working(dir.path(), Some(ODYSSEUS), AgentRole::Nexus).await;
     let contract = requests[0]
         .messages
         .iter()
@@ -532,4 +577,96 @@ fn clone_runtime(runtime: &AgentRuntime) -> AgentRuntime {
         narration_max_steps: runtime.narration_max_steps,
         narration_refine: runtime.narration_refine,
     }
+}
+
+/// The failure the operator actually hit: a persona selected, confirmed active,
+/// and then answered by a model describing itself as a coding assistant.
+///
+/// A conversational turn must reach the provider as a prompt that is mostly the
+/// persona. Plan JSON, a tool inventory, and a role charter around a character
+/// sheet is a prompt about operating a repository, and that is what the model
+/// answered.
+#[tokio::test]
+async fn a_conversational_turn_carries_the_persona_and_not_the_task_machine() {
+    let dir = tempfile::tempdir().expect("dir");
+    let requests = run_once(dir.path(), Some(ODYSSEUS), AgentRole::Reviewer).await;
+    let system = system_text(&requests[0]);
+
+    // Present: identity and the layers that are enforced regardless.
+    assert!(system.contains(ODYSSEUS), "the persona must still be sent");
+    assert!(system.contains("Answer as odysseus"));
+    assert!(system.contains("Immutable safety rules"));
+    assert!(system.contains("Active policy and sandbox constraints"));
+
+    // Absent: the machinery that made a greeting look like a work order.
+    for scaffolding in [
+        "selected agent contract",
+        "approved plan and current phase",
+        "List findings by severity",
+        "Available tools:",
+    ] {
+        assert!(
+            !system.contains(scaffolding),
+            "a conversational turn still carries `{scaffolding}`:\n{system}"
+        );
+    }
+}
+
+/// The persona has to survive the narrowing, not be a casualty of it.
+#[tokio::test]
+async fn a_working_turn_keeps_both_the_persona_and_the_task_machine() {
+    let dir = tempfile::tempdir().expect("dir");
+    let requests = run_once_working(dir.path(), Some(ODYSSEUS), AgentRole::Reviewer).await;
+    let system = system_text(&requests[0]);
+    assert!(system.contains(ODYSSEUS));
+    assert!(system.contains("selected agent contract"));
+    assert!(system.contains("approved plan and current phase"));
+}
+
+/// Narrowing is presentation. The enforced layers are not negotiable and must
+/// be byte-present on a conversational turn too.
+#[tokio::test]
+async fn narrowing_never_drops_an_enforced_layer() {
+    let dir = tempfile::tempdir().expect("dir");
+    let conversational =
+        system_text(&run_once(dir.path(), Some(ODYSSEUS), AgentRole::Nexus).await[0]);
+    let dir2 = tempfile::tempdir().expect("dir");
+    let working =
+        system_text(&run_once_working(dir2.path(), Some(ODYSSEUS), AgentRole::Nexus).await[0]);
+    for enforced in [
+        "Immutable safety rules",
+        "Every file path stays inside the workspace",
+        "Destructive and external actions require user approval",
+        "Active policy and sandbox constraints",
+    ] {
+        assert!(
+            conversational.contains(enforced),
+            "conversational turn dropped `{enforced}`"
+        );
+        assert!(working.contains(enforced));
+    }
+}
+
+/// The operator's real persona, byte for byte, through the whole pipeline.
+#[tokio::test]
+async fn a_long_roleplay_persona_arrives_unaltered() {
+    // Shaped like the persona that exposed this: markdown headings, asterisk
+    // action lines, and prose that a naive credential or content check would
+    // have mangled.
+    let persona = "THE \"SUPREME PREDATOR\" SYSTEM: TEST CHARACTER\n\n\
+         **[ROLEPLAY OPERATING PROTOCOL: HIGH IMMERSION]**\n\
+         *   **Perspective:** First-Person.\n\
+         *   **Format:** Descriptive prose in asterisk-wrapped action lines.\n\
+         *   **Persona Rule:** Never use meta-text or OOC commentary.\n\n\
+         ### I. BLUEPRINT\n\
+         *   **The Mask:** Elegant, polite, playful.\n\
+         *   **Risk-averse, task-specific, desk-bound phrasing stays intact.**\n";
+    let dir = tempfile::tempdir().expect("dir");
+    let requests = run_once(dir.path(), Some(persona), AgentRole::Nexus).await;
+    let system = system_text(&requests[0]);
+    assert!(
+        system.contains(persona),
+        "the persona text was altered in transit:\n{system}"
+    );
+    assert_eq!(count(&system, "asterisk-wrapped action lines"), 1);
 }

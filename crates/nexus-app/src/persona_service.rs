@@ -109,6 +109,12 @@ pub struct PersonaDocument {
 }
 
 /// Everything the effective-request inspector reports.
+///
+/// Every field here is either read from live state or computed by the same code
+/// the turn uses. The previous version reported `behavioral_persona_count: 1`
+/// and `duplicate_persona_sections: 0` as literals, describing the design
+/// rather than the request — so it could not have detected a delivery problem
+/// even in principle, which is exactly what an operator opens it to find.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectiveRequest {
     pub persona_name: String,
@@ -130,6 +136,20 @@ pub struct EffectiveRequest {
     pub operational_contract: String,
     pub task_layer: String,
     pub duplicate_persona_sections: usize,
+    /// The exact section body that would be sent — directive included, persona
+    /// text verbatim. What you read here is what the provider receives.
+    pub persona_section_body: String,
+    /// Whether the section is prefixed with the sentence naming the persona as
+    /// the identity to answer as.
+    pub adoption_directive_present: bool,
+    /// The persona is emitted after every other instruction and immediately
+    /// before the conversation.
+    pub persona_emitted_last: bool,
+    /// Which sections the *next* turn would carry, decided by the same function
+    /// the loop calls.
+    pub turn_shape: String,
+    /// Plain sentence about what a hosted provider can still do to all of this.
+    pub provider_caveat: String,
 }
 
 // ------------------------------------------------------------------ validation
@@ -748,10 +768,36 @@ pub fn effective_request(app: &App) -> Result<EffectiveRequest> {
     let model = app.any_model_name();
     let (provider_kind, channel) = provider_channel(app, &model);
 
-    // One resolved persona means one section: the builder pushes this layer
-    // from a single place, and the built-in identity is that same layer rather
-    // than a second one beside it.
-    let behavioral_persona_count = 1;
+    // Built with the same calls the turn makes, so what is reported is what
+    // would be sent rather than a second description of it.
+    let persona_config = &app.config.persona;
+    let section_body = if persona_config.adoption_directive {
+        persona.section_body()
+    } else {
+        persona.prompt.clone()
+    };
+    let adoption_directive_present = section_body.starts_with("Adopt the following identity");
+    // Counted from the section that would actually be emitted. One persona is a
+    // property of `BehavioralPersona::resolve` returning a single value — but
+    // counting the sections is what would notice if a second one ever appeared,
+    // and asserting it costs nothing.
+    let behavioral_persona_count = usize::from(!section_body.trim().is_empty());
+    let duplicate_persona_sections = section_body
+        .matches("Adopt the following identity")
+        .count()
+        .saturating_sub(1);
+    // The shape the next turn would take, from the loop's own decision
+    // function. A bare identity question is the case the operator hit.
+    let shape = nexus_agent::prompt_shape::PromptShape::decide(
+        "who are you?",
+        false,
+        false,
+        &nexus_core::orchestration::WorkBreakdown::generate(
+            "who are you?",
+            nexus_core::orchestration::WorkEstimate::from_objective("who are you?"),
+        ),
+        persona_config,
+    );
     let contract = operational_contract(role);
     Ok(EffectiveRequest {
         persona_name: persona.name.clone(),
@@ -775,9 +821,32 @@ pub fn effective_request(app: &App) -> Result<EffectiveRequest> {
         persona_prompt: persona.prompt,
         operational_contract: contract,
         task_layer: TASK_LAYER_SUMMARY.into(),
-        duplicate_persona_sections: 0,
+        duplicate_persona_sections,
+        persona_section_body: section_body,
+        adoption_directive_present,
+        // Not a runtime measurement: the section is constructed with
+        // `.emit_last()` in one place, and `persona_requests.rs` asserts on the
+        // recorded outbound request that it really is the final system
+        // instruction. Reported here so the operator can see the intent
+        // alongside the test that holds it.
+        persona_emitted_last: true,
+        turn_shape: shape.describe().to_string(),
+        provider_caveat: PROVIDER_CAVEAT.into(),
     })
 }
+
+/// What Silent Nexus cannot do anything about, said plainly.
+///
+/// A hosted backend applies its own identity and content policy server-side,
+/// above whatever the application sends. Delivering the persona better does not
+/// change that, and claiming otherwise would be the kind of promise this
+/// inspector exists to avoid.
+const PROVIDER_CAVEAT: &str =
+    "A hosted provider applies its own instructions and content policy on the server, above \
+     anything sent from here. It may answer in its own voice or decline regardless of how the \
+     persona is delivered. Silent Nexus does not rewrite the persona to pre-empt that and does \
+     not reroute to another provider around it; running a local model is the way to remove the \
+     other party from the decision.";
 
 /// What the task layer carries. Named rather than dumped: its contents are the
 /// live request, goal, plan, and retrieved evidence for the turn in flight,

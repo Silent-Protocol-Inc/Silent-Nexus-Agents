@@ -577,6 +577,23 @@
       },
       "type": "object"
     },
+    "PersonaConfig": {
+      "additionalProperties": false,
+      "description": "How the selected persona reaches the model.\n\nNeither switch decides *what* a persona may say — validation is technical only and there is no content filter. They decide how the persona is framed and how much operational scaffolding travels beside it, which is what determines whether a model answers as the persona or as the coding assistant the rest of the prompt describes.",
+      "properties": {
+        "adoption_directive": {
+          "default": true,
+          "description": "Prefix the persona section with the sentence that names it as the identity to answer as. Off sends the persona text bare, which is how a selected persona could be present in the prompt and still be read as background prose.",
+          "type": "boolean"
+        },
+        "conversational_turns": {
+          "default": true,
+          "description": "Drop plan, agent-contract, charter, and tool scaffolding from turns that need none of it, so a conversational exchange is not wrapped in a coding-agent prompt. Enforcement is unaffected: policy, sandbox, approval, redaction, and audit all live outside the model.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "PolicyConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1098,6 +1115,18 @@
         "refine_wording": true
       },
       "description": "How much the agent narrates its own work (`[narration]`)."
+    },
+    "persona": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/PersonaConfig"
+        }
+      ],
+      "default": {
+        "adoption_directive": true,
+        "conversational_turns": true
+      },
+      "description": "How the active behavioral persona is delivered (`[persona]`)."
     },
     "policy": {
       "allOf": [

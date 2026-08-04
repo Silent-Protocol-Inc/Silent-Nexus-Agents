@@ -5261,10 +5261,24 @@ impl AgentLoop {
                  confirm; each one is still policy-checked, sandboxed, and audited.\n",
             );
         }
+        let session = self.runtime.sessions.get(session_id.as_str())?;
+        // Decided once, by the same function the inspector calls, so the prompt
+        // that gets described is the prompt that gets sent.
+        let shape = crate::prompt_shape::PromptShape::decide(
+            objective,
+            session.current_goal.is_some(),
+            !session.pending_tasks.is_empty(),
+            work,
+            &self.runtime.tool_ctx.config.persona,
+        );
+        let conversational = shape.conversational;
+
         let mut provider_context = String::from(
             "Provider protocol requirements (format only; lower authority than safety):\n",
         );
-        if !native {
+        if !shape.includes_tool_inventory {
+            provider_context.push_str("Answer in prose. No tools are attached to this turn.");
+        } else if !native {
             provider_context.push_str(COMPAT_INSTRUCTIONS);
             provider_context.push_str("\n\nAvailable tools:\n");
             for t in tools {
@@ -5328,7 +5342,6 @@ impl AgentLoop {
                 ins.content,
             ));
         }
-        let session = self.runtime.sessions.get(session_id.as_str())?;
 
         let workspace_harness = HarnessRepository::new(self.runtime.store.clone());
         let global_harness = HarnessRepository::new(self.runtime.global_store.clone());
@@ -5356,11 +5369,45 @@ impl AgentLoop {
         // every task section below.
         let persona =
             self.behavioral_persona(&workspace_harness, active_context.as_ref(), &session)?;
-        sections.push(ContextSection::pinned(
-            AuthorityLayer::ActivePersona,
-            persona.section_label(),
-            persona.prompt.clone(),
-        ));
+        let persona_body = if shape.adoption_directive {
+            persona.section_body()
+        } else {
+            persona.prompt.clone()
+        };
+        // Emitted last on the wire (see `emit_last`), while keeping rank 4 for
+        // authority and shed order. Position and precedence are different
+        // questions: the compiler answers the second, the provider reads the
+        // first.
+        sections.push(
+            ContextSection::pinned(
+                AuthorityLayer::ActivePersona,
+                persona.section_label(),
+                persona_body,
+            )
+            .emit_last(),
+        );
+
+        // A turn that needs none of the task machine should not carry it.
+        //
+        // "hello" and "who are you?" were arriving wrapped in plan JSON, a tool
+        // inventory, and a role charter — a prompt overwhelmingly about
+        // operating a repository, with the persona as one block inside it. The
+        // model answered the prompt it was given.
+        //
+        // This narrows *presentation only*. Policy, sandbox, workspace
+        // confinement, approval, redaction, and audit are enforced outside the
+        // model and are untouched, so a conversational turn cannot do anything
+        // a full turn could not.
+        if conversational {
+            sections.push(ContextSection::pinned(
+                AuthorityLayer::CoreSafety,
+                "turn shape",
+                "This turn is conversational: answer directly. No plan, tool inventory, or \
+                 operational contract is attached because none is needed. If the request \
+                 actually requires reading or changing the workspace, say so plainly and it \
+                 will be re-run with the full tool set rather than guessed at.",
+            ));
+        }
 
         let mut agent_contract = format!(
             "role={}\nbase={}\noutput_contract={}\nallowed_categories={}\nmax_risk={}\nwrite={}\ndelegation={}",
@@ -5383,22 +5430,29 @@ impl AgentLoop {
             agent_contract.push_str("\ncustom_narrowing=\n");
             agent_contract.push_str(&definition.instructions);
         }
-        sections.push(ContextSection::pinned(
-            AuthorityLayer::SelectedAgent,
-            "selected agent contract",
-            agent_contract,
-        ));
-        // The charter is the role's *operational* obligation — what this turn
-        // owes and how it must be evidenced. Identity, voice, and manner are
-        // not here: they belong to the persona layer above, and duplicating
-        // them would give the model two answers to "who are you".
-        let charter = self.role.charter();
-        if !charter.is_empty() {
+        // The contract and charter describe how to carry out work. On a
+        // conversational turn there is no work to carry out, and a read-only
+        // reviewer's "list findings by severity" is exactly the framing that
+        // makes a model answer as a code reviewer instead of as the persona.
+        if shape.includes_agent_contract {
             sections.push(ContextSection::pinned(
                 AuthorityLayer::SelectedAgent,
-                format!("{} charter", self.role.as_str()),
-                charter,
+                "selected agent contract",
+                agent_contract,
             ));
+            // The charter is the role's *operational* obligation — what this
+            // turn owes and how it must be evidenced. Identity, voice, and
+            // manner are not here: they belong to the persona layer above, and
+            // duplicating them would give the model two answers to "who are
+            // you".
+            let charter = self.role.charter();
+            if !charter.is_empty() {
+                sections.push(ContextSection::pinned(
+                    AuthorityLayer::SelectedAgent,
+                    format!("{} charter", self.role.as_str()),
+                    charter,
+                ));
+            }
         }
 
         let mut goal_constraints = Vec::new();
@@ -5431,11 +5485,13 @@ impl AgentLoop {
                 goal_constraints.extend(goal.blockers.into_iter().map(|b| format!("Blocker: {b}")));
             }
         }
-        sections.push(ContextSection::pinned(
-            AuthorityLayer::ApprovedPlan,
-            "approved plan and current phase",
-            serde_json::to_string(work)?,
-        ));
+        if shape.includes_plan {
+            sections.push(ContextSection::pinned(
+                AuthorityLayer::ApprovedPlan,
+                "approved plan and current phase",
+                serde_json::to_string(work)?,
+            ));
+        }
         if !goal_constraints.is_empty() {
             sections.push(ContextSection::pinned(
                 AuthorityLayer::CriticalConstraints,

@@ -1030,22 +1030,39 @@ pub fn persona_effective_report(app: &App) -> Result<Report> {
         .field(
             "duplicate persona sections",
             effective.duplicate_persona_sections.to_string(),
-        );
+        )
+        .field(
+            "adoption directive present",
+            yes_no(effective.adoption_directive_present),
+        )
+        .field(
+            "persona emitted last on the wire",
+            yes_no(effective.persona_emitted_last),
+        )
+        .field("next turn shape", &effective.turn_shape);
     if !effective.channel_limitation.is_empty() {
         report = report.warn(&effective.channel_limitation);
     }
+    if !effective.adoption_directive_present {
+        report = report.warn(
+            "the persona is sent without the sentence naming it as the identity to answer as;              a model may read it as background prose",
+        );
+    }
+    report = report.warn(&effective.provider_caveat);
     if effective.behavioral_persona_count != 1 {
         report = report.warn(format!(
             "expected exactly one behavioral persona, found {}",
             effective.behavioral_persona_count
         ));
     }
+    // The section body, not the stored prompt: the directive travels with it,
+    // and showing the stored text alone would misreport what is sent.
     Ok(report
-        .header("layer 1 — active behavioral persona")
-        .line(&effective.persona_prompt)
-        .header("layer 2 — operational agent contract")
+        .header("active behavioral persona — emitted last, immediately before the conversation")
+        .line(&effective.persona_section_body)
+        .header("operational agent contract")
         .line(&effective.operational_contract)
-        .header("layer 3 — task and execution context")
+        .header("task and execution context")
         .line(&effective.task_layer))
 }
 

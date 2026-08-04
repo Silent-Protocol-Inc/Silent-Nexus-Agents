@@ -30,11 +30,13 @@ how a reviewer *talks*; it cannot give the reviewer an implementer's tools.
 
 ## The prompt layers
 
+Authority, strongest first. This is the order that decides which layer wins a
+conflict and what gets shed when the context budget runs short:
+
 ```
 immutable safety rules              ← enforced in code; nothing below relaxes them
 provider protocol requirements
 enforced policy and sandbox scope
-project instructions (SILENT.md / AGENTS.md / CLAUDE.md …)
 approved active profile
 ACTIVE BEHAVIORAL PERSONA           ← exactly one, always
 OPERATIONAL AGENT CONTRACT          ← what the role owes, never who it is
@@ -45,8 +47,40 @@ the user's request
 The persona layer is pinned, so budget pressure sheds optional context —
 memories, observations, older history — and never the assistant's identity.
 
-`/persona inspect-effective` prints this composition for the request that would
-be sent next.
+**Wire order is a different question, and the persona is emitted last.** Every
+other instruction goes out first; the persona is the final thing a provider
+reads before the conversation itself. Authority and position had to come apart
+because they want opposite things: high precedence, but adjacent to the point of
+generation. A correctly-ranked persona buried in the middle of a long
+operational prompt is read as background prose, and models answered as the
+assistant the surrounding text described. Rank is unchanged.
+
+The section is also prefixed with a sentence naming the persona as the identity
+to answer as, in the first person, including when asked what it is. That
+sentence grants nothing — everything above the persona is enforced in code
+before a token is generated — and it never alters the persona text, which is
+still passed through byte for byte.
+
+`/persona inspect-effective` prints the exact section body that would be sent,
+whether the directive is present, and what shape the next turn takes.
+
+## Conversational turns
+
+A turn that needs no tools does not carry the tool machine. When the request
+classifies as simple and there is no active goal, pending task, or tracked plan,
+the prompt omits the approved plan, the operational contract, the role charter,
+and the tool inventory.
+
+It keeps the safety rules, the policy and sandbox scope, project instructions,
+the profile, memory, and the persona.
+
+This is presentation, not enforcement. Policy, sandbox, workspace confinement,
+approval, redaction, and audit all live outside the model, so a conversational
+turn cannot do anything a full turn could not. Anything that looks like work
+gets the full prompt, and if a narrowed turn does need a tool it says so and the
+next turn is classified again with everything attached.
+
+Turn it off with `conversational_turns = false` under `[persona]`.
 
 ## Managing personas
 
@@ -120,11 +154,19 @@ mature, adult, sexually explicit, romantic, profane, unconventional,
 controversial, roleplay-oriented, or violent in fiction. There is no keyword
 list. What you write is what is stored, and what is stored is what is sent.
 
-**The provider is a separate matter.** A hosted model may still refuse,
-restrict, or alter what it generates. That refusal is reported as the provider's
-answer; Silent Nexus does not rewrite your persona to pre-empt it and does not
-reroute to another provider to get around it. Choosing a different model or a
-local one is your decision to make.
+**The provider is a separate matter, and it is the limit of what any of this can
+do.** A hosted backend applies its own instructions and content policy on the
+server, above anything sent from here. It may answer in its own voice, ignore
+the persona, or decline — and delivering the persona better does not change
+that. A ChatGPT-backend model answering "I'm ChatGPT, an AI assistant" is the
+provider's policy speaking, not a persona that failed to arrive;
+`/persona inspect-effective` will show the persona present and correct in the
+same session.
+
+That refusal is reported as the provider's answer. Silent Nexus does not rewrite
+your persona to pre-empt it and does not reroute to another provider to get
+around it. Running a local model is how you remove the other party from the
+decision, and it is your call to make.
 
 ## Providers
 

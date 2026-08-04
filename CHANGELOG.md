@@ -1,5 +1,49 @@
 # Changelog
 
+## [2.14.0] — 2026-08-04
+
+### Fixed
+
+- **A selected persona could be present in the prompt and still not govern the
+  answer.** With a persona active and confirmed, the model answered as a coding
+  assistant. The persona was never dropped — it was sent, once, at the right
+  authority — but it arrived as one labelled block in the middle of a prompt
+  otherwise made of safety rules, policy, a tool inventory, a role charter, and
+  plan JSON, with nothing saying it was the identity to answer as. Three
+  changes, none of which touch the persona text:
+
+  - The persona section is now **emitted last**, after every other instruction
+    and immediately before the conversation. Its authority is unchanged
+    (`ActivePersona`, still pinned) — rank decides conflicts and shed order,
+    position decides what the provider reads next to the request.
+  - It is prefixed with a sentence naming the persona as the identity to answer
+    as, in the first person, including when asked what it is. The sentence
+    grants no capability and relaxes nothing above it.
+  - Turns that need no tools no longer carry the tool machine. A simple request
+    with no goal, pending task, or tracked plan omits the plan, contract,
+    charter, and tool inventory, and keeps safety, policy, project
+    instructions, profile, memory, and the persona.
+
+- **`/persona inspect-effective` reported its own design instead of the
+  request.** `behavioral persona count` and `duplicate persona sections` were
+  hardcoded, so the one tool for diagnosing a delivery problem reported
+  everything healthy by construction. It now shows the exact section body that
+  would be sent, whether the adoption directive is present, the shape of the
+  next turn — computed by the same function the loop calls — and a plain
+  statement of what a hosted provider can still override.
+
+### Added
+
+- `[persona]` config: `adoption_directive` and `conversational_turns`, both on
+  by default.
+
+### Note
+
+A hosted backend applies its own identity and content policy server-side, above
+anything Silent Nexus sends. None of this overrides that, and none of it is
+claimed to: a hosted model may still answer in its own voice or decline. Running
+a local model is what removes the other party from the decision.
+
 ## [2.13.2] — 2026-08-04
 
 ### Fixed

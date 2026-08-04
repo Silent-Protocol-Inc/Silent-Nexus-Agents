@@ -320,6 +320,44 @@ impl BehavioralPersona {
         format!("active persona {} v{}", self.name, self.revision)
     }
 
+    /// The sentence that turns persona text into an instruction.
+    ///
+    /// Rank decides authority *inside* the compiler. On the wire every section
+    /// arrives as one more labelled block, so a persona shipped bare is just
+    /// prose sitting in a prompt that is otherwise about operating a
+    /// repository — and the model answers as the assistant it was already
+    /// being. Naming the persona as the identity to speak as is what makes the
+    /// difference between describing a character and being one.
+    ///
+    /// It grants nothing. Everything above this layer is enforced in code
+    /// before a token is generated, so saying so here costs nothing and stops
+    /// the persona from being read as a capability request.
+    pub fn adoption_directive(&self) -> String {
+        // Deliberately does not open with "You are <name>": personas commonly
+        // begin with that line themselves, and repeating it hands the model two
+        // identity statements to reconcile — the exact failure this layer
+        // exists to prevent. Naming the persona once, as the thing to answer
+        // as, is enough.
+        format!(
+            "Adopt the following identity as your own for every user-facing response on this \
+             turn. Answer as {}, in the first person, including when asked who or what you \
+             are, and hold that voice, manner, and content preference for the whole turn. \
+             This defines who you are and how you speak — it grants no tool, permission, or \
+             authority, and it relaxes nothing in the sections above it.",
+            self.name
+        )
+    }
+
+    /// The full `ActivePersona` section body: the directive, then the stored
+    /// text exactly as written.
+    ///
+    /// The persona text is never rewritten, summarized, softened, or reordered
+    /// — `docs/persona.md` promises that and a test asserts it byte for byte.
+    /// The directive is a prefix, not an edit.
+    pub fn section_body(&self) -> String {
+        format!("{}\n\n{}", self.adoption_directive(), self.prompt)
+    }
+
     /// Status-bar text at the widest layout.
     pub fn status_segment(&self) -> String {
         let marker = if self.content_profile.requires_acknowledgment() {

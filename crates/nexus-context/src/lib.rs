@@ -108,6 +108,17 @@ pub struct ContextSection {
     /// Optional hard ceiling for this section. Pinned content is never
     /// truncated because doing so can remove an approval or safety rule.
     pub max_tokens: Option<usize>,
+    /// Emit this section last on the wire, whatever its rank.
+    ///
+    /// Rank is *authority*: which layer wins a conflict, and what gets shed
+    /// first under budget pressure. Wire order is a separate, purely
+    /// presentational question, and for the active persona the two want
+    /// opposite things — high authority, but adjacent to generation so the
+    /// model reads it as the voice to answer in rather than as one more
+    /// paragraph of setup. Setting this changes neither `layer` nor `pinned`,
+    /// so budgeting and conflict resolution are untouched.
+    #[serde(default)]
+    pub emit_last: bool,
 }
 
 impl ContextSection {
@@ -122,6 +133,7 @@ impl ContextSection {
             content: content.into(),
             pinned: true,
             max_tokens: None,
+            emit_last: false,
         }
     }
 
@@ -136,11 +148,18 @@ impl ContextSection {
             content: content.into(),
             pinned: false,
             max_tokens: None,
+            emit_last: false,
         }
     }
 
     pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
         self.max_tokens = Some(max_tokens.max(1));
+        self
+    }
+
+    /// Emit this section last on the wire. See [`ContextSection::emit_last`].
+    pub fn emit_last(mut self) -> Self {
+        self.emit_last = true;
         self
     }
 
@@ -284,10 +303,16 @@ impl ContextCompiler {
             }
         }
 
-        let included_sections: Vec<&ContextSection> = packed
+        let mut included_sections: Vec<&ContextSection> = packed
             .iter()
             .filter_map(|segment| section_by_label.get(segment.label.as_str()).copied())
             .collect();
+        // `emit_last` sections move to the end of the system block, keeping
+        // their order relative to each other. Everything about authority has
+        // already been decided above — conflicts were resolved by rank and the
+        // budget was fit by priority — so this only changes what the provider
+        // reads last, never what wins or what survives.
+        included_sections.sort_by_key(|section| section.emit_last);
         let mut messages: Vec<ChatMessage> = included_sections
             .iter()
             .map(|section| ChatMessage::system(format!("[{}]\n{}", section.label, section.content)))

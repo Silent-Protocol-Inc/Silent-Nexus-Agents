@@ -48,6 +48,39 @@ pub struct Config {
     pub narration: NarrationConfig,
     /// What the harness may learn about the operator (`[profile]`).
     pub profile: ProfileConfig,
+    /// How the active behavioral persona is delivered (`[persona]`).
+    pub persona: PersonaConfig,
+}
+
+/// How the selected persona reaches the model.
+///
+/// Neither switch decides *what* a persona may say — validation is technical
+/// only and there is no content filter. They decide how the persona is framed
+/// and how much operational scaffolding travels beside it, which is what
+/// determines whether a model answers as the persona or as the coding assistant
+/// the rest of the prompt describes.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct PersonaConfig {
+    /// Prefix the persona section with the sentence that names it as the
+    /// identity to answer as. Off sends the persona text bare, which is how a
+    /// selected persona could be present in the prompt and still be read as
+    /// background prose.
+    pub adoption_directive: bool,
+    /// Drop plan, agent-contract, charter, and tool scaffolding from turns that
+    /// need none of it, so a conversational exchange is not wrapped in a
+    /// coding-agent prompt. Enforcement is unaffected: policy, sandbox,
+    /// approval, redaction, and audit all live outside the model.
+    pub conversational_turns: bool,
+}
+
+impl Default for PersonaConfig {
+    fn default() -> Self {
+        Self {
+            adoption_directive: true,
+            conversational_turns: true,
+        }
+    }
 }
 
 /// Automatic capture of durable facts about the operator.

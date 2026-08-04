@@ -17,6 +17,7 @@ pub mod classify;
 pub mod custom_agents;
 pub mod loop_engine;
 pub mod narration;
+pub mod prompt_shape;
 pub mod session;
 pub mod subagent;
 pub mod thinking;
