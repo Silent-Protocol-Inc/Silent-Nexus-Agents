@@ -55,7 +55,15 @@ pub enum UiAction {
     },
     /// Save the persona the forge produced, activating it when the operator
     /// chose that on the review step.
-    SubmitPersona(Box<nexus_app::persona_service::PersonaSpec>),
+    ///
+    /// `edit` is the id the forge was opened on, and it is the *only* thing
+    /// that decides update-versus-create. Matching by name instead would mean a
+    /// new persona that happened to reuse an existing name silently rewrote
+    /// that persona rather than reporting the collision.
+    SubmitPersona {
+        edit: Option<String>,
+        spec: Box<nexus_app::persona_service::PersonaSpec>,
+    },
     SubmitCustomEndpoint(CustomEndpointSpec),
     TestCustomEndpoint(CustomEndpointSpec),
     /// Store a provider API key (credential store; `provider/default`).
@@ -1940,7 +1948,10 @@ impl Overlay {
                 crate::persona::ForgeOutcome::Consumed => Outcome::Consumed,
                 crate::persona::ForgeOutcome::Cancel => Outcome::Close,
                 crate::persona::ForgeOutcome::Submit(spec) => {
-                    Outcome::Action(UiAction::SubmitPersona(spec))
+                    Outcome::Action(UiAction::SubmitPersona {
+                        edit: forge.editing.clone(),
+                        spec,
+                    })
                 }
             },
         }

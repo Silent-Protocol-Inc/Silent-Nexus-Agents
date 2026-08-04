@@ -253,9 +253,13 @@ fn metadata_from(spec: &PersonaSpec) -> PersonaMetadata {
 pub fn create(app: &App, spec: &PersonaSpec) -> Result<PersonaSummary> {
     validate_spec(app, spec, None)?;
     if !spec.persistence_policy.writes_durable_storage() {
+        // `SessionOnly` is a declared policy with no holding store behind it
+        // yet — it exists so an isolated session can be built on it later
+        // without reshaping the model. Saying "held for the session" here would
+        // promise something no code does; refuse plainly instead.
         return Err(NexusError::Config(
-            "session-only personas are held for the session and are not written to storage; \
-             save the persona to keep it"
+            "session-only personas are not implemented yet: there is nowhere to hold one for \
+             the session, and creating it would write it to storage anyway. Choose `persistent`."
                 .into(),
         ));
     }

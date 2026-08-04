@@ -2609,14 +2609,12 @@ fn handle_action(
             Ok(forge) => st.overlays.push(Overlay::PersonaForge(Box::new(forge))),
             Err(error) => st.system_sev(format!("persona: {error}"), Sev::Err),
         },
-        UiAction::SubmitPersona(spec) => {
-            let editing = nexus_app::persona_service::list(app)
-                .unwrap_or_default()
-                .into_iter()
-                .find(|persona| !persona.built_in && persona.name == spec.name.trim())
-                .map(|persona| persona.id);
-            let saved = match editing {
-                Some(id) => nexus_app::persona_service::edit(app, &id, &spec),
+        UiAction::SubmitPersona { edit, spec } => {
+            // The forge says which persona it was opened on. A name collision
+            // on a *new* persona is reported as a collision rather than
+            // silently rewriting whatever already held that name.
+            let saved = match edit.as_deref() {
+                Some(id) => nexus_app::persona_service::edit(app, id, &spec),
                 None => nexus_app::persona_service::create(app, &spec),
             };
             match saved {

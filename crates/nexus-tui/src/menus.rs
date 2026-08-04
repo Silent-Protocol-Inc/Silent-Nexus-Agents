@@ -1058,21 +1058,18 @@ pub fn personas_menu(
     let custom_active = personas
         .iter()
         .any(|persona| persona.selected && !persona.built_in);
-    let mut items =
-        vec![
-            MenuItem::new("Create persona…", UiAction::OpenPersonaForge { edit: None }).detail(
-                "open PERSONA FORGE: a real multiline editor for identity, tone, and conduct",
-            ),
-        ];
-    if has_custom {
-        items.push(
-            MenuItem::new(
-                "Create from existing…",
-                UiAction::OpenPersonaForge { edit: None },
-            )
-            .detail("start from a base persona; copy it outright or keep a live link"),
-        );
-    }
+    // One creation row. Deriving from an existing persona is a step *inside*
+    // the forge, shown only when something can serve as a base, so a second row
+    // here would open the identical screen and teach nothing.
+    let mut items = vec![MenuItem::new(
+        "Create persona…",
+        UiAction::OpenPersonaForge { edit: None },
+    )
+    .detail(if has_custom {
+        "open PERSONA FORGE: a multiline editor, with your existing personas available as a base"
+    } else {
+        "open PERSONA FORGE: a real multiline editor for identity, tone, and conduct"
+    })];
     items.push(
         MenuItem::new(
             "Inspect effective request",

@@ -480,6 +480,15 @@ impl PersonaForge {
                 "adults-only personas need the acknowledgment on the metadata step".into(),
             );
         }
+        // Caught here rather than on save: there is no store behind
+        // `session_only` yet, and finding that out after writing a page of
+        // persona is a worse way to learn it.
+        if !self.persistence.writes_durable_storage() {
+            return Some(
+                "session-only personas are not implemented yet — set persistence to persistent"
+                    .into(),
+            );
+        }
         None
     }
 
@@ -996,6 +1005,45 @@ mod tests {
         assert_eq!(forge.validation_error(), None);
         // The acknowledgment is metadata; it changed no text.
         assert_eq!(forge.prompt(), "adult fiction");
+    }
+
+    /// Update-versus-create is decided by the persona the forge was opened on,
+    /// never by the name typed into it. Without this, creating a persona that
+    /// happened to reuse an existing name would rewrite that persona instead of
+    /// reporting the collision.
+    #[test]
+    fn the_forge_reports_which_persona_it_was_opened_on() {
+        let creating = PersonaForge::create(Vec::new());
+        assert_eq!(creating.editing, None);
+
+        let editing = PersonaForge::edit(
+            "persona_abc",
+            "odysseus",
+            "a wanderer",
+            "You are Odysseus.",
+            ContentProfile::General,
+            Vec::new(),
+        );
+        assert_eq!(editing.editing.as_deref(), Some("persona_abc"));
+        // Editing loads the stored text unchanged and does not re-activate on
+        // save unless the operator asks.
+        assert_eq!(editing.prompt(), "You are Odysseus.");
+        assert_eq!(editing.commit, ForgeCommit::CreateOnly);
+    }
+
+    #[test]
+    fn session_only_is_refused_before_a_page_of_persona_is_typed() {
+        let mut forge = PersonaForge::create(Vec::new());
+        forge.name = "odysseus".into();
+        forge.raw = MultilineEditor::new("be brief");
+        assert_eq!(forge.validation_error(), None);
+        forge.persistence = PersistencePolicy::SessionOnly;
+        assert!(
+            forge
+                .validation_error()
+                .is_some_and(|error| error.contains("not implemented")),
+            "a policy with no store behind it must say so"
+        );
     }
 
     #[test]
