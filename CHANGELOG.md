@@ -1,5 +1,37 @@
 # Changelog
 
+## [2.13.1] — 2026-08-04
+
+### Fixed
+
+- **A persona could be refused as a secret for containing an ordinary English
+  word.** The credential scan tested `contains("sk-")`, which matches inside
+  `asterisk-wrapped`, `risk-averse`, `task-specific`, and `desk-bound` — so a
+  persona that described its own prose format was rejected with "refusing to
+  persist persona containing a likely secret". A key prefix now only counts when
+  it starts a token *and* is followed by enough key-shaped characters to be a
+  key; the same applies to `bearer `, which used to fire on "the bearer of the
+  message". Real credentials are still refused, including at the start of a
+  payload.
+
+- **The persona manager could create but not edit or delete.** It now offers
+  both as chooser submenus, so the fast path — Enter on a row selects that
+  persona — keeps working.
+
+- **Choosing the built-in `Nexus` row failed with `not found`.** Selecting it is
+  the same thing as clearing the selection, but its id was passed through to the
+  harness, which looked for a stored row that does not exist. Every path that
+  consumes a chosen persona id now recognises the built-in identity.
+
+### Added
+
+- **`/sessions` can delete a session.** A `Delete session…` chooser in the menu
+  and `snx session delete <id>`, both confirmed first. The attached session is
+  listed but disabled — deleting the session a turn is writing to would leave it
+  writing to a row that no longer exists.
+
+- `snx persona use` as an alias of `snx persona select`, matching `/persona use`.
+
 ## [2.13.0] — 2026-08-04
 
 ### Changed

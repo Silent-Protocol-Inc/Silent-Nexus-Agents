@@ -141,6 +141,8 @@ pub enum LoadRequest {
     GoalDetail(String),
     Resume,
     Sessions,
+    /// Choose a session to delete.
+    SessionDelete,
     Login,
     Connect,
     Model,
@@ -150,6 +152,10 @@ pub enum LoadRequest {
     Tasks,
     Subagents,
     Persona,
+    /// Choose a persona to open in the forge.
+    PersonaEdit,
+    /// Choose a persona to delete.
+    PersonaDelete,
     Profile,
     Tools,
     Memory,

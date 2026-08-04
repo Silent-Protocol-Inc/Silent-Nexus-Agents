@@ -134,6 +134,7 @@ pub enum ConfirmedAction {
     },
     ForgetMemory(String),
     DeletePersona(String),
+    DeleteSession(String),
     DeleteProfileTrait(String),
     SetProfileStatus {
         profile_id: String,
@@ -213,6 +214,9 @@ impl ConfirmedAction {
             ConfirmedAction::DeletePersona(id) => {
                 format!("Delete persona {id}? Sessions already using it keep their stored id.")
             }
+            ConfirmedAction::DeleteSession(id) => format!(
+                "Permanently delete session {id} and its transcript? This cannot be undone."
+            ),
             ConfirmedAction::DeleteProfileTrait(id) => {
                 format!("Permanently delete profile trait {id}?")
             }
@@ -598,10 +602,15 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             }
             ["select", id] => {
                 let report = services::persona_select(app, Some(id))?;
+                // Choosing the built-in identity *is* clearing the selection.
+                // It has no stored row, so passing its id through to the
+                // harness looked it up and failed with `not found` — which is
+                // what the manager's own `Nexus` row did.
+                let persona_id = (!crate::persona_service::is_built_in(id)).then(|| id.to_string());
                 app.harness()
                     .execute(crate::control_plane::HarnessAction::SelectPersona {
                         session_id: ctx.session_id.clone(),
-                        persona_id: Some(id.to_string()),
+                        persona_id,
                         version: None,
                     })?;
                 sync_session_persona_profile(app, ctx.session_id.as_deref())?;
@@ -643,10 +652,15 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             }
             ["use", id] => {
                 let report = services::persona_select(app, Some(id))?;
+                // Choosing the built-in identity *is* clearing the selection.
+                // It has no stored row, so passing its id through to the
+                // harness looked it up and failed with `not found` — which is
+                // what the manager's own `Nexus` row did.
+                let persona_id = (!crate::persona_service::is_built_in(id)).then(|| id.to_string());
                 app.harness()
                     .execute(crate::control_plane::HarnessAction::SelectPersona {
                         session_id: ctx.session_id.clone(),
-                        persona_id: Some(id.to_string()),
+                        persona_id,
                         version: None,
                     })?;
                 sync_session_persona_profile(app, ctx.session_id.as_deref())?;
@@ -1044,6 +1058,19 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             None => view_or(View::Resume, services::resume_report(app)?),
             Some(id) => resolve_resume_target(app, id)?,
         },
+        CommandId::Sessions if matches!(args.as_slice(), ["delete", _]) => {
+            let ["delete", id] = args.as_slice() else {
+                unreachable!("guarded by the match arm above")
+            };
+            // Refusing to delete the session you are in is not squeamishness:
+            // the turn would keep writing to a row that no longer exists.
+            if ctx.session_id.as_deref() == Some(*id) {
+                return Ok(Effect::Report(Report::untitled().warn(
+                    "that is the attached session — switch to another one first",
+                )));
+            }
+            Effect::Confirm(ConfirmedAction::DeleteSession((*id).to_string()))
+        }
         CommandId::Sessions => {
             let report = {
                 let list = app.sessions().list(Some(&app.workspace_key), 30)?;
@@ -1601,6 +1628,10 @@ pub fn apply_confirmed(app: &App, action: &ConfirmedAction) -> Result<Report> {
         ConfirmedAction::DeletePersona(id) => {
             let name = crate::persona_service::delete(app, id)?;
             Ok(Report::untitled().ok(format!("deleted persona `{name}`")))
+        }
+        ConfirmedAction::DeleteSession(id) => {
+            app.sessions().delete(id)?;
+            Ok(Report::untitled().ok(format!("deleted session {id} and its transcript")))
         }
         ConfirmedAction::DeleteProfileTrait(id) => services::profile_delete_fact(app, id),
         ConfirmedAction::SetProfileStatus { profile_id, status } => {

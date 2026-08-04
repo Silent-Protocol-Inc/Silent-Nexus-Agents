@@ -962,6 +962,12 @@ pub async fn session(app: &App, cmd: SessionCmd, json: bool) -> Result<()> {
             app.sessions().rename(&id, &title)?;
             ui.ok(&format!("session {id} title → {title}"));
         }
+        SessionCmd::Delete { id, yes } => {
+            let action = nexus_app::ConfirmedAction::DeleteSession(id);
+            if confirm(&ui, &action.prompt(), yes)? {
+                ui.render_report(&nexus_app::apply_confirmed(app, &action)?);
+            }
+        }
     }
     Ok(())
 }

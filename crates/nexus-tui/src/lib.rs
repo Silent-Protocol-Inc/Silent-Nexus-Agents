@@ -3265,6 +3265,22 @@ fn start_load(
                 Err(error) => st.system_sev(format!("subagents: {error}"), Sev::Err),
             }
         }
+        LoadRequest::SessionDelete => match app.sessions().list(Some(&app.workspace_key), 50) {
+            Ok(sessions) => push_menu(
+                st,
+                app,
+                menus::session_delete_menu(&sessions, st.session_id.as_deref()),
+            ),
+            Err(e) => st.system_sev(format!("sessions: {e}"), Sev::Err),
+        },
+        LoadRequest::PersonaEdit => match nexus_app::persona_service::list(app) {
+            Ok(personas) => push_menu(st, app, menus::persona_edit_menu(&personas)),
+            Err(e) => st.system_sev(format!("persona: {e}"), Sev::Err),
+        },
+        LoadRequest::PersonaDelete => match nexus_app::persona_service::list(app) {
+            Ok(personas) => push_menu(st, app, menus::persona_delete_menu(&personas)),
+            Err(e) => st.system_sev(format!("persona: {e}"), Sev::Err),
+        },
         LoadRequest::Persona => match nexus_app::persona_service::list(app) {
             Ok(personas) => {
                 let active = nexus_app::persona_service::active(app)

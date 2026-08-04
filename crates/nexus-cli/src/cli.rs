@@ -346,6 +346,12 @@ pub enum SessionCmd {
     Show { id: String },
     /// Persist a title for a session.
     Title { id: String, title: Vec<String> },
+    /// Permanently delete a session and its transcript.
+    Delete {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -408,6 +414,7 @@ pub enum PersonaCmd {
         yes: bool,
     },
     /// Select a persona, or pass no id to restore the built-in Nexus identity.
+    #[command(visible_alias = "use")]
     Select { id: Option<String> },
     /// Turn the active custom persona off; the built-in Nexus identity returns.
     Disable,

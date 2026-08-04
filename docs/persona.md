@@ -75,7 +75,8 @@ snx persona create <name> <instructions...> [--content-profile …] [--activate]
 snx persona duplicate <source> <new-name>      # independent copy
 snx persona derive <source> <new-name> <text>  # live link to the base
 snx persona edit <id> <instructions...>
-snx persona select <id> | snx persona disable
+snx persona select <id>   # alias: use
+snx persona disable
 snx persona status
 snx persona inspect <id>
 snx persona inspect-effective [--json]

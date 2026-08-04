@@ -156,28 +156,69 @@ pub fn resume_menu(candidates: &[ResumeCandidate]) -> Menu {
 }
 
 pub fn sessions_menu(sessions: &[nexus_agent::SessionMeta]) -> Menu {
-    let items: Vec<MenuItem> = sessions
-        .iter()
-        .map(|s| {
-            let title = if s.title.is_empty() {
-                s.id.as_str().to_string()
-            } else {
-                s.title.clone()
-            };
-            MenuItem::new(title, UiAction::AttachSession(s.id.as_str().to_string()))
-                .badge(s.status.clone())
-                .detail(format!(
-                    "{} · agent {} · model {} · updated {}",
-                    s.id.as_str(),
-                    s.agent,
-                    s.model,
-                    s.updated_at
-                ))
-        })
-        .collect();
+    let mut items: Vec<MenuItem> = Vec::new();
+    if !sessions.is_empty() {
+        items.push(
+            MenuItem::new(
+                "Delete session…",
+                UiAction::Load(LoadRequest::SessionDelete),
+            )
+            .detail("permanently remove a session and its transcript"),
+        );
+    }
+    items.extend(sessions.iter().map(|s| {
+        let title = if s.title.is_empty() {
+            s.id.as_str().to_string()
+        } else {
+            s.title.clone()
+        };
+        MenuItem::new(title, UiAction::AttachSession(s.id.as_str().to_string()))
+            .badge(s.status.clone())
+            .detail(format!(
+                "{} · agent {} · model {} · updated {}",
+                s.id.as_str(),
+                s.agent,
+                s.model,
+                s.updated_at
+            ))
+    }));
     let mut menu = Menu::new("sessions", items).route("/sessions").searchable();
     menu.hint = "Enter attaches the session · Esc close".into();
     menu.on_refresh = Some(UiAction::Load(LoadRequest::Sessions));
+    menu
+}
+
+/// Choose a session to delete.
+///
+/// The attached session is listed but disabled: hiding it would look like the
+/// session had already gone, and the command refuses it anyway.
+pub fn session_delete_menu(sessions: &[nexus_agent::SessionMeta], attached: Option<&str>) -> Menu {
+    let items: Vec<MenuItem> = sessions
+        .iter()
+        .map(|s| {
+            let id = s.id.as_str().to_string();
+            let title = if s.title.is_empty() {
+                id.clone()
+            } else {
+                s.title.clone()
+            };
+            let item = MenuItem::new(title, UiAction::RunCommand(format!("sessions delete {id}")))
+                .badge(s.status.clone())
+                .detail(format!(
+                    "{id} · agent {} · updated {}",
+                    s.agent, s.updated_at
+                ));
+            if attached == Some(s.id.as_str()) {
+                item.disabled("attached — switch to another session first")
+            } else {
+                item
+            }
+        })
+        .collect();
+    let mut menu = Menu::new("sessions // delete", items)
+        .route("/sessions")
+        .searchable();
+    menu.hint = "Enter asks to confirm · deletion cannot be undone · Esc back".into();
     menu
 }
 
@@ -1070,6 +1111,22 @@ pub fn personas_menu(
     } else {
         "open PERSONA FORGE: a real multiline editor for identity, tone, and conduct"
     })];
+    // A manager you can only create in is not a manager. Editing and deleting
+    // are chooser submenus so the fast path — Enter on a row selects it —
+    // keeps working.
+    if has_custom {
+        items.push(
+            MenuItem::new("Edit persona…", UiAction::Load(LoadRequest::PersonaEdit))
+                .detail("reopen a persona in PERSONA FORGE with its stored text"),
+        );
+        items.push(
+            MenuItem::new(
+                "Delete persona…",
+                UiAction::Load(LoadRequest::PersonaDelete),
+            )
+            .detail("remove a persona; the built-in Nexus identity cannot be deleted"),
+        );
+    }
     items.push(
         MenuItem::new(
             "Inspect effective request",
@@ -1128,6 +1185,65 @@ pub fn personas_menu(
         .branded(BrandVariant::Compact)
         .searchable()
         .hint("Enter selects · personas set voice and manner, never permissions")
+}
+
+/// Choose a persona to reopen in PERSONA FORGE.
+///
+/// The built-in identity is absent: it has no stored row to edit, and offering
+/// it would imply an edit that could not be saved.
+pub fn persona_edit_menu(personas: &[nexus_app::persona_service::PersonaSummary]) -> Menu {
+    let items = personas
+        .iter()
+        .filter(|persona| !persona.built_in)
+        .map(|persona| {
+            MenuItem::new(
+                persona.name.clone(),
+                UiAction::OpenPersonaForge {
+                    edit: Some(persona.id.clone()),
+                },
+            )
+            .badge(format!("v{}", persona.revision))
+            .detail(if persona.description.is_empty() {
+                persona.content_profile.label().to_string()
+            } else {
+                format!(
+                    "{} · {}",
+                    persona.content_profile.label(),
+                    persona.description
+                )
+            })
+        })
+        .collect();
+    Menu::new("persona // edit", items)
+        .route("/persona")
+        .branded(BrandVariant::Compact)
+        .searchable()
+        .hint("Enter opens PERSONA FORGE with the stored text · Esc back")
+}
+
+/// Choose a persona to delete. Deletion is confirmed by the command itself.
+pub fn persona_delete_menu(personas: &[nexus_app::persona_service::PersonaSummary]) -> Menu {
+    let items = personas
+        .iter()
+        .filter(|persona| !persona.built_in)
+        .map(|persona| {
+            MenuItem::new(
+                persona.name.clone(),
+                UiAction::RunCommand(format!("persona delete {}", persona.id)),
+            )
+            .badge(if persona.selected { "active" } else { "" }.to_string())
+            .detail(if persona.selected {
+                "currently active — deleting it restores the built-in Nexus identity".into()
+            } else {
+                persona.content_profile.label().to_string()
+            })
+        })
+        .collect();
+    Menu::new("persona // delete", items)
+        .route("/persona")
+        .branded(BrandVariant::Compact)
+        .searchable()
+        .hint("Enter asks to confirm · the built-in Nexus identity cannot be deleted · Esc back")
 }
 
 /// Structured profile cards backed by the canonical harness repository.

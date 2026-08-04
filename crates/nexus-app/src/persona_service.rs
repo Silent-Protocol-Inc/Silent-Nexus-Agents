@@ -838,6 +838,20 @@ mod tests {
         assert_eq!(first_control_character("a\nb\tc\r\n"), None);
     }
 
+    /// The manager lists the built-in identity as a selectable row, so every
+    /// path that consumes a chosen id has to recognise it as "clear" rather
+    /// than look it up. It has no stored row: looking it up is how choosing
+    /// `Nexus` in the manager failed with `not found`.
+    #[test]
+    fn the_built_in_identity_is_recognised_by_id_and_by_name() {
+        assert!(is_built_in(BUILTIN_NEXUS_ID));
+        assert!(is_built_in(BUILTIN_NEXUS_NAME));
+        assert!(is_built_in("nexus"));
+        assert!(is_built_in("  Nexus  "));
+        assert!(!is_built_in("akeno"));
+        assert!(!is_built_in("nexus-two"));
+    }
+
     #[test]
     fn the_default_test_prompt_asks_for_identity_not_content() {
         let lower = PERSONA_TEST_PROMPT.to_ascii_lowercase();
