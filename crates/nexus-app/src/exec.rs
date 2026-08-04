@@ -655,6 +655,21 @@ pub async fn execute(app: &App, ctx: &ExecCtx, cmd: &SlashCommand) -> Result<Eff
             ["export", id] => {
                 Effect::Report(Report::untitled().line(services::persona_export(app, id)?))
             }
+            ["import", path] => {
+                let raw = std::fs::read_to_string(path)?;
+                Effect::Report(services::persona_import(app, &raw, false)?)
+            }
+            // Reaches the model, so it runs on the async path rather than
+            // sitting behind a menu row that would silently do nothing.
+            ["test", rest @ ..] => {
+                let question = if rest.is_empty() {
+                    crate::persona_service::PERSONA_TEST_PROMPT.to_string()
+                } else {
+                    rest.join(" ")
+                };
+                let model = app.any_model_name();
+                Effect::Report(crate::persona_service::run_test(app, &model, &question).await?)
+            }
             ["delete", id] => Effect::Confirm(ConfirmedAction::DeletePersona(id.to_string())),
             _ => usage(def),
         },
