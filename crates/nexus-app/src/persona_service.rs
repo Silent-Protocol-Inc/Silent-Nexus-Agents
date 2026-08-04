@@ -274,9 +274,21 @@ pub fn create(app: &App, spec: &PersonaSpec) -> Result<PersonaSummary> {
         spec.description.trim(),
         &spec.instructions,
     )?;
-    let version = app
+    // Creation spans two stores, and the second one can still refuse — a
+    // version conflict, a failed write. Without this, the refusal was reported
+    // while the persona stayed in the first store, so `persona list` showed a
+    // persona the operator had been told was not saved. Undo the first write
+    // rather than leave the two disagreeing.
+    let version = match app
         .harness()
-        .sync_persona_with(&id, Some(metadata_from(spec)))?;
+        .sync_persona_with(&id, Some(metadata_from(spec)))
+    {
+        Ok(version) => version,
+        Err(error) => {
+            let _ = app.personas().delete(&id);
+            return Err(error);
+        }
+    };
     if spec.activate {
         select(app, Some(&id))?;
     }
@@ -317,9 +329,24 @@ pub fn edit(app: &App, id_or_name: &str, spec: &PersonaSpec) -> Result<PersonaSu
         &spec.instructions,
         parent,
     )?;
-    let version = app
+    // As in `create`, the second store can refuse after the first has already
+    // accepted. Here the previous text is known, so the undo restores it
+    // instead of deleting a persona the operator did not ask to lose.
+    let version = match app
         .harness()
-        .sync_persona_with(&existing.id, Some(metadata_from(spec)))?;
+        .sync_persona_with(&existing.id, Some(metadata_from(spec)))
+    {
+        Ok(version) => version,
+        Err(error) => {
+            let _ = app.personas().update(
+                &existing.id,
+                &existing.description,
+                &existing.instructions,
+                existing.parent_id.as_deref(),
+            );
+            return Err(error);
+        }
+    };
     // An edit to the persona that is currently active must reach the next turn,
     // not the next session: re-select it so the stored revision advances too.
     if app.read_ui_state(|state| state.selected_persona.as_deref() == Some(existing.id.as_str())) {

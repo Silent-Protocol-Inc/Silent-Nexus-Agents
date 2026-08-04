@@ -371,7 +371,7 @@ impl PersonaStore {
         description: &str,
         instructions: &str,
     ) -> Result<String> {
-        validate_persona(name, scope, instructions)?;
+        validate_persona(name, scope, description, instructions)?;
         if let Some(parent) = parent_id {
             let parent = self.get(parent)?;
             if scope == "global" && parent.scope != "global" {
@@ -438,7 +438,7 @@ impl PersonaStore {
         parent_id: Option<&str>,
     ) -> Result<()> {
         let current = self.get(id)?;
-        validate_persona(&current.name, &current.scope, instructions)?;
+        validate_persona(&current.name, &current.scope, description, instructions)?;
         if parent_id == Some(id) {
             return Err(NexusError::Other(
                 "a persona cannot inherit from itself".into(),
@@ -556,7 +556,16 @@ impl PersonaStore {
     }
 }
 
-fn validate_persona(name: &str, scope: &str, instructions: &str) -> Result<()> {
+/// Validate a persona before it is written.
+///
+/// The credential check belongs *here*, not only in the harness. Persona
+/// creation writes to two stores — this one, then the harness revision — and
+/// only the harness ran the scan. So a persona carrying a key was inserted
+/// here, refused there, and left behind: the operator saw
+/// "refusing to persist persona containing a likely secret" while the key sat
+/// in the `personas` table, readable through `persona list` and `inspect`.
+/// Refusing before the first write is what makes the message true.
+fn validate_persona(name: &str, scope: &str, description: &str, instructions: &str) -> Result<()> {
     if name.trim().is_empty()
         || !name
             .chars()
@@ -575,6 +584,9 @@ fn validate_persona(name: &str, scope: &str, instructions: &str) -> Result<()> {
         return Err(NexusError::Config(
             "persona instructions cannot be empty".into(),
         ));
+    }
+    for field in [name, description, instructions] {
+        nexus_core::secret::refuse_if_secret(field, "persona")?;
     }
     Ok(())
 }
@@ -1326,6 +1338,80 @@ mod tests {
         m.add(correction).expect("correction");
         let hits = m.search("build command cargo check", 10).expect("search");
         assert_eq!(hits[0].kind, MemoryKind::Correction);
+    }
+
+    /// A refused persona must not be in the table afterwards.
+    ///
+    /// It was: only the harness revision ran the credential scan, and it ran
+    /// *after* this store had already inserted the row. The operator was told
+    /// "refusing to persist persona containing a likely secret" and could then
+    /// read the key straight back out with `persona inspect`.
+    #[test]
+    fn a_persona_carrying_a_credential_is_never_written() {
+        let db = Store::open_in_memory().expect("store");
+        let personas = PersonaStore::new(db, "/ws");
+        let body = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let key = format!("{}-{body}", "sk");
+
+        let refused = personas.create(
+            "Leaky",
+            "project",
+            None,
+            "",
+            &format!("Always authenticate using {key} when talking to the API."),
+        );
+        assert!(refused.is_err(), "a credential must be refused");
+        assert!(
+            personas.list().expect("list").is_empty(),
+            "the refused persona was written anyway"
+        );
+
+        // The description is stored too, so it has to be scanned as well.
+        let refused = personas.create("Leaky", "project", None, &key, "Be concise.");
+        assert!(refused.is_err(), "a credential in the description slips by");
+        assert!(personas.list().expect("list").is_empty());
+    }
+
+    /// The same guard on the edit path: an existing persona must not become a
+    /// credential store by being rewritten.
+    #[test]
+    fn a_credential_cannot_be_edited_into_an_existing_persona() {
+        let db = Store::open_in_memory().expect("store");
+        let personas = PersonaStore::new(db, "/ws");
+        let id = personas
+            .create("Circe", "project", None, "", "Speak warmly.")
+            .expect("create");
+        let body = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+        let refused = personas.update(
+            &id,
+            "",
+            &format!("Authenticate with {}-{body}.", "sk"),
+            None,
+        );
+        assert!(refused.is_err(), "a credential edit must be refused");
+        assert_eq!(
+            personas.get(&id).expect("persona").instructions,
+            "Speak warmly.",
+            "the refused edit was applied anyway"
+        );
+    }
+
+    /// And the fix must not re-introduce the bug it replaced: ordinary prose
+    /// that merely *looks* key-shaped stays storable.
+    #[test]
+    fn prose_that_resembles_a_key_is_still_accepted() {
+        let db = Store::open_in_memory().expect("store");
+        let personas = PersonaStore::new(db, "/ws");
+        personas
+            .create(
+                "Circe",
+                "project",
+                None,
+                "asterisk-wrapped, risk-averse",
+                "Use asterisk-wrapped action lines and task-specific replies.",
+            )
+            .expect("ordinary prose must be storable");
     }
 
     #[test]

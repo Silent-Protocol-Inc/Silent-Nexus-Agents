@@ -4314,7 +4314,7 @@ impl HarnessRepository {
 
     pub fn save_approval_request(&self, request: &ApprovalRequest) -> Result<()> {
         let payload = encode(request)?;
-        if contains_likely_secret(&payload) {
+        if crate::secret::contains_likely_secret(&payload) {
             return Err(NexusError::PolicyDenied(
                 "refusing to persist an approval request containing a likely secret".into(),
             ));
@@ -4383,7 +4383,7 @@ impl HarnessRepository {
                 request.updated_at = now.clone();
                 request.resolved_at = Some(now.clone());
                 let encoded = encode(&request)?;
-                if contains_likely_secret(&encoded) {
+                if crate::secret::contains_likely_secret(&encoded) {
                     return Err(NexusError::PolicyDenied(
                         "refusing to persist an approval decision containing a likely secret"
                             .into(),
@@ -4420,7 +4420,7 @@ impl HarnessRepository {
 
     pub fn append_event(&self, event: &HarnessEvent) -> Result<()> {
         let payload = encode(event)?;
-        if contains_likely_secret(&payload) {
+        if crate::secret::contains_likely_secret(&payload) {
             return Err(NexusError::PolicyDenied(
                 "refusing to persist a harness event containing a likely secret".into(),
             ));
@@ -4706,61 +4706,9 @@ fn finish_transaction<T>(conn: &rusqlite::Connection, result: Result<T>) -> Resu
     }
 }
 
-/// Whether a payload carries something key-shaped.
-///
-/// The credential markers have to be matched as *credentials*, not as
-/// substrings. `contains("sk-")` fires on `asterisk-wrapped`, `risk-averse`,
-/// `task-specific`, and `desk-bound` — which is how a persona describing its
-/// own prose format got refused as a secret. A prefix only counts when it
-/// starts a token and is followed by enough key-shaped characters to be a key.
-fn contains_likely_secret(payload: &str) -> bool {
-    let lower = payload.to_ascii_lowercase();
-    lower.contains("\"authorization\":")
-        || lower.contains("\"api_key\":")
-        || has_key_after(&lower, "bearer ")
-        || has_key_after(&lower, "sk-")
-}
-
-/// The shortest run of key characters that distinguishes a real credential from
-/// a hyphenated English word. Provider keys are far longer than this; ordinary
-/// prose never reaches it.
-const MIN_KEY_CHARS: usize = 16;
-
-/// Whether `marker` appears at a token boundary followed by at least
-/// [`MIN_KEY_CHARS`] key-shaped characters.
-fn has_key_after(lower: &str, marker: &str) -> bool {
-    let mut from = 0usize;
-    while let Some(offset) = lower[from..].find(marker) {
-        let at = from + offset;
-        // `asterisk-` must not match `sk-`: the marker has to begin a token,
-        // not land in the middle of a word.
-        let starts_token = at == 0
-            || !lower[..at]
-                .chars()
-                .next_back()
-                .is_some_and(|previous| previous.is_ascii_alphanumeric());
-        if starts_token {
-            let key_chars = lower[at + marker.len()..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                .count();
-            if key_chars >= MIN_KEY_CHARS {
-                return true;
-            }
-        }
-        from = at + marker.len();
-    }
-    false
-}
-
 fn checked_payload<T: Serialize>(value: &T, record_kind: &str) -> Result<String> {
     let payload = encode(value)?;
-    let pattern_redacted = crate::redact::Redactor::new().redact(&payload);
-    if pattern_redacted != payload || contains_likely_secret(&payload) {
-        return Err(NexusError::PolicyDenied(format!(
-            "refusing to persist {record_kind} containing a likely secret"
-        )));
-    }
+    crate::secret::refuse_if_secret(&payload, record_kind)?;
     Ok(payload)
 }
 
@@ -4792,63 +4740,6 @@ mod tests {
 
     fn repository() -> HarnessRepository {
         HarnessRepository::new(Store::open_in_memory().expect("in-memory store"))
-    }
-
-    /// The credential scan must read prose as prose.
-    ///
-    /// `contains("sk-")` refused a persona that described its own format as
-    /// "asterisk-wrapped action lines", reporting it as a likely secret. Every
-    /// string below is ordinary English that a persona, memory, or profile note
-    /// could legitimately contain.
-    #[test]
-    fn hyphenated_words_are_not_mistaken_for_credentials() {
-        for prose in [
-            "asterisk-wrapped action lines",
-            "risk-averse planning",
-            "task-specific instructions",
-            "desk-bound work",
-            "brisk-paced delivery",
-            "a mask-like calm",
-            "the bearer of the message",
-            "bearer of bad news",
-        ] {
-            assert!(
-                !contains_likely_secret(prose),
-                "ordinary prose refused as a secret: {prose}"
-            );
-        }
-    }
-
-    /// And credentials must still be caught, including where they sit inside
-    /// surrounding text.
-    #[test]
-    fn real_credentials_are_still_refused() {
-        // Assembled at runtime rather than written out: a literal key here
-        // would be a credential-shaped string in tracked source, which the
-        // repository's own secret scan rightly refuses. Excluding this file
-        // from that scan would be the wrong trade — it would stop guarding
-        // everything else in it.
-        let body = "abcdefghijklmnopqrstuvwxyz0123456789";
-        for secret in [
-            format!("{}-{body}", "sk"),
-            format!("use {}-proj-{body} when calling", "sk"),
-            format!("Authorization: {} {body}", "Bearer"),
-            "{\"api_key\": \"anything\"}".to_string(),
-            "{\"authorization\": \"x\"}".to_string(),
-        ] {
-            assert!(
-                contains_likely_secret(&secret.to_ascii_lowercase()),
-                "credential not refused: {secret}"
-            );
-        }
-    }
-
-    /// A key prefix at the very start of the payload still counts — the token
-    /// boundary check must not require a preceding character to exist.
-    #[test]
-    fn a_credential_at_the_start_is_refused() {
-        let payload = format!("{}-0123456789abcdefghijklmnop rest of the note", "sk");
-        assert!(contains_likely_secret(&payload));
     }
 
     /// The card has to answer "what should I call you" in the field the prompt

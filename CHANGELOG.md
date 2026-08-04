@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.13.2] — 2026-08-04
+
+### Fixed
+
+- **A persona refused for carrying a credential was stored anyway.** Creating a
+  persona whose text contained an API key printed `refusing to persist persona
+  containing a likely secret` — and then wrote it. The key was readable
+  immediately afterwards through `persona list` and `persona inspect`.
+
+  Persona creation spans two stores, and only the second one scanned for
+  credentials. The first inserted the row unchecked; the second refused; nothing
+  removed the row. So the refusal was reported after the credential was already
+  on disk, and the message described an enforcement that had not happened.
+
+  The scan moved to `nexus_core::secret`, where **every** durable write can
+  reach it, and now runs in the persona store itself — before the first write,
+  across the name, description, and instructions. Creation and editing also undo
+  their first write if the second fails for any other reason, so the two stores
+  can no longer disagree about whether a persona exists.
+
+  Ordinary prose is unaffected: the 2.13.1 token-boundary rule still applies, so
+  `asterisk-wrapped action lines` remains storable.
+
 ## [2.13.1] — 2026-08-04
 
 ### Fixed
