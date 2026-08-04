@@ -510,6 +510,7 @@ impl PersonaForge {
             persistence_policy: self.persistence,
             adult_acknowledged: self.adult_acknowledged,
             activate: matches!(self.commit, ForgeCommit::CreateAndActivate),
+            sampling: nexus_core::persona::PersonaSampling::default(),
         }
     }
 

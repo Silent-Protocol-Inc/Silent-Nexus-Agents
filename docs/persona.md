@@ -47,22 +47,47 @@ the user's request
 The persona layer is pinned, so budget pressure sheds optional context —
 memories, observations, older history — and never the assistant's identity.
 
-**Wire order is a different question, and the persona is emitted last.** Every
-other instruction goes out first; the persona is the final thing a provider
-reads before the conversation itself. Authority and position had to come apart
-because they want opposite things: high precedence, but adjacent to the point of
-generation. A correctly-ranked persona buried in the middle of a long
-operational prompt is read as background prose, and models answered as the
-assistant the surrounding text described. Rank is unchanged.
+**Wire order is a different question, and the persona goes first.** It opens the
+system block; every other instruction follows it. Authority and position are
+separate concerns — rank decides who wins a conflict and what gets shed, position
+decides what the model reads as the frame for everything after. A correctly
+ranked persona buried in the middle of a long operational prompt is read as
+background prose, and models answered as the assistant the surrounding text
+described. Putting it first makes the rest of the prompt read as instructions
+given *to* that character rather than as a competing description of one. Rank is
+unchanged.
 
-The section is also prefixed with a sentence naming the persona as the identity
-to answer as, in the first person, including when asked what it is. That
-sentence grants nothing — everything above the persona is enforced in code
-before a token is generated — and it never alters the persona text, which is
-still passed through byte for byte.
+The section opens with one short sentence naming the persona — `Your name is
+<name>.` — and then the stored text, byte for byte. It is short on purpose: a
+persona's own text already establishes who it is, so the directive only has to
+remove the ambiguity a provider's default identity would otherwise fill. It
+grants nothing; everything above the persona is enforced in code before a token
+is generated.
+
+A persona may also carry its own sampling — see below.
 
 `/persona inspect-effective` prints the exact section body that would be sent,
-whether the directive is present, and what shape the next turn takes.
+whether the directive is present, the sampling in force, and what shape the next
+turn takes.
+
+## Per-persona sampling
+
+Voice is not only wording. A terse analytical persona and a florid roleplay one
+want genuinely different sampling, and running both at whatever the model config
+happens to say makes the second read flat and drift back toward assistant-speak.
+
+A persona can therefore set `temperature` (0.0–2.0) and `max_output_tokens`,
+which override the model's values for turns where that persona is active and for
+nothing else:
+
+```
+snx persona create "Cartographer" --temperature 1.1 --max-output-tokens 2048 …
+```
+
+Both are optional and independent. An unset field is not a zero — it leaves the
+operator's own model configuration alone. Values a provider would reject are
+refused when the persona is saved, not halfway through the first turn that uses
+it.
 
 ## Conversational turns
 

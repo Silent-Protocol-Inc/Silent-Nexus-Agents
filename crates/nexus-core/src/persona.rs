@@ -266,6 +266,52 @@ pub struct BehavioralPersona {
     /// The exact text sent to the model. Verbatim from storage: composed by
     /// declared inheritance, never summarized, filtered, or reworded.
     pub prompt: String,
+    /// Sampling settings this persona wants, if any.
+    ///
+    /// Voice is not only wording. A terse analytical persona and a florid
+    /// roleplay one want genuinely different sampling, and running both at
+    /// whatever the model config happens to say makes the second read flat and
+    /// drift back toward assistant-speak. These override the model's values for
+    /// turns where the persona is active, and nothing else.
+    #[serde(default)]
+    pub sampling: PersonaSampling,
+}
+
+/// Per-persona sampling overrides.
+///
+/// `None` means "leave the model's own setting alone" — an unset field is not a
+/// zero, and a persona that says nothing about temperature must not silently
+/// reset one the operator configured.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct PersonaSampling {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+}
+
+impl PersonaSampling {
+    pub const fn is_empty(&self) -> bool {
+        self.temperature.is_none() && self.max_output_tokens.is_none()
+    }
+
+    /// Reject values a provider would refuse, so a bad persona is caught when
+    /// it is written rather than when a turn fails.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(temperature) = self.temperature {
+            if !(0.0..=2.0).contains(&temperature) || !temperature.is_finite() {
+                return Err(format!(
+                    "persona temperature must be between 0.0 and 2.0, got {temperature}"
+                ));
+            }
+        }
+        if let Some(max) = self.max_output_tokens {
+            if max == 0 {
+                return Err("persona max output tokens must be greater than zero".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl BehavioralPersona {
@@ -277,6 +323,7 @@ impl BehavioralPersona {
             origin: PersonaOrigin::BuiltIn,
             content_profile: ContentProfile::General,
             prompt: BUILTIN_NEXUS_PROMPT.to_string(),
+            sampling: PersonaSampling::default(),
         }
     }
 
@@ -294,7 +341,14 @@ impl BehavioralPersona {
             origin: PersonaOrigin::Custom,
             content_profile,
             prompt: prompt.into(),
+            sampling: PersonaSampling::default(),
         }
+    }
+
+    /// Attach sampling overrides.
+    pub fn with_sampling(mut self, sampling: PersonaSampling) -> Self {
+        self.sampling = sampling;
+        self
     }
 
     /// The single decision point. A custom persona with usable text replaces
@@ -320,32 +374,15 @@ impl BehavioralPersona {
         format!("active persona {} v{}", self.name, self.revision)
     }
 
-    /// The sentence that turns persona text into an instruction.
+    /// The sentence that names the persona.
     ///
-    /// Rank decides authority *inside* the compiler. On the wire every section
-    /// arrives as one more labelled block, so a persona shipped bare is just
-    /// prose sitting in a prompt that is otherwise about operating a
-    /// repository — and the model answers as the assistant it was already
-    /// being. Naming the persona as the identity to speak as is what makes the
-    /// difference between describing a character and being one.
-    ///
-    /// It grants nothing. Everything above this layer is enforced in code
-    /// before a token is generated, so saying so here costs nothing and stops
-    /// the persona from being read as a capability request.
+    /// Short by design. A persona's own text already establishes who it is; the
+    /// job here is only to make the name unambiguous before that text starts,
+    /// so a model has no reason to fall back on whatever identity its provider
+    /// gave it. It grants nothing — everything above this layer is enforced in
+    /// code before a token is generated.
     pub fn adoption_directive(&self) -> String {
-        // Deliberately does not open with "You are <name>": personas commonly
-        // begin with that line themselves, and repeating it hands the model two
-        // identity statements to reconcile — the exact failure this layer
-        // exists to prevent. Naming the persona once, as the thing to answer
-        // as, is enough.
-        format!(
-            "Adopt the following identity as your own for every user-facing response on this \
-             turn. Answer as {}, in the first person, including when asked who or what you \
-             are, and hold that voice, manner, and content preference for the whole turn. \
-             This defines who you are and how you speak — it grants no tool, permission, or \
-             authority, and it relaxes nothing in the sections above it.",
-            self.name
-        )
+        format!("Your name is {}.", self.name)
     }
 
     /// The full `ActivePersona` section body: the directive, then the stored

@@ -377,6 +377,15 @@ pub enum PersonaCmd {
         /// and adult fictional characters. No identity data is collected.
         #[arg(long)]
         adult_ack: bool,
+        /// Sampling temperature to use while this persona is active (0.0-2.0).
+        /// Unset leaves the model's own setting alone. A terse analytical
+        /// persona and a florid roleplay one want different values.
+        #[arg(long)]
+        temperature: Option<f32>,
+        /// Output-token ceiling while this persona is active. Unset leaves the
+        /// model's own setting alone.
+        #[arg(long)]
+        max_output_tokens: Option<u32>,
         /// Select it as the active behavioral persona once created.
         #[arg(long)]
         activate: bool,

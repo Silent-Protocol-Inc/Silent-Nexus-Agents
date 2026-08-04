@@ -994,6 +994,8 @@ pub async fn persona(app: &App, cmd: PersonaCmd, json: bool) -> Result<()> {
             content_profile,
             category,
             adult_ack,
+            temperature,
+            max_output_tokens,
             activate,
         } => {
             let profile =
@@ -1010,6 +1012,10 @@ pub async fn persona(app: &App, cmd: PersonaCmd, json: bool) -> Result<()> {
             spec.category = category;
             spec.content_profile = profile;
             spec.adult_acknowledged = adult_ack;
+            spec.sampling = nexus_core::persona::PersonaSampling {
+                temperature,
+                max_output_tokens,
+            };
             spec.activate = activate;
             if let Some(parent) = parent {
                 spec.base_persona_id = Some(parent);

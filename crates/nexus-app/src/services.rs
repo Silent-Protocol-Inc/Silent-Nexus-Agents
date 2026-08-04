@@ -1036,8 +1036,20 @@ pub fn persona_effective_report(app: &App) -> Result<Report> {
             yes_no(effective.adoption_directive_present),
         )
         .field(
-            "persona emitted last on the wire",
-            yes_no(effective.persona_emitted_last),
+            "persona emitted first on the wire",
+            yes_no(effective.persona_emitted_first),
+        )
+        .field(
+            "persona temperature",
+            effective
+                .persona_temperature
+                .map_or_else(|| "model default".to_string(), |t| t.to_string()),
+        )
+        .field(
+            "persona max output tokens",
+            effective
+                .persona_max_output_tokens
+                .map_or_else(|| "model default".to_string(), |t| t.to_string()),
         )
         .field("next turn shape", &effective.turn_shape);
     if !effective.channel_limitation.is_empty() {
@@ -1058,7 +1070,7 @@ pub fn persona_effective_report(app: &App) -> Result<Report> {
     // The section body, not the stored prompt: the directive travels with it,
     // and showing the stored text alone would misreport what is sent.
     Ok(report
-        .header("active behavioral persona — emitted last, immediately before the conversation")
+        .header("active behavioral persona — emitted first, before every other instruction")
         .line(&effective.persona_section_body)
         .header("operational agent contract")
         .line(&effective.operational_contract)

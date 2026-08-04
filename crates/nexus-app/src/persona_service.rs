@@ -46,6 +46,9 @@ pub struct PersonaSpec {
     /// and adult fictional characters. Only this flag is kept — never identity
     /// data, and no document is ever requested.
     pub adult_acknowledged: bool,
+    /// Sampling this persona wants while active. Unset fields leave the model's
+    /// own configuration alone.
+    pub sampling: nexus_core::persona::PersonaSampling,
     pub activate: bool,
 }
 
@@ -142,9 +145,12 @@ pub struct EffectiveRequest {
     /// Whether the section is prefixed with the sentence naming the persona as
     /// the identity to answer as.
     pub adoption_directive_present: bool,
-    /// The persona is emitted after every other instruction and immediately
-    /// before the conversation.
-    pub persona_emitted_last: bool,
+    /// The persona opens the system block, before every other instruction.
+    pub persona_emitted_first: bool,
+    /// Sampling this persona imposes while active; empty means the model's own
+    /// configuration is left alone.
+    pub persona_temperature: Option<f32>,
+    pub persona_max_output_tokens: Option<u32>,
     /// Which sections the *next* turn would carry, decided by the same function
     /// the loop calls.
     pub turn_shape: String,
@@ -222,6 +228,10 @@ pub fn validate_name(app: &App, name: &str, existing_id: Option<&str>) -> Result
 fn validate_spec(app: &App, spec: &PersonaSpec, existing_id: Option<&str>) -> Result<()> {
     validate_name(app, &spec.name, existing_id)?;
     validate_prompt(&spec.instructions)?;
+    // Caught here rather than at the provider: a persona asking for
+    // temperature 5 should fail when it is saved, not halfway through the first
+    // turn that uses it.
+    spec.sampling.validate().map_err(NexusError::Config)?;
     if spec.content_profile.requires_acknowledgment() && !spec.adult_acknowledged {
         return Err(NexusError::Config(
             "an adults-only persona needs the one-time acknowledgment that it is intended \
@@ -261,6 +271,7 @@ fn metadata_from(spec: &PersonaSpec) -> PersonaMetadata {
         recommended_models: spec.recommended_models.clone(),
         recommended_agents: spec.recommended_agents.clone(),
         adult_acknowledgment: spec.adult_acknowledged.then(nexus_core::now_rfc3339),
+        sampling: spec.sampling,
     }
 }
 
@@ -518,6 +529,7 @@ pub fn import(app: &App, raw: &str, activate: bool) -> Result<PersonaSummary> {
         instructions: document.system_prompt,
         scope: "project".into(),
         base_persona_id: None,
+        sampling: nexus_core::persona::PersonaSampling::default(),
         inheritance_mode: InheritanceMode::Snapshot,
         content_profile: document.content_profile,
         category: document.category,
@@ -776,14 +788,15 @@ pub fn effective_request(app: &App) -> Result<EffectiveRequest> {
     } else {
         persona.prompt.clone()
     };
-    let adoption_directive_present = section_body.starts_with("Adopt the following identity");
+    let adoption_directive_present = section_body.starts_with("Your name is ");
+    let persona_sampling = persona.sampling;
     // Counted from the section that would actually be emitted. One persona is a
     // property of `BehavioralPersona::resolve` returning a single value — but
     // counting the sections is what would notice if a second one ever appeared,
     // and asserting it costs nothing.
     let behavioral_persona_count = usize::from(!section_body.trim().is_empty());
     let duplicate_persona_sections = section_body
-        .matches("Adopt the following identity")
+        .matches("Your name is ")
         .count()
         .saturating_sub(1);
     // The shape the next turn would take, from the loop's own decision
@@ -825,11 +838,13 @@ pub fn effective_request(app: &App) -> Result<EffectiveRequest> {
         persona_section_body: section_body,
         adoption_directive_present,
         // Not a runtime measurement: the section is constructed with
-        // `.emit_last()` in one place, and `persona_requests.rs` asserts on the
-        // recorded outbound request that it really is the final system
-        // instruction. Reported here so the operator can see the intent
-        // alongside the test that holds it.
-        persona_emitted_last: true,
+        // `WirePosition::First` in one place, and `persona_requests.rs` asserts
+        // on the recorded outbound request that it really does open the system
+        // block. Reported here so the operator can see the intent alongside the
+        // test that holds it.
+        persona_emitted_first: true,
+        persona_temperature: persona_sampling.temperature,
+        persona_max_output_tokens: persona_sampling.max_output_tokens,
         turn_shape: shape.describe().to_string(),
         provider_caveat: PROVIDER_CAVEAT.into(),
     })

@@ -811,6 +811,10 @@ pub struct PersonaVersion {
     /// timestamp — no identity data is requested or kept.
     #[serde(default)]
     pub adult_acknowledgment: Option<String>,
+    /// Sampling this persona wants while it is active. Payload JSON with a
+    /// default, so personas stored before this existed still load.
+    #[serde(default)]
+    pub sampling: crate::persona::PersonaSampling,
 }
 
 fn default_true() -> bool {
@@ -853,6 +857,7 @@ impl PersonaVersion {
             recommended_models: Vec::new(),
             recommended_agents: Vec::new(),
             adult_acknowledgment: None,
+            sampling: crate::persona::PersonaSampling::default(),
         })
     }
 
@@ -869,6 +874,7 @@ impl PersonaVersion {
             self.content_profile,
             resolved_prompt,
         )
+        .with_sampling(self.sampling)
     }
 }
 

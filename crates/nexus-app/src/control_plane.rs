@@ -1278,6 +1278,8 @@ pub struct PersonaMetadata {
     pub recommended_models: Vec<String>,
     pub recommended_agents: Vec<String>,
     pub adult_acknowledgment: Option<String>,
+    /// Sampling overrides carried with the persona revision.
+    pub sampling: nexus_core::persona::PersonaSampling,
 }
 
 impl PersonaMetadata {
@@ -1316,6 +1318,7 @@ impl PersonaMetadata {
         version
             .adult_acknowledgment
             .clone_from(&self.adult_acknowledgment);
+        version.sampling = self.sampling;
     }
 }
 
@@ -1327,6 +1330,7 @@ impl From<&PersonaVersion> for PersonaMetadata {
             base_persona_id: version.base_persona_id.clone(),
             inheritance_mode: version.inheritance_mode,
             persistence_policy: version.persistence_policy,
+            sampling: version.sampling,
             enabled: version.enabled,
             compatibility_notes: version.compatibility_notes.clone(),
             recommended_providers: version.recommended_providers.clone(),

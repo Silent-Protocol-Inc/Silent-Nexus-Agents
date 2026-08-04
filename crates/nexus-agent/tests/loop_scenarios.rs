@@ -720,43 +720,27 @@ async fn prompt_precedence_matches_the_audited_contract() {
     ];
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
 
-    // The persona is the last system message: after every other instruction,
-    // immediately before the conversation.
-    let last_system = request
-        .messages
-        .iter()
-        .rposition(|message| message.role == nexus_models::types::Role::System)
-        .expect("system messages");
+    // The persona opens the system block, before every other instruction.
     assert_eq!(
         position("PERSONA_PRECEDENCE_MARKER"),
-        last_system,
-        "the persona must be the final system instruction"
-    );
-    assert!(
-        last_system
-            < request
-                .messages
-                .iter()
-                .position(|message| message.role == nexus_models::types::Role::User)
-                .expect("user message"),
-        "the persona must still precede the conversation"
+        0,
+        "the persona must be the first system instruction"
     );
 
-    // And the directive that makes it an instruction travels with it, exactly
-    // once.
-    let persona_message = &request.messages[last_system].content;
+    // And the name line that identifies it travels with it, exactly once.
+    let persona_message = &request.messages[0].content;
     assert!(
-        persona_message.contains("Adopt the following identity"),
-        "persona section carries no adoption directive: {persona_message}"
+        persona_message.contains("Your name is "),
+        "persona section is not named: {persona_message}"
     );
     assert_eq!(
         request
             .messages
             .iter()
-            .filter(|message| message.content.contains("Adopt the following identity"))
+            .filter(|message| message.content.contains("Your name is "))
             .count(),
         1,
-        "the adoption directive must appear exactly once"
+        "the name line must appear exactly once"
     );
 }
 
@@ -1182,8 +1166,15 @@ async fn a_preauthorized_run_says_so_in_the_prompt_and_an_ordinary_one_does_not(
         let dir = tempfile::tempdir().expect("dir");
         let provider = Arc::new(MockProvider::new(vec![MockScript::Text("done".into())]));
         let (runtime, session) = runtime_with_provider(provider.clone(), dir.path());
+        // Work-shaped on purpose. Pre-authorization is about escalating tool
+        // calls, and a conversational turn is given no tools to escalate with,
+        // so the policy section it lives in is correctly absent there.
         AgentLoop::new(runtime, AgentRole::Implementer)
-            .run(&session, "do the thing", approver)
+            .run(
+                &session,
+                "implement the change in the repository and run the tests",
+                approver,
+            )
             .await
             .expect("run");
         provider

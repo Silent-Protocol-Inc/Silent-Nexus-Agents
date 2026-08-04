@@ -1,5 +1,50 @@
 # Changelog
 
+## [2.15.0] — 2026-08-05
+
+Personas again. 2.14.0 delivered the persona as an instruction; this release
+changes where it sits, how it is introduced, and what the model is allowed to
+sample at while it is active.
+
+### Changed
+
+- **The persona now opens the system block instead of closing it.** 2.14.0 moved
+  it last, on the reasoning that the position nearest generation is weighted
+  most strongly for voice. Putting it first works better: the rest of the
+  prompt then reads as instructions given *to* that character, rather than as a
+  competing description of one that the persona has to argue with afterwards.
+  Authority is untouched either way — `ActivePersona` is still rank 4 and still
+  pinned. Only wire position changed.
+
+- **The adoption directive is one sentence: `Your name is <name>.`** It replaces
+  the paragraph 2.14.0 prefixed. The persona's own text already establishes who
+  it is; the directive only has to remove the ambiguity a provider's default
+  identity would otherwise fill, and a long preamble about what the identity
+  does and does not grant is prompt the model has to reconcile before it reaches
+  the character. It still grants nothing, and it still never alters the persona
+  text.
+
+### Added
+
+- **Per-persona sampling.** A persona can carry `temperature` (0.0–2.0) and
+  `max_output_tokens`, applied only on turns where that persona is active:
+
+  ```
+  snx persona create "Cartographer" --temperature 1.1 --max-output-tokens 2048 …
+  ```
+
+  A terse analytical persona and a florid roleplay one want genuinely different
+  sampling, and running both at whatever the model config says makes the second
+  read flat. Both fields are optional and independent; unset means "leave the
+  model's own setting alone", which is not the same as zero. Values a provider
+  would reject are refused when the persona is saved rather than mid-turn.
+
+### Note
+
+As in 2.14.0: a hosted backend applies its own identity and content policy
+server-side, above anything sent from here. None of this overrides that, and
+none of it is claimed to.
+
 ## [2.14.0] — 2026-08-04
 
 ### Fixed
