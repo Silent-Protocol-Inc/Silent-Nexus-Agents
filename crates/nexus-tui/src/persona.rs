@@ -928,7 +928,7 @@ mod tests {
         assert!(!empty.stages().contains(&ForgeStage::Base));
         let with_base = PersonaForge::create(vec![BaseChoice {
             id: "p1".into(),
-            name: "odysseus".into(),
+            name: "cartographer".into(),
             content_profile: ContentProfile::General,
         }]);
         assert!(with_base.stages().contains(&ForgeStage::Base));
@@ -951,12 +951,12 @@ mod tests {
     #[test]
     fn structured_sections_compose_only_what_was_filled_in() {
         let sections = vec![
-            ("Identity", "You are Odysseus.".to_string()),
+            ("Identity", "You are Cartographer.".to_string()),
             ("Tone", String::new()),
             ("Custom instructions", "Never break character.".to_string()),
         ];
         let composed = compose_sections(&sections);
-        assert!(composed.starts_with("Identity:\nYou are Odysseus."));
+        assert!(composed.starts_with("Identity:\nYou are Cartographer."));
         assert!(composed.contains("Never break character."));
         assert!(!composed.contains("Tone"));
     }
@@ -984,7 +984,7 @@ mod tests {
             forge.validation_error().as_deref(),
             Some("a persona needs a name")
         );
-        forge.name = "odysseus".into();
+        forge.name = "cartographer".into();
         // The text is mature and that is not a validation concern.
         assert_eq!(forge.validation_error(), None);
         let ForgeOutcome::Submit(spec) = forge.handle_key(ctrl('s')) else {
@@ -996,7 +996,7 @@ mod tests {
     #[test]
     fn adults_only_needs_the_acknowledgment_before_it_can_save() {
         let mut forge = PersonaForge::create(Vec::new());
-        forge.name = "odysseus".into();
+        forge.name = "cartographer".into();
         forge.raw = MultilineEditor::new("adult fiction");
         forge.content_profile = ContentProfile::AdultsOnly;
         assert!(forge
@@ -1019,23 +1019,23 @@ mod tests {
 
         let editing = PersonaForge::edit(
             "persona_abc",
-            "odysseus",
+            "cartographer",
             "a wanderer",
-            "You are Odysseus.",
+            "You are Cartographer.",
             ContentProfile::General,
             Vec::new(),
         );
         assert_eq!(editing.editing.as_deref(), Some("persona_abc"));
         // Editing loads the stored text unchanged and does not re-activate on
         // save unless the operator asks.
-        assert_eq!(editing.prompt(), "You are Odysseus.");
+        assert_eq!(editing.prompt(), "You are Cartographer.");
         assert_eq!(editing.commit, ForgeCommit::CreateOnly);
     }
 
     #[test]
     fn session_only_is_refused_before_a_page_of_persona_is_typed() {
         let mut forge = PersonaForge::create(Vec::new());
-        forge.name = "odysseus".into();
+        forge.name = "cartographer".into();
         forge.raw = MultilineEditor::new("be brief");
         assert_eq!(forge.validation_error(), None);
         forge.persistence = PersistencePolicy::SessionOnly;
@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     fn the_forge_never_produces_a_command_line() {
         let mut forge = PersonaForge::create(Vec::new());
-        forge.name = "odysseus".into();
+        forge.name = "cartographer".into();
         forge.raw = MultilineEditor::new("be brief");
         let spec = forge.spec();
         assert!(!spec.instructions.starts_with('/'));

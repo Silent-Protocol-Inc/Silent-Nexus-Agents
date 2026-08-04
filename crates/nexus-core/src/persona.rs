@@ -369,7 +369,7 @@ impl BehavioralPersona {
     }
 
     /// Label for the prompt section and the inspector, e.g.
-    /// `active persona odysseus v3`.
+    /// `active persona cartographer v3`.
     pub fn section_label(&self) -> String {
         format!("active persona {} v{}", self.name, self.revision)
     }
@@ -428,10 +428,10 @@ mod tests {
 
         let custom = BehavioralPersona::custom(
             "persona_x",
-            "odysseus",
+            "cartographer",
             3,
             ContentProfile::Mature,
-            "You are Odysseus.",
+            "You are Cartographer.",
         );
         let resolved = BehavioralPersona::resolve(Some(custom.clone()));
         assert_eq!(resolved, custom);
@@ -504,7 +504,7 @@ mod tests {
     fn the_built_in_identity_is_reserved() {
         assert!(is_reserved_persona_id(BUILTIN_NEXUS_ID));
         assert!(is_reserved_persona_name("nexus"));
-        assert!(!is_reserved_persona_name("odysseus"));
+        assert!(!is_reserved_persona_name("cartographer"));
     }
 
     #[test]

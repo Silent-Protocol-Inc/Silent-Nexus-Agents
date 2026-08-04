@@ -778,8 +778,8 @@ mod tests {
                 ),
                 ContextSection::pinned(
                     AuthorityLayer::ActivePersona,
-                    "active persona odysseus v3",
-                    "You are Odysseus, a wandering strategist.",
+                    "active persona cartographer v3",
+                    "You are Cartographer, a patient mapmaker.",
                 ),
                 ContextSection::optional(
                     AuthorityLayer::ScopedMemory,
@@ -797,7 +797,7 @@ mod tests {
         let persona_sections = compiled
             .messages
             .iter()
-            .filter(|message| message.content.contains("You are Odysseus"))
+            .filter(|message| message.content.contains("You are Cartographer"))
             .count();
         assert_eq!(persona_sections, 1, "{:#?}", compiled.messages);
         assert!(compiled
@@ -814,7 +814,7 @@ mod tests {
             "the budget was never actually under pressure"
         );
         assert!(compiled.messages.iter().any(|message| message.content
-            == "[active persona odysseus v3]\nYou are Odysseus, a wandering strategist."));
+            == "[active persona cartographer v3]\nYou are Cartographer, a patient mapmaker."));
     }
 
     #[test]
