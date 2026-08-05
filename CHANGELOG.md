@@ -1,5 +1,69 @@
 # Changelog
 
+## [2.16.2] — 2026-08-05
+
+The persona moves to the strongest instruction channel each provider offers.
+
+### Changed
+
+- **On the ChatGPT backend the persona is now a `developer` item in the
+  Responses `input` array, not part of the `instructions` field.**
+
+  That backend has two application-instruction channels and they are not equal.
+  Probed against the live endpoint:
+
+  | | Result |
+  |---|---|
+  | `system` item inside `input` | HTTP 400 — `{"detail":"System messages are not allowed"}` |
+  | `developer` item inside `input` | accepted, and obeyed |
+  | `instructions` vs a conflicting `developer` item | **the developer item wins** |
+
+  The conflict was run in both orderings and with the marker words swapped, to
+  rule out position and word bias. Position inside `input` made no difference;
+  the channel did.
+
+  Sending everything through `instructions` therefore put the persona on the
+  weaker of the two channels, where any other section in the same field could
+  outrank it. The persona now travels alone on the stronger one, and it is not
+  also folded into `instructions` — a test asserts the split, because delivering
+  it twice would put a copy back on the losing channel.
+
+- **New `Role::Developer`.** Providers with a single instruction channel fold it
+  back onto their system role, so Ollama, Anthropic, the Claude CLI bridge, and
+  every OpenAI-compatible endpoint send exactly what they sent before. The
+  OpenAI-compatible adapter deliberately does *not* emit a literal `developer`
+  role, because it also serves llama.cpp, LM Studio, and arbitrary endpoints
+  that reject an unknown role.
+
+  Every predicate that used `role == System` to mean "part of the instruction
+  block" now asks `Role::is_instruction()`. The persona is emitted first, so a
+  `take_while(role == System)` would otherwise have stopped at the first message
+  and concluded the prompt had no instructions at all.
+
+- **`/persona inspect-effective` reports `developer channel`** for Codex instead
+  of `dedicated instructions field`. This is capability reporting, so it says
+  what was measured rather than what was intended.
+
+### Scope, stated plainly
+
+This raises the persona against **the other sections we send**. It does not
+raise it against a provider's own server-side policy, which is applied above
+everything in the request. A hosted backend can still answer in its own voice or
+decline, and no channel choice changes that.
+
+### Compatibility
+
+PATCH. No schema change, no configuration change, no migration — an older binary
+reads the same `config.toml` unchanged, which is the condition this repository
+treats as the MINOR trigger (`deny_unknown_fields` means a new config key would
+make an older binary refuse to start, and there is no new key here).
+
+Recorded for accuracy: `Role` gains a variant and `ContextSection` gains a
+`channel` field. Added public API is normally a MINOR signal, and the operator's
+call was that this ships as a fix to persona delivery rather than a feature. The
+new field defaults to the previous behavior, so nothing that reads either type
+changes meaning.
+
 ## [2.16.1] — 2026-08-05
 
 One fix. A conversational turn no longer carries the approved profile card.

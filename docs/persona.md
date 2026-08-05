@@ -224,12 +224,26 @@ honestly:
 
 | Channel | Adapters | Authority |
 |---|---|---|
+| developer channel | Codex Responses | full — the strongest channel that backend offers |
 | system role | Ollama, OpenAI-compatible, local endpoints | full |
-| dedicated instructions field | Anthropic, Codex Responses | full |
+| dedicated instructions field | Anthropic | full |
 | prefix fallback | Claude CLI bridge | **weaker** — disclosed |
 | unsupported | — | persona cannot be delivered |
 
 A weak channel is stated as a limitation rather than presented as equivalent.
+
+The ChatGPT backend has two instruction channels and they are not equal. Probed
+against the live endpoint: a `system` item inside the Responses `input` array is
+refused outright (HTTP 400, *"System messages are not allowed"*), a `developer`
+item is accepted, and when `instructions` and a developer item give conflicting
+orders **the developer item wins** — in both orderings, with the marker words
+swapped to rule out bias. The persona therefore travels as a `developer` item
+while every other section stays in `instructions`, so nothing we send can
+outrank it.
+
+This raises the persona against **the other sections in the request**. It does
+not raise it against the provider's own server-side policy, which sits above
+everything sent from here — see below.
 
 Note for local models served through Ollama: when a request supplies a system
 message, Ollama does **not** also apply the model's `Modelfile` `SYSTEM` block.

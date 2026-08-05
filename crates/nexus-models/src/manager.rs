@@ -6,7 +6,7 @@ use crate::openai_compat::OpenAiCompatProvider;
 use crate::provider::ModelProvider;
 use crate::types::{
     FallbackEligibility, ModelCapabilities, ModelLocality, ModelPrivacy, ModelRequest,
-    ModelResponse, ProviderHealth, Role, StreamEvent, TaskClass,
+    ModelResponse, ProviderHealth, StreamEvent, TaskClass,
 };
 use futures::stream::BoxStream;
 use nexus_core::config::{Config, ModelConfig, RoutingConfig};
@@ -346,7 +346,7 @@ fn wire_incompatibility(
     if request
         .messages
         .iter()
-        .any(|message| message.role == Role::System)
+        .any(|message| message.role.is_instruction())
         && primary.system_prompt != fallback.system_prompt
     {
         return Some("system-role capability differs from the routed model");

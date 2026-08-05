@@ -119,6 +119,28 @@ pub struct ContextSection {
     /// approval, and audit are applied in code.
     #[serde(default)]
     pub wire_position: WirePosition,
+    /// Which instruction channel carries this section.
+    ///
+    /// Orthogonal to both rank and position: rank decides who wins a conflict,
+    /// position decides reading order, and this decides *which field of the
+    /// request* the section travels in. It matters because at least one
+    /// provider ranks its two application channels differently, and a section
+    /// on the weaker one loses to a section on the stronger one no matter where
+    /// it sits.
+    #[serde(default)]
+    pub channel: WireChannel,
+}
+
+/// The provider field an instruction section travels in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireChannel {
+    /// The ordinary system prompt.
+    #[default]
+    System,
+    /// The provider's strongest application-instruction channel, where it has
+    /// one. Providers with a single channel fall back to the system prompt.
+    Developer,
 }
 
 /// Where a section is placed among the emitted system messages.
@@ -157,6 +179,7 @@ impl ContextSection {
             pinned: true,
             max_tokens: None,
             wire_position: WirePosition::Normal,
+            channel: WireChannel::System,
         }
     }
 
@@ -172,6 +195,7 @@ impl ContextSection {
             pinned: false,
             max_tokens: None,
             wire_position: WirePosition::Normal,
+            channel: WireChannel::System,
         }
     }
 
@@ -184,6 +208,13 @@ impl ContextSection {
     /// See [`ContextSection::wire_position`].
     pub fn at(mut self, position: WirePosition) -> Self {
         self.wire_position = position;
+        self
+    }
+
+    /// Carry this section on a specific instruction channel.
+    /// See [`ContextSection::channel`].
+    pub fn on(mut self, channel: WireChannel) -> Self {
+        self.channel = channel;
         self
     }
 
@@ -339,7 +370,13 @@ impl ContextCompiler {
         included_sections.sort_by_key(|section| section.wire_position.sort_key());
         let mut messages: Vec<ChatMessage> = included_sections
             .iter()
-            .map(|section| ChatMessage::system(format!("[{}]\n{}", section.label, section.content)))
+            .map(|section| {
+                let body = format!("[{}]\n{}", section.label, section.content);
+                match section.channel {
+                    WireChannel::System => ChatMessage::system(body),
+                    WireChannel::Developer => ChatMessage::developer(body),
+                }
+            })
             .collect();
         messages.extend_from_slice(history);
 
@@ -347,7 +384,7 @@ impl ContextCompiler {
         {
             let system_count = messages
                 .iter()
-                .take_while(|message| message.role == Role::System)
+                .take_while(|message| message.role.is_instruction())
                 .count();
             let (compacted, _) = self.manager.compact(&[], &messages[system_count..], None);
             messages.truncate(system_count);
@@ -551,12 +588,12 @@ impl ContextManager {
         // Keep any leading system messages out of summarization.
         let system: Vec<ChatMessage> = old
             .iter()
-            .filter(|m| m.role == Role::System)
+            .filter(|m| m.role.is_instruction())
             .cloned()
             .collect();
         let to_summarize: Vec<ChatMessage> = old
             .iter()
-            .filter(|m| m.role != Role::System)
+            .filter(|m| !m.role.is_instruction())
             .cloned()
             .collect();
         let summary_text = match summarizer {

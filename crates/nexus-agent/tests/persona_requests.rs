@@ -118,11 +118,15 @@ fn select_persona(store: &Store, workspace: &str, session: &SessionId, prompt: &
     persona.persona_id
 }
 
+/// The whole instruction block, whichever channel each section travels on.
+///
+/// The persona is a `Developer` message now; every other section is `System`.
+/// Tests that mean "what was the model instructed to do" want both.
 fn system_text(request: &nexus_models::ModelRequest) -> String {
     request
         .messages
         .iter()
-        .filter(|message| message.role == Role::System)
+        .filter(|message| message.role.is_instruction())
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>()
         .join("\n")
@@ -217,12 +221,12 @@ async fn without_a_selection_the_built_in_identity_is_the_one_persona() {
 }
 
 #[tokio::test]
-async fn the_persona_is_a_system_instruction_and_never_a_user_message() {
+async fn the_persona_is_an_instruction_and_never_a_user_message() {
     let dir = tempfile::tempdir().expect("dir");
     let requests = run_once(dir.path(), Some(CARTOGRAPHER), AgentRole::Nexus).await;
     for request in &requests {
         for message in &request.messages {
-            if message.role == Role::System {
+            if message.role.is_instruction() {
                 continue;
             }
             assert!(
@@ -232,14 +236,17 @@ async fn the_persona_is_a_system_instruction_and_never_a_user_message() {
                 message.content
             );
         }
-        // It also has to be a *system* message, not merely "not a user one".
+        // And specifically on the developer channel — the strongest
+        // application-instruction channel a provider offers. Asserting merely
+        // "not a user message" would pass with the persona back on the weaker
+        // one, which is the bug this replaced.
         assert!(
             request
                 .messages
                 .iter()
-                .any(|message| message.role == Role::System
+                .any(|message| message.role == Role::Developer
                     && message.content.contains("You are Cartographer")),
-            "the persona was not delivered through the system channel"
+            "the persona was not delivered through the developer channel"
         );
     }
 }

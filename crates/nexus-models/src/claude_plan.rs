@@ -486,7 +486,7 @@ fn serialize_request(request: &CompletionRequest) -> Result<String> {
     );
     for message in &request.messages {
         let role = match message.role {
-            Role::System => "SYSTEM",
+            Role::System | Role::Developer => "SYSTEM",
             Role::User => "USER",
             Role::Assistant => "ASSISTANT",
             Role::Tool => "TOOL RESULT",

@@ -2370,6 +2370,7 @@ pub fn context_report(app: &App, session_id: Option<&str>) -> Result<Report> {
     for m in &messages {
         let key = match m.role {
             nexus_models::types::Role::System => "system",
+            nexus_models::types::Role::Developer => "developer",
             nexus_models::types::Role::User => "user",
             nexus_models::types::Role::Assistant => "assistant",
             nexus_models::types::Role::Tool => "tool results",

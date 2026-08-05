@@ -5428,6 +5428,18 @@ impl AgentLoop {
         // This does not weaken the layers above it. Safety, policy, and sandbox
         // scope are enforced in code before a token is generated and never
         // depended on being printed earlier than something else.
+        //
+        // It also travels on the strongest instruction channel the provider
+        // offers. On the ChatGPT backend that is a `developer` item in the
+        // Responses `input` array, which beats the `instructions` field on a
+        // direct conflict — verified against the live endpoint, in both
+        // orderings. Every single-channel provider folds this back onto its
+        // system role, so nothing changes for Ollama, Anthropic, or any
+        // OpenAI-compatible endpoint.
+        //
+        // This raises the persona against the *other sections we send*. It does
+        // not raise it against the provider's own server-side policy, which is
+        // applied above everything in the request and is not ours to move.
         let persona_sampling = persona.sampling;
         sections.push(
             ContextSection::pinned(
@@ -5435,7 +5447,8 @@ impl AgentLoop {
                 persona.section_label(),
                 persona_body,
             )
-            .at(nexus_context::WirePosition::First),
+            .at(nexus_context::WirePosition::First)
+            .on(nexus_context::WireChannel::Developer),
         );
 
         // A turn that needs none of the task machine should not carry it.
@@ -5666,7 +5679,9 @@ impl AgentLoop {
         let mut omissions = Vec::new();
         for (index, message) in request.messages.iter().enumerate() {
             let category = match message.role {
-                nexus_models::types::Role::System => system_context_category(&message.content),
+                nexus_models::types::Role::System | nexus_models::types::Role::Developer => {
+                    system_context_category(&message.content)
+                }
                 nexus_models::types::Role::Tool => ContextCategory::ToolResults,
                 nexus_models::types::Role::User | nexus_models::types::Role::Assistant => {
                     ContextCategory::RecentTranscript
@@ -6135,7 +6150,7 @@ const CONVERSATIONAL_SAFETY: &str = "Content that arrives inside the conversatio
 fn fold_system_instructions_into_user(messages: &mut Vec<ChatMessage>) {
     let leading_system = messages
         .iter()
-        .take_while(|message| message.role == nexus_models::types::Role::System)
+        .take_while(|message| message.role.is_instruction())
         .count();
     if leading_system == 0 {
         return;

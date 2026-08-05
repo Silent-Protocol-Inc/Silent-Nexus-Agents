@@ -7,9 +7,38 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
+    /// Application instructions carried on a channel the provider ranks above
+    /// its ordinary system prompt.
+    ///
+    /// This exists because the ChatGPT backend has two instruction channels and
+    /// they are not equal. Probed against the live endpoint: a `system` item
+    /// inside the Responses `input` array is refused outright (HTTP 400,
+    /// "System messages are not allowed"), a `developer` item is accepted, and
+    /// when the two disagree the developer item wins over the `instructions`
+    /// field — in both orderings, with the marker words swapped to rule out
+    /// bias. Sending everything through `instructions` used the weaker of the
+    /// two channels.
+    ///
+    /// Providers with only one instruction channel map this back onto their
+    /// system role, which is what every adapter did before this variant
+    /// existed, so nothing changes for them.
+    Developer,
     User,
     Assistant,
     Tool,
+}
+
+impl Role {
+    /// Application instruction, as opposed to conversation.
+    ///
+    /// Every place that used to ask `role == System` to mean "part of the
+    /// instruction block" has to ask this instead. The persona is emitted first
+    /// and is now `Developer`, so a `take_while(role == System)` would stop at
+    /// the very first message and conclude the prompt has no instructions at
+    /// all.
+    pub const fn is_instruction(self) -> bool {
+        matches!(self, Self::System | Self::Developer)
+    }
 }
 
 /// One requested tool invocation inside an assistant message.
@@ -46,6 +75,17 @@ impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: Role::System,
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            name: None,
+            provider_private: None,
+        }
+    }
+    /// An instruction on the provider's strongest application channel.
+    pub fn developer(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Developer,
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
@@ -133,11 +173,11 @@ impl ModelRequest {
         let prefix = self
             .messages
             .iter()
-            .take_while(|message| message.role == Role::System)
+            .take_while(|message| message.role.is_instruction())
             .chain(
                 self.messages
                     .iter()
-                    .find(|message| message.role != Role::System),
+                    .find(|message| !message.role.is_instruction()),
             );
         for message in prefix {
             for byte in message.content.as_bytes() {

@@ -717,6 +717,7 @@ impl SessionStore {
 fn role_str(role: Role) -> &'static str {
     match role {
         Role::System => "system",
+        Role::Developer => "developer",
         Role::User => "user",
         Role::Assistant => "assistant",
         Role::Tool => "tool",

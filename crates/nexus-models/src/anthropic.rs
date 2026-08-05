@@ -165,7 +165,7 @@ impl AnthropicProvider {
         let system = request
             .messages
             .iter()
-            .filter(|message| message.role == Role::System)
+            .filter(|message| message.role.is_instruction())
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -457,7 +457,7 @@ fn anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
     let mut output: Vec<Value> = Vec::new();
     for message in messages
         .iter()
-        .filter(|message| message.role != Role::System)
+        .filter(|message| !message.role.is_instruction())
     {
         let (role, blocks) = match message.role {
             Role::User => (
@@ -488,7 +488,7 @@ fn anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
                     "content": message.content,
                 })],
             ),
-            Role::System => unreachable!("filtered above"),
+            Role::System | Role::Developer => unreachable!("filtered above"),
         };
         if let Some(previous) = output
             .last_mut()

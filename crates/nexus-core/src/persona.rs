@@ -25,6 +25,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionChannel {
+    /// A dedicated developer channel the provider ranks above its ordinary
+    /// system prompt.
+    ///
+    /// Reported only where that ranking was measured, not assumed. On the
+    /// ChatGPT backend a `developer` item in the Responses `input` array beats
+    /// the `instructions` field when the two conflict, and a `system` item
+    /// there is refused outright.
+    DeveloperChannel,
     /// A real system role in the message list.
     SystemRole,
     /// A dedicated top-level instructions field outside the message list.
@@ -38,6 +46,7 @@ pub enum InstructionChannel {
 impl InstructionChannel {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::DeveloperChannel => "developer channel",
             Self::SystemRole => "system role",
             Self::InstructionsField => "dedicated instructions field",
             Self::PrefixFallback => "prefix fallback",
@@ -49,14 +58,17 @@ impl InstructionChannel {
     /// authority. `false` means the model may weigh it no more heavily than
     /// conversation text, which the inspector must disclose.
     pub const fn is_application_authoritative(self) -> bool {
-        matches!(self, Self::SystemRole | Self::InstructionsField)
+        matches!(
+            self,
+            Self::DeveloperChannel | Self::SystemRole | Self::InstructionsField
+        )
     }
 
     /// Operator-facing note about what this channel costs. Empty when nothing
     /// needs disclosing.
     pub const fn limitation(self) -> &'static str {
         match self {
-            Self::SystemRole | Self::InstructionsField => "",
+            Self::DeveloperChannel | Self::SystemRole | Self::InstructionsField => "",
             Self::PrefixFallback => {
                 "this provider exposes no system channel; the persona is prepended to conversational input and may carry less weight than a system instruction"
             }
@@ -517,6 +529,7 @@ mod tests {
 
     #[test]
     fn channels_report_their_real_authority() {
+        assert!(InstructionChannel::DeveloperChannel.is_application_authoritative());
         assert!(InstructionChannel::SystemRole.is_application_authoritative());
         assert!(InstructionChannel::InstructionsField.is_application_authoritative());
         assert!(!InstructionChannel::PrefixFallback.is_application_authoritative());

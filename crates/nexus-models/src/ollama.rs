@@ -83,7 +83,9 @@ impl OllamaProvider {
             .iter()
             .map(|m| {
                 let role = match m.role {
-                    Role::System => "system",
+                    // Ollama has one instruction channel; the developer
+                    // channel folds back onto it.
+                    Role::System | Role::Developer => "system",
                     Role::User => "user",
                     Role::Assistant => "assistant",
                     Role::Tool => "tool",

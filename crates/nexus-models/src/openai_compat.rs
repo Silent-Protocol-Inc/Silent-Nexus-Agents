@@ -241,7 +241,11 @@ pub fn is_local_url(url: &str) -> bool {
 
 fn message_to_json(m: &ChatMessage) -> Value {
     let role = match m.role {
-        Role::System => "system",
+        // Deliberately not "developer": this adapter also serves llama.cpp,
+        // LM Studio, and arbitrary OpenAI-compatible endpoints, many of
+        // which reject an unknown role outright. Folding onto "system"
+        // keeps today's behavior everywhere.
+        Role::System | Role::Developer => "system",
         Role::User => "user",
         Role::Assistant => "assistant",
         Role::Tool => "tool",
