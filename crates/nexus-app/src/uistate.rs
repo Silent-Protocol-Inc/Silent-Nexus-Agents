@@ -267,11 +267,39 @@ impl UiStateFile {
     }
 
     /// Mutate the state and persist in one step.
+    ///
+    /// The mutation is applied to what is **on disk right now**, under an
+    /// exclusive lock, not to the copy this process loaded at startup.
+    ///
+    /// The difference is the whole point. A `snx` command and a running TUI both
+    /// edit this file, and `save` rewrites all of it. Applying `f` to a snapshot
+    /// taken at launch meant a long-lived TUI silently reverted every change any
+    /// other process had made since — the operator selected a persona from the
+    /// CLI, the TUI later recorded an unrelated keystroke in history, and the
+    /// selection was gone with nothing logged and nothing shown. Every field
+    /// here had that bug; the persona is only where it was noticed.
+    ///
+    /// Reloading narrows a write to the fields `f` actually touches. The lock is
+    /// what makes read-modify-write one operation rather than three.
     pub fn update(&mut self, f: impl FnOnce(&mut UiState)) -> Result<()> {
-        let mut next = self.state.clone();
+        let _guard = nexus_core::filelock::FileLock::acquire(&self.path)?;
+        // A file that has become unreadable must not silently discard the
+        // operator's accumulated state by falling back to defaults, so the
+        // error propagates.
+        let mut next = UiState::load(&self.path)?;
         f(&mut next);
         next.save(&self.path)?;
         self.state = next;
+        Ok(())
+    }
+
+    /// Adopt whatever another process has written since this one loaded.
+    ///
+    /// Reading is not automatically fresh — callers that display the active
+    /// persona, model, or agent should refresh first, or they will show a value
+    /// the next turn will not use.
+    pub fn reload(&mut self) -> Result<()> {
+        self.state = UiState::load(&self.path)?;
         Ok(())
     }
 }
@@ -296,6 +324,70 @@ mod tests {
         assert_eq!(g.state.active_model.as_deref(), Some("qwen"));
         assert_eq!(g.state.history, vec!["/status".to_string()]);
         assert_eq!(g.state.recent_commands, vec!["status".to_string()]);
+    }
+
+    /// The reported bug, reproduced: a long-lived TUI reverting a CLI change.
+    ///
+    /// `tui` loads at launch and stays open. `cli` then selects a persona and a
+    /// model. The TUI later records an unrelated keystroke — which used to
+    /// rewrite the whole file from its startup snapshot and take the operator's
+    /// selection with it. Nothing errored; the next session simply ran a
+    /// different persona than the one that was chosen.
+    #[test]
+    fn a_long_lived_process_does_not_revert_another_processs_selection() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("state").join("ui-state.json");
+
+        let mut tui = UiStateFile::load(&path).expect("tui load");
+        tui.update(|s| s.selected_persona = Some("akeno".into()))
+            .expect("tui initial");
+
+        // A second process changes the selection while the first is still open.
+        let mut cli = UiStateFile::load(&path).expect("cli load");
+        cli.update(|s| {
+            s.selected_persona = Some("changli".into());
+            s.active_model = Some("mistral_latest".into());
+        })
+        .expect("cli select");
+
+        // The first process touches something entirely unrelated.
+        tui.update(|s| s.push_history("/status"))
+            .expect("tui write");
+
+        let disk = UiState::load(&path).expect("reload");
+        assert_eq!(
+            disk.selected_persona.as_deref(),
+            Some("changli"),
+            "an unrelated write reverted the operator's persona selection"
+        );
+        assert_eq!(
+            disk.active_model.as_deref(),
+            Some("mistral_latest"),
+            "an unrelated write reverted the operator's model selection"
+        );
+        assert_eq!(
+            disk.history,
+            vec!["/status".to_string()],
+            "the write that did happen must still be applied"
+        );
+    }
+
+    /// Reloading is what makes a read honest; a stale reader reports a persona
+    /// the next turn will not use.
+    #[test]
+    fn reload_adopts_another_processs_write() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("state").join("ui-state.json");
+        let mut first = UiStateFile::load(&path).expect("load");
+        let mut second = UiStateFile::load(&path).expect("load");
+
+        second
+            .update(|s| s.selected_persona = Some("changli".into()))
+            .expect("write");
+        assert_eq!(first.state.selected_persona, None, "not yet observed");
+
+        first.reload().expect("reload");
+        assert_eq!(first.state.selected_persona.as_deref(), Some("changli"));
     }
 
     #[test]

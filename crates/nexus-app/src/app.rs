@@ -498,11 +498,37 @@ impl App {
     }
 
     /// Read a value out of the operator UI state.
+    ///
+    /// This is the in-memory copy, which may predate another process's write.
+    /// Use [`App::read_fresh_ui_state`] wherever the value decides what a turn
+    /// does rather than merely what a frame draws.
     pub fn read_ui_state<T>(&self, f: impl FnOnce(&crate::uistate::UiState) -> T) -> T {
         match self.ui_state.lock() {
             Ok(guard) => f(&guard.state),
             Err(poisoned) => f(&poisoned.into_inner().state),
         }
+    }
+
+    /// Read the operator's choices as they are on disk right now.
+    ///
+    /// A `snx` command and a running TUI share this file. The persona, model,
+    /// and agent recorded on a new session are *decisions*, and taking them from
+    /// a copy loaded at launch is how a session ended up running a persona the
+    /// operator had already replaced from the other process.
+    ///
+    /// A failed reload is not fatal — it falls back to the in-memory copy rather
+    /// than refusing to start a session — but it is never silently preferred.
+    pub fn read_fresh_ui_state<T>(&self, f: impl FnOnce(&crate::uistate::UiState) -> T) -> T {
+        if let Ok(mut guard) = self.ui_state.lock() {
+            if let Err(error) = guard.reload() {
+                tracing::warn!(
+                    %error,
+                    "could not re-read operator state; using the copy loaded at startup"
+                );
+            }
+            return f(&guard.state);
+        }
+        self.read_ui_state(f)
     }
 
     /// The model recorded on new sessions: the operator's pin, then routing

@@ -15,6 +15,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod file_formats;
+pub mod filelock;
 pub mod git;
 pub mod governance;
 pub mod gpu;

@@ -309,11 +309,18 @@ impl<'a> HarnessControlPlane<'a> {
             session_id.map(str::to_owned),
         );
         context.profile_id = Some(profile.id);
-        context.persona_id = self
-            .app
-            .read_ui_state(|state| state.selected_persona.clone());
+        // Read from disk, not from the copy this process loaded at startup.
+        // These fields decide what the session runs, and a long-lived TUI
+        // creating a session after a `snx persona select` would otherwise stamp
+        // it with the persona the operator had already replaced. That is exactly
+        // how a session came to answer as one character while `persona status`
+        // in another terminal named a different one.
+        let (selected_persona, active_goal) = self.app.read_fresh_ui_state(|state| {
+            (state.selected_persona.clone(), state.active_goal.clone())
+        });
+        context.persona_id = selected_persona;
         context.agent_id = Some(self.app.active_agent());
-        context.goal_id = self.app.read_ui_state(|state| state.active_goal.clone());
+        context.goal_id = active_goal;
         context.model_id = Some(self.app.any_model_name());
         self.workspace.set_active_context(context)
     }
