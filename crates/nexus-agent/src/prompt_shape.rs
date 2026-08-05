@@ -219,3 +219,67 @@ mod tests {
         assert!(shape.adoption_directive);
     }
 }
+
+/// Build the `ActivePersona` context section.
+///
+/// The one place that decides what the persona section contains, where it sits,
+/// and which channel carries it. The loop emits it, `/persona inspect-effective`
+/// measures it, and `snx persona test` sends it — all from here, so a diagnostic
+/// cannot describe a section the loop would not have built.
+///
+/// That mattered: the inspector used to report `persona_emitted_first: true` as
+/// a literal and `persona test` built a bare system message with no directive
+/// and no channel, so the two tools an operator reaches for to debug delivery
+/// were both describing something other than the request.
+pub fn persona_section(
+    persona: &nexus_core::persona::BehavioralPersona,
+    adoption_directive: bool,
+) -> nexus_context::ContextSection {
+    let body = if adoption_directive {
+        persona.section_body()
+    } else {
+        persona.prompt.clone()
+    };
+    nexus_context::ContextSection::pinned(
+        nexus_context::AuthorityLayer::ActivePersona,
+        persona.section_label(),
+        body,
+    )
+    // First on the wire, so the rest of the prompt reads as instructions given
+    // *to* this character rather than as a competing description of one.
+    .at(nexus_context::WirePosition::First)
+    // On the strongest instruction channel the provider offers. Single-channel
+    // providers fold this back onto their system role.
+    .on(nexus_context::WireChannel::Developer)
+}
+
+#[cfg(test)]
+mod persona_section_tests {
+    use nexus_core::persona::BehavioralPersona;
+
+    fn persona() -> BehavioralPersona {
+        BehavioralPersona::resolve(None)
+    }
+
+    #[test]
+    fn the_section_is_first_pinned_and_on_the_developer_channel() {
+        let section = super::persona_section(&persona(), true);
+        assert_eq!(section.layer, nexus_context::AuthorityLayer::ActivePersona);
+        assert!(section.pinned, "identity must survive budget pressure");
+        assert_eq!(section.wire_position, nexus_context::WirePosition::First);
+        assert_eq!(section.channel, nexus_context::WireChannel::Developer);
+    }
+
+    #[test]
+    fn the_directive_can_be_switched_off_without_touching_the_persona_text() {
+        let persona = persona();
+        let with = super::persona_section(&persona, true);
+        let without = super::persona_section(&persona, false);
+        assert!(with.content.starts_with("Your name is "));
+        assert!(!without.content.starts_with("Your name is "));
+        assert!(
+            with.content.ends_with(&persona.prompt) && without.content == persona.prompt,
+            "the stored text is passed through byte for byte either way"
+        );
+    }
+}

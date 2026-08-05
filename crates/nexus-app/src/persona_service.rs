@@ -728,14 +728,32 @@ pub async fn run_test(app: &App, model: &str, question: &str) -> Result<crate::r
     let manager = nexus_models::ModelManager::from_config(&app.config)?;
     let provider = manager.get(model)?;
     let capabilities = provider.capabilities();
+
+    // The section the loop would build, compiled the way the loop compiles it.
+    //
+    // This used to send `ChatMessage::system(persona.prompt)` — the raw text,
+    // with no adoption directive, no section label, and no channel — while the
+    // report printed the adapter's *declared* channel beside it. So the one tool
+    // for diagnosing delivery exercised a path the harness never uses, and could
+    // not have caught a delivery fault in principle. It now carries what a
+    // conversational turn carries, and reports the role actually sent.
+    let section =
+        nexus_agent::prompt_shape::persona_section(&persona, app.config.persona.adoption_directive);
+    let compiled = nexus_context::ContextCompiler::new(capabilities.context_window, 512)
+        .compile(&[section], &[nexus_models::ChatMessage::user(question)]);
     let request = nexus_models::CompletionRequest {
-        messages: vec![
-            nexus_models::ChatMessage::system(persona.prompt.clone()),
-            nexus_models::ChatMessage::user(question),
-        ],
+        messages: compiled.messages.clone(),
         max_tokens: Some(512),
+        temperature: Some(persona.sampling.effective_temperature()),
         ..Default::default()
     };
+    // Measured off the request being sent, not declared.
+    let delivered_as = request
+        .messages
+        .iter()
+        .find(|message| message.content.contains(&persona.adoption_directive()))
+        .or_else(|| request.messages.iter().find(|m| m.role.is_instruction()))
+        .map(|message| message.role);
     let started = std::time::Instant::now();
     let mut stream = provider.stream(request).await?;
     let mut answer = String::new();
@@ -753,6 +771,26 @@ pub async fn run_test(app: &App, model: &str, question: &str) -> Result<crate::r
         .field(
             "delivered through",
             capabilities.instruction_channel.as_str(),
+        )
+        // What this request did, resolved through the adapter rather than
+        // stopping at the harness-neutral role.
+        //
+        // Reporting the neutral role alone is its own kind of lie: the harness
+        // marks the persona `Developer` on every provider, so a bare "developer
+        // message" would claim a channel that Ollama, Anthropic, and every
+        // OpenAI-compatible endpoint do not have. Where the adapter folds it,
+        // say so.
+        .field(
+            "sent as",
+            describe_delivery(delivered_as, capabilities.instruction_channel),
+        )
+        .field(
+            "adoption directive",
+            if app.config.persona.adoption_directive {
+                "present"
+            } else {
+                "disabled in config"
+            },
         )
         .field("elapsed", format!("{elapsed} ms"));
     if !capabilities.instruction_channel.limitation().is_empty() {
@@ -789,6 +827,19 @@ pub fn effective_request(app: &App) -> Result<EffectiveRequest> {
     // Built with the same calls the turn makes, so what is reported is what
     // would be sent rather than a second description of it.
     let persona_config = &app.config.persona;
+    // Compiled, then read back — the same section the loop pushes, put through
+    // the same compiler, so every field below is measured off an artifact
+    // instead of restated from the inputs that produced it.
+    let section =
+        nexus_agent::prompt_shape::persona_section(&persona, persona_config.adoption_directive);
+    let compiled = nexus_context::ContextCompiler::new(32_000, 512).compile(
+        &[section],
+        &[nexus_models::ChatMessage::user("who are you?")],
+    );
+    let persona_message = compiled
+        .messages
+        .iter()
+        .find(|message| message.content.contains(&persona.adoption_directive()));
     let section_body = if persona_config.adoption_directive {
         persona.section_body()
     } else {
@@ -827,10 +878,11 @@ pub fn effective_request(app: &App) -> Result<EffectiveRequest> {
         builtin_nexus_included: persona.is_built_in(),
         behavioral_persona_count,
         persona_is_system_instruction: channel.is_application_authoritative(),
-        // Structural, not observational: the compiler emits every context
-        // section with the system role and appends conversation history after
-        // it. There is no path that turns a persona into user content.
-        persona_is_user_message: false,
+        // Measured off the compiled messages. Asserting this structurally is
+        // what let the previous version report a healthy composition for a
+        // request it had never built.
+        persona_is_user_message: persona_message
+            .is_some_and(|message| !message.role.is_instruction()),
         true_system_role_supported: matches!(channel, InstructionChannel::SystemRole),
         provider_restrictions_may_apply: true,
         provider: provider_kind,
@@ -843,12 +895,15 @@ pub fn effective_request(app: &App) -> Result<EffectiveRequest> {
         duplicate_persona_sections,
         persona_section_body: section_body,
         adoption_directive_present,
-        // Not a runtime measurement: the section is constructed with
-        // `WirePosition::First` in one place, and `persona_requests.rs` asserts
-        // on the recorded outbound request that it really does open the system
-        // block. Reported here so the operator can see the intent alongside the
-        // test that holds it.
-        persona_emitted_first: true,
+        // Measured: the persona's index among the compiled messages. Reported as
+        // a literal `true` until now, which meant the one field an operator
+        // would check to see whether the persona opened the prompt was incapable
+        // of ever saying no.
+        persona_emitted_first: compiled
+            .messages
+            .first()
+            .zip(persona_message)
+            .is_some_and(|(first, persona)| std::ptr::eq(first, persona)),
         persona_temperature: persona_sampling.effective_temperature(),
         persona_temperature_is_default: persona_sampling.temperature.is_none(),
         persona_max_output_tokens: persona_sampling.max_output_tokens,
@@ -976,5 +1031,83 @@ mod tests {
         assert!(lower.contains("your name"));
         assert!(lower.contains("role"));
         assert!(lower.contains("style"));
+    }
+}
+
+/// How the persona message actually reaches this provider.
+///
+/// Two facts, resolved into one sentence: the role the harness put on the
+/// message, and what the adapter does with that role. They are not the same
+/// thing — the harness marks every persona `Developer`, but only one backend has
+/// a developer channel, and the rest fold it onto their system role. Reporting
+/// only the first would announce a channel that does not exist on most
+/// providers; reporting only the second is what let a plain system message be
+/// described as "developer channel".
+fn describe_delivery(role: Option<nexus_models::Role>, channel: InstructionChannel) -> String {
+    use nexus_models::Role;
+    match (role, channel) {
+        (None, _) => "not present in the request".to_string(),
+        (Some(Role::Developer), InstructionChannel::DeveloperChannel) => {
+            "developer message, on this provider's developer channel".to_string()
+        }
+        (Some(Role::Developer), InstructionChannel::SystemRole) => {
+            "developer message, folded onto the system role by this adapter".to_string()
+        }
+        (Some(Role::Developer), InstructionChannel::InstructionsField) => {
+            "developer message, folded into this provider's instructions field".to_string()
+        }
+        (Some(Role::Developer), InstructionChannel::PrefixFallback) => {
+            "developer message, prepended to the first user turn — a weaker channel".to_string()
+        }
+        (Some(Role::Developer), InstructionChannel::Unsupported) => {
+            "developer message, which this adapter cannot deliver".to_string()
+        }
+        (Some(Role::System), _) => "system message".to_string(),
+        (Some(other), _) => {
+            format!("{other:?} message — the persona is not being sent as an instruction")
+        }
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use nexus_models::Role;
+
+    /// The bug this function exists to prevent, in both directions.
+    #[test]
+    fn a_folded_channel_is_never_announced_as_a_developer_channel() {
+        // Ollama has no developer channel. Saying "developer message" alone
+        // would claim one.
+        let folded = describe_delivery(Some(Role::Developer), InstructionChannel::SystemRole);
+        assert!(
+            folded.contains("folded onto the system role"),
+            "a single-channel provider must say the developer role was folded: {folded}"
+        );
+
+        // And where the channel is real, it is named as such.
+        let real = describe_delivery(Some(Role::Developer), InstructionChannel::DeveloperChannel);
+        assert!(real.contains("developer channel"), "{real}");
+        assert!(!real.contains("folded"), "{real}");
+    }
+
+    #[test]
+    fn a_weak_channel_says_so_and_a_missing_persona_is_not_hidden() {
+        let weak = describe_delivery(Some(Role::Developer), InstructionChannel::PrefixFallback);
+        assert!(weak.contains("weaker channel"), "{weak}");
+
+        let absent = describe_delivery(None, InstructionChannel::DeveloperChannel);
+        assert_eq!(absent, "not present in the request");
+    }
+
+    /// A persona arriving as conversation is a delivery failure, and the report
+    /// has to name it rather than print a role and leave it to the reader.
+    #[test]
+    fn a_persona_sent_as_conversation_is_called_out() {
+        let wrong = describe_delivery(Some(Role::User), InstructionChannel::SystemRole);
+        assert!(
+            wrong.contains("not being sent as an instruction"),
+            "{wrong}"
+        );
     }
 }

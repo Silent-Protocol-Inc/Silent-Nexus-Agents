@@ -5414,11 +5414,11 @@ impl AgentLoop {
         // every task section below.
         let persona =
             self.behavioral_persona(&workspace_harness, active_context.as_ref(), &session)?;
-        let persona_body = if shape.adoption_directive {
-            persona.section_body()
-        } else {
-            persona.prompt.clone()
-        };
+        // Built by the one function that owns this section, so the loop, the
+        // inspector, and `snx persona test` cannot disagree about what a persona
+        // turn carries.
+        let persona_context_section =
+            crate::prompt_shape::persona_section(&persona, shape.adoption_directive);
         // Emitted first on the wire, while keeping rank 4 for authority and
         // shed order. Position and precedence are different questions: the
         // compiler answers the second by rank, the provider reads the first.
@@ -5441,15 +5441,7 @@ impl AgentLoop {
         // not raise it against the provider's own server-side policy, which is
         // applied above everything in the request and is not ours to move.
         let persona_sampling = persona.sampling;
-        sections.push(
-            ContextSection::pinned(
-                AuthorityLayer::ActivePersona,
-                persona.section_label(),
-                persona_body,
-            )
-            .at(nexus_context::WirePosition::First)
-            .on(nexus_context::WireChannel::Developer),
-        );
+        sections.push(persona_context_section);
 
         // A turn that needs none of the task machine should not carry it.
         //
