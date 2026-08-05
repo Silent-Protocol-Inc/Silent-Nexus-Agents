@@ -627,6 +627,80 @@ async fn a_conversational_turn_carries_the_persona_and_not_the_task_machine() {
     }
 }
 
+/// Run one turn with an approved profile active, and report the system block.
+///
+/// The profile lives in the global store and is reached through the workspace's
+/// active context, which is the same pair of records the control plane writes
+/// when an operator selects a profile.
+async fn run_once_with_profile(dir: &std::path::Path, objective: &str) -> String {
+    let provider = Arc::new(MockProvider::new(vec![MockScript::Text("done".into())]));
+    let (runtime, session, store) = runtime(provider.clone(), dir);
+    let workspace = dir.to_string_lossy().to_string();
+
+    let mut profile = nexus_core::harness::UserProfile::new("Operator").expect("profile");
+    profile.preferences.communication_style = vec!["Prefers concise answers".into()];
+    HarnessRepository::new(runtime.global_store.clone())
+        .create_profile(&profile)
+        .expect("create profile");
+
+    select_persona(&store, &workspace, &session, CARTOGRAPHER);
+    let harness = HarnessRepository::new(store.clone());
+    let mut context = harness
+        .active_context(&workspace, Some(session.as_str()))
+        .expect("context")
+        .expect("context exists");
+    context.profile_id = Some(profile.id.clone());
+    harness.set_active_context(context).expect("set context");
+
+    AgentLoop::new(runtime, AgentRole::Nexus)
+        .run(&session, objective, Arc::new(AutoApprove))
+        .await
+        .expect("run");
+    system_text(&provider.recorded_requests()[0])
+}
+
+/// The profile card is about work, and on a conversation it overrode the voice.
+///
+/// `preferences.communication_style` is written about how *work* should be
+/// reported. It landed in the same system block as the persona, above the
+/// request, so an in-character reply came back as a terse summary card instead
+/// of the character speaking. Work still gets the card; a conversation does not.
+///
+/// Nothing is enforced by this section — it is description, not policy — so
+/// omitting it removes no check.
+#[tokio::test]
+async fn a_conversational_turn_drops_the_profile_but_work_keeps_it() {
+    let chat = tempfile::tempdir().expect("dir");
+    let system = run_once_with_profile(chat.path(), "say hello").await;
+    assert!(
+        system.contains(CARTOGRAPHER),
+        "the persona must still be sent:\n{system}"
+    );
+    assert!(
+        !system.contains("approved active profile"),
+        "a conversational turn still carries the profile section:\n{system}"
+    );
+    assert!(
+        !system.contains("Prefers concise answers"),
+        "a workflow preference reached a conversational turn:\n{system}"
+    );
+
+    let work = tempfile::tempdir().expect("dir");
+    let system = run_once_with_profile(
+        work.path(),
+        "implement the requested change in the repository and run the tests",
+    )
+    .await;
+    assert!(
+        system.contains("approved active profile"),
+        "work must still honor the approved profile:\n{system}"
+    );
+    assert!(
+        system.contains("Prefers concise answers"),
+        "work must still see the operator's stated preference:\n{system}"
+    );
+}
+
 /// The persona has to survive the narrowing, not be a casualty of it.
 #[tokio::test]
 async fn a_working_turn_keeps_both_the_persona_and_the_task_machine() {

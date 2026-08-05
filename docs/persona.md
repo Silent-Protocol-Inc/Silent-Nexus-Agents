@@ -110,10 +110,18 @@ the first turn that uses it.
 A turn that needs no tools does not carry the tool machine. When the request
 classifies as simple and there is no active goal, pending task, or tracked plan,
 the prompt omits the approved plan, the operational contract, the role charter,
-and the tool inventory.
+the tool inventory, and the approved profile card.
 
-It keeps the safety rules, the policy and sandbox scope, project instructions,
-the profile, memory, and the persona.
+It keeps the untrusted-content rule, project instructions, memory, and the
+persona.
+
+The profile is dropped for the same reason as the charter: it is a record about
+*work* — how results should be reported, which projects are in play, what
+constraints apply — and it was landing in the same system block as the persona,
+above the request. A trait like "prefers concise answers" is right for a task
+report and wrong for a character speaking in its own voice, and it showed:
+in-character replies came back as summary cards. Work still receives the profile
+in full.
 
 This is presentation, not enforcement. Policy, sandbox, workspace confinement,
 approval, redaction, and audit all live outside the model, so a conversational

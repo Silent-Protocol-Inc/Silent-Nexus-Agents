@@ -5385,14 +5385,26 @@ impl AgentLoop {
         // an approved preference is expressed but cannot redefine identity.
         // Canonical pointers fail closed; legacy reads are only an unmigrated
         // per-domain compatibility path when no canonical profile is active.
-        if let Some(profile) =
-            self.profile_context(&global_harness, active_context.as_ref(), &session)?
-        {
-            sections.push(ContextSection::optional(
-                AuthorityLayer::ActiveProfile,
-                "approved active profile",
-                profile,
-            ));
+        //
+        // Not on a conversational turn. The card is a *workflow* record — how
+        // the operator wants work reported, what projects they run, what
+        // constraints apply — and it lands in the same system block as the
+        // persona, above the request. A trait like "prefers concise answers" is
+        // true of a task report and wrong for a character speaking in its own
+        // voice: an in-character reply came back as a four-line summary card
+        // instead of prose. Work still gets the profile; a conversation is
+        // exactly the turn it distorts. Nothing is enforced by this section, so
+        // omitting it removes no check.
+        if shape.includes_profile {
+            if let Some(profile) =
+                self.profile_context(&global_harness, active_context.as_ref(), &session)?
+            {
+                sections.push(ContextSection::optional(
+                    AuthorityLayer::ActiveProfile,
+                    "approved active profile",
+                    profile,
+                ));
+            }
         }
         // Exactly one behavioral persona, always, pushed from exactly one place.
         // A custom selection replaces the built-in Nexus identity here rather

@@ -1,5 +1,38 @@
 # Changelog
 
+## [2.16.1] — 2026-08-05
+
+One fix. A conversational turn no longer carries the approved profile card.
+
+### Fixed
+
+- **The profile card was overriding the persona's voice on conversation.**
+  2.14.0 narrowed a conversational turn to drop the plan, the operational
+  contract, the role charter, and the tool inventory — but kept the approved
+  profile. That card is a record about *work*: how the operator wants results
+  reported, which projects they run, what constraints apply. It was emitted as a
+  system section in the same block as the persona, above the request.
+
+  So a profile carrying `communication_style: "Prefers concise answers"` — a
+  perfectly good instruction for a task report — reached a turn where a
+  character was supposed to be speaking in its own voice, and the reply came
+  back as a four-line summary card instead of prose. The preference was written
+  about work and applied to something else.
+
+  Work still receives the profile unchanged; a conversation does not. The
+  decision lives on the existing `PromptShape` (`includes_profile`), so the loop
+  and `/persona inspect-effective` cannot disagree about it.
+
+  This section is description, not enforcement — policy, sandbox, workspace
+  confinement, approval, redaction, and audit are applied in code and are
+  untouched — so omitting it removes no check and grants nothing.
+
+### Compatibility
+
+PATCH. No schema change, no configuration change, no migration. Profiles, their
+facts, and the review queue are all untouched, and the profile tools behave
+exactly as before on the turns that carry them.
+
 ## [2.16.0] — 2026-08-05
 
 Two corrections to how 2.15.0 delivers a persona. Both are small; the second

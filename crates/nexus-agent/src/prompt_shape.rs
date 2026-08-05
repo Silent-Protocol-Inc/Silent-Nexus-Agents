@@ -24,6 +24,11 @@ pub struct PromptShape {
     pub includes_charter: bool,
     pub includes_plan: bool,
     pub includes_tool_inventory: bool,
+    /// The approved profile card. Work reads it to honor stated preferences;
+    /// a conversation is the turn it distorts, because a workflow preference
+    /// like "prefers concise answers" is written about *work* and lands in the
+    /// same system block as the persona, above the request.
+    pub includes_profile: bool,
     /// The persona section is prefixed with the sentence naming it as the
     /// identity to answer as.
     pub adoption_directive: bool,
@@ -63,6 +68,7 @@ impl PromptShape {
             includes_charter: !conversational,
             includes_plan: !conversational,
             includes_tool_inventory: !conversational,
+            includes_profile: !conversational,
             adoption_directive: config.adoption_directive,
         }
     }
@@ -75,6 +81,7 @@ impl PromptShape {
             includes_charter: true,
             includes_plan: true,
             includes_tool_inventory: true,
+            includes_profile: true,
             adoption_directive: config.adoption_directive,
         }
     }
@@ -82,9 +89,9 @@ impl PromptShape {
     /// One line for the inspector and the timeline.
     pub fn describe(&self) -> &'static str {
         if self.conversational {
-            "conversational — answered directly; no plan, contract, charter, or tool inventory attached"
+            "conversational — answered directly; no plan, contract, charter, tool inventory, or profile attached"
         } else {
-            "full — plan, operational contract, charter, and tool inventory attached"
+            "full — plan, operational contract, charter, tool inventory, and profile attached"
         }
     }
 }
@@ -173,6 +180,33 @@ mod tests {
             ..PersonaConfig::default()
         };
         assert!(!PromptShape::decide("hello", false, false, &work, &config).conversational);
+    }
+
+    /// The profile card is a workflow record. On a conversation it sits in the
+    /// same system block as the persona and describes how *work* should be
+    /// reported, so a trait like "prefers concise answers" overrides a voice it
+    /// was never written about. Work keeps it; a conversation does not.
+    #[test]
+    fn a_conversation_does_not_carry_the_profile_but_work_does() {
+        let chat = direct("hello");
+        let shape = PromptShape::decide("hello", false, false, &chat, &config());
+        assert!(shape.conversational);
+        assert!(
+            !shape.includes_profile,
+            "a conversational turn must not carry the workflow profile card"
+        );
+
+        let objective = "refactor the auth module and run the tests";
+        let work = direct(objective);
+        let shape = PromptShape::decide(objective, false, false, &work, &config());
+        assert!(
+            shape.includes_profile,
+            "work must still honor approved preferences"
+        );
+        assert!(
+            PromptShape::full(&config()).includes_profile,
+            "the full shape carries everything"
+        );
     }
 
     /// A conversational turn still carries the persona — narrowing removes the
