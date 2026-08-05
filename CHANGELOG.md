@@ -1,5 +1,71 @@
 # Changelog
 
+## [2.16.3] — 2026-08-05
+
+Three fixes to persona delivery, all found by running the harness rather than
+reading it. The operator's report was that a selected persona was not being
+followed; none of the causes were what either of us assumed.
+
+### Fixed
+
+- **One process silently reverted another's choices.** `UiStateFile::update`
+  applied its mutation to the copy loaded at process start and rewrote the whole
+  file, so a long-lived TUI reverted every change any other process had made
+  since it launched. Select a persona with `snx persona select`, let the TUI
+  record one unrelated keystroke, and the selection was gone — nothing logged,
+  nothing shown, and the next session ran a persona that had already been
+  replaced. Every field in that file had the bug; the persona is only where it
+  surfaced.
+
+  `update` now re-reads under an exclusive lock and applies the mutation to what
+  is on disk. New `nexus-core::filelock` uses a *sibling* `.lock` file, because
+  every save replaces the target via `rename(2)` — locking the file itself would
+  leave writers holding descriptors to different, already-unlinked inodes and
+  they would never contend. A contended wait is bounded and reported, never
+  downgraded to an unlocked write.
+
+  `ensure_context` reads the persona and goal through the new
+  `App::read_fresh_ui_state`, because those fields decide what a session runs.
+
+- **The diagnostics described the design instead of the request.**
+  `snx persona test` sent the raw persona text as a plain system message — no
+  adoption directive, no section label, no channel — while printing the
+  adapter's *declared* channel beside it. It could report "developer channel"
+  for a message that never used one, so the tool an operator reaches for to
+  debug delivery could not have caught a delivery fault in principle.
+
+  It now compiles and sends the same section the loop builds. New
+  `prompt_shape::persona_section` is the single owner of that section, called by
+  the loop, the inspector, and the test alike. `persona_emitted_first` and
+  `persona_is_user_message` stopped being literals — the first was hardcoded
+  `true`, so the field that answers "does the persona open the prompt" could
+  never say no.
+
+  `sent as` resolves the harness role *through* the adapter, so a provider
+  without a developer channel reports that the role was folded onto its system
+  role rather than claiming a channel it does not have.
+
+### Added
+
+- A cross-matrix test asserting that any persona reaches the provider exactly
+  once, byte for byte, as an instruction, opening the prompt — across every
+  agent role and both turn shapes, with a fixture full of smart quotes,
+  accents, and shell metacharacters.
+- A test that a persona claiming approval exemption still cannot get one: a
+  work-classified turn with the full tool inventory, a scripted `fs.create_file`,
+  and a denial that leaves the file absent.
+
+### Note for operators running CPU-only local models
+
+A turn carrying a multi-kilobyte persona on a CPU-only 7B model can take ten
+minutes, with several before the first token, and aborts with
+`no first token after 600s`. That reads like a persona or content failure and is
+a clock. Raise `first_token_timeout_secs` (and `timeout_secs`) for that model.
+
+### Compatibility
+
+PATCH. No schema change, no configuration change, no migration.
+
 ## [2.16.2] — 2026-08-05
 
 The persona moves to the strongest instruction channel each provider offers.

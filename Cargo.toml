@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.16.2"
+version = "2.16.3"
 authors = ["Silent Protocol <team@silentprotocol.top>"]
 edition = "2021"
 license = "Apache-2.0"
