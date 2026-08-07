@@ -5148,6 +5148,11 @@ mod tests {
         state.active_work.context.input_tokens = 4096;
         state.active_work.context.context_window = 200_000;
         state.active_work.context.reserved_output_tokens = 8192;
+        // Keep responsive snapshots independent of runner speed. `user()` starts
+        // the live turn clock; on a busy CI host that clock can cross the
+        // reasoning-preview dwell threshold before this fixture is rendered,
+        // changing every frame while faster machines retain the pre-dwell view.
+        state.turn_started = None;
         state
     }
 
