@@ -204,7 +204,7 @@
       <h2>Verification evidence</h2>
       <div class="grid">
         <article class="card"><h3>Repository checks</h3><p><span class="pass">PASS</span> complete validation floor</p><p>Formatting, locked workspace Clippy with warnings denied, locked workspace tests, rustdoc with warnings denied, <code>cargo audit</code>, <code>cargo deny check</code>, and the tracked-secret scan passed.</p></article>
-        <article class="card"><h3>Released baseline</h3><p><span class="pass">PASS</span> 2.16.4 tagged and active</p><p>Every production gate and clean-checkout reproducibility check passed before tag <code>v2.16.4</code>. Build, package, and installed binaries share SHA-256 <code>ea4114e…90083</code>; runtime metadata identifies commit <code>1360f80</code>.</p></article>
+        <article class="card"><h3>Released baseline</h3><p><span class="pass">HOSTED</span> <a href="https://github.com/Silent-Protocol-Inc/Silent-Nexus-Agents/releases/tag/v2.16.4">v2.16.4</a></p><p>Every production gate and clean-checkout reproducibility check passed before publication. The hosted archive was downloaded independently and matched SHA-256 <code>66108aee…de543</code>; its binary embeds commit <code>1360f80</code>.</p></article>
         <article class="card"><h3>Installed improvement</h3><p><span class="pass">PRODUCTION GATE PASS</span> 2.16.5</p><p>Every local production gate passed, including the clean-checkout mock flow and deterministic archive comparison. Build, packaged, and installed binaries share SHA-256 <code>b72090f5…11dfe5</code> and embed commit <code>f217533</code>.</p></article>
         <article class="card"><h3>Observed runtime</h3><p class="warn">CONDITIONAL</p><p><code>snx doctor --deep</code> passed configuration, database, permissions, migration, WAL, release metadata, and binary-integrity checks. It honestly warns that this host uses path-validation-only execution with an approval-only fallback and unrestricted network.</p></article>
         <article class="card"><h3>Design review limit</h3><p class="warn">MANUAL WORK REMAINS</p><p>No human operator study, screen-reader pass, real approval exercise, or visual regression baseline was performed in this audit. The HTML report therefore distinguishes code evidence from professional assessment.</p></article>
@@ -236,7 +236,7 @@ local model servers: ok=false</pre>
     <section>
       <h2>Audit basis</h2>
       <p>This report evaluates the implementation against <a href="HARNESS_CONSTITUTION.md">HARNESS_CONSTITUTION.md</a>, <a href="HARNESS_GENOME.md">HARNESS_GENOME.md</a>, and <a href="HARNESS_ARCHITECTURE.md">HARNESS_ARCHITECTURE.md</a>, with repository rules in <a href="../architecture.md">docs/architecture.md</a>, <a href="../threat-model.md">docs/threat-model.md</a>, and <a href="../sandbox-security.md">docs/sandbox-security.md</a>.</p>
-      <p class="mono">Audit date: 2026-08-08 · baseline: v2.16.4 tagged · installed: 2.16.5 at f217533 · live fixture: OpenCode, Hermes, Codex, Claude · focused consent redesign verified</p>
+      <p class="mono">Audit date: 2026-08-08 · baseline: v2.16.4 hosted and hash-verified · installed: 2.16.5 at f217533 · live fixture: OpenCode, Hermes, Codex, Claude · focused consent redesign verified</p>
     </section>
   </main>
   <footer><div class="wrap">Silent Nexus Design Office · exact, candid, unfussy · audit artifact</div></footer>
