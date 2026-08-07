@@ -5460,7 +5460,7 @@ mod tests {
         // on request even on wide terminals, and secondary status metadata
         // moved behind Ctrl+S. The 80×24 and 120×40 focused frames were printed
         // and read before these hashes were accepted.
-        let expected = [
+        let expected_ascii = [
             (36, 20, 2_229_699_235_630_751_252),
             (45, 20, 13_098_258_820_684_967_868),
             (60, 18, 18_208_311_031_086_913_681),
@@ -5472,6 +5472,26 @@ mod tests {
             (120, 40, 3_162_509_382_011_281_235),
             (160, 50, 18_017_486_531_773_595_551),
         ];
+        // The process-wide glyph tier is resolved once from the terminal. The
+        // release runner has a Unicode locale while the packaging host uses the
+        // intentional ASCII fallback, so retain a reviewed baseline for each
+        // supported rendering rather than making CI depend on its locale.
+        let expected_geometric = [
+            (36, 20, 14_630_861_325_178_800_846),
+            (45, 20, 469_376_081_269_618_740),
+            (60, 18, 10_836_636_232_778_428_957),
+            (60, 20, 5_930_997_261_873_341_026),
+            (80, 24, 15_546_531_852_976_667_098),
+            (100, 14, 11_389_583_325_487_577_324),
+            (120, 16, 5_571_335_462_239_615_545),
+            (100, 30, 2_505_693_960_468_078_834),
+            (120, 40, 17_760_879_200_262_474_258),
+            (160, 50, 10_679_979_674_736_736_578),
+        ];
+        let expected = match crate::glyphs::tier() {
+            crate::glyphs::GlyphTier::Ascii => expected_ascii,
+            crate::glyphs::GlyphTier::Geometric => expected_geometric,
+        };
         assert_eq!(actual, expected);
     }
 
