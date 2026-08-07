@@ -184,7 +184,8 @@
       <h2>Verification evidence</h2>
       <div class="grid">
         <article class="card"><h3>Repository checks</h3><p><span class="pass">PASS</span> complete validation floor</p><p>Formatting, locked workspace Clippy with warnings denied, locked workspace tests, rustdoc with warnings denied, <code>cargo audit</code>, <code>cargo deny check</code>, and the tracked-secret scan passed.</p></article>
-        <article class="card"><h3>Observed runtime</h3><p class="warn">CONDITIONAL</p><p><code>snx status --json</code> reported path-validation-only. <code>snx doctor --deep --json</code> reported valid configuration, database integrity, permissions, migration checksums, WAL, and binary integrity.</p></article>
+        <article class="card"><h3>Installed release</h3><p><span class="pass">PASS</span> 2.16.4 active</p><p>The validated package was atomically installed at <code>~/.local/bin/snx</code>. Build, packaged, and installed binaries share SHA-256 <code>5d8f6553…758e59</code>; runtime metadata identifies commit <code>7e378d4</code>.</p></article>
+        <article class="card"><h3>Observed runtime</h3><p class="warn">CONDITIONAL</p><p><code>snx doctor --deep</code> passed configuration, database, permissions, migration, WAL, release metadata, and binary-integrity checks. It honestly warns that this host uses path-validation-only execution with an approval-only fallback and unrestricted network.</p></article>
         <article class="card"><h3>Design review limit</h3><p class="warn">MANUAL WORK REMAINS</p><p>No human operator study, screen-reader pass, real approval exercise, or visual regression baseline was performed in this audit. The HTML report therefore distinguishes code evidence from professional assessment.</p></article>
       </div>
       <pre aria-label="Observed SNX safety state">snx status --json
@@ -214,7 +215,7 @@ local model servers: ok=false</pre>
     <section>
       <h2>Audit basis</h2>
       <p>This report evaluates the implementation against <a href="HARNESS_CONSTITUTION.md">HARNESS_CONSTITUTION.md</a>, <a href="HARNESS_GENOME.md">HARNESS_GENOME.md</a>, and <a href="HARNESS_ARCHITECTURE.md">HARNESS_ARCHITECTURE.md</a>, with repository rules in <a href="../architecture.md">docs/architecture.md</a>, <a href="../threat-model.md">docs/threat-model.md</a>, and <a href="../sandbox-security.md">docs/sandbox-security.md</a>.</p>
-      <p class="mono">Audit date: 2026-08-08 · target: Silent-Nexus main · release: 2.16.4 · focused TUI redesign implemented</p>
+      <p class="mono">Audit date: 2026-08-08 · target: Silent-Nexus main · release: 2.16.4 installed · commit: 7e378d4 · focused TUI redesign implemented</p>
     </section>
   </main>
   <footer><div class="wrap">Silent Nexus Design Office · exact, candid, unfussy · audit artifact</div></footer>
