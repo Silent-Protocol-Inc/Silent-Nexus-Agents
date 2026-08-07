@@ -34,12 +34,9 @@ jobs:
         shell: bash
         run: |
           version="$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
-          if [[ "$version" != "2.16.3" ]]; then
-            echo "release workflow certifies workspace version 2.16.3 only (got $version)" >&2
-            exit 1
-          fi
-          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v2.16.3" ]]; then
-            echo "release workflow accepts tag v2.16.3 only (got $GITHUB_REF_NAME)" >&2
+          expected_tag="v$version"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            echo "release tag $GITHUB_REF_NAME does not match workspace version $version (expected $expected_tag)" >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
