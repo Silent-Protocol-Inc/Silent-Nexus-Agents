@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.16.5] — 2026-08-08
+
+Approvals now state the real execution boundary at the moment consent is given.
+
+### Changed
+
+- **Exact approval isolation.** CLI and TUI approvals name the configured
+  isolation level and show the filesystem and network boundary instead of
+  collapsing the safety state to an `active` boolean.
+- Non-isolated actions explicitly combine the backend level with “not isolating
+  this action”; persistent-grant eligibility remains fail-closed and unchanged.
+
+### Evidence
+
+- A local fixed-fixture comparison with OpenCode, Hermes, Codex, and Claude
+  showed that exact workspace/capability language is more useful at consent
+  time than generic safety labels, while dense startup chrome and raw event
+  noise reduce scanability.
+- Added focused TUI coverage proving that path-validation-only, filesystem
+  guardrails, unrestricted network, and the absence of action isolation are all
+  visible together.
+
+### Compatibility
+
+PATCH. Approval presentation only; policy, grant eligibility, sandbox selection,
+action execution, storage, configuration, and command contracts are unchanged.
+
 ## [2.16.4] — 2026-08-08
 
 The TUI now follows the Harness Genome's restraint rule: less permanent chrome,

@@ -9,6 +9,7 @@ use nexus_agent::{
     ApprovalDecision, ApprovalHandler, PlanDecision, PlanReviewRequest, PlanReviewResponse,
 };
 use nexus_policy::ActionRequest;
+use nexus_sandbox::IsolationReport;
 use tokio::sync::{mpsc, oneshot};
 
 /// A request surfaced to the render loop.
@@ -17,6 +18,7 @@ pub struct ApprovalRequest {
     pub arguments: serde_json::Value,
     pub reason: String,
     pub sandbox_active: bool,
+    pub isolation: IsolationReport,
     pub reply: oneshot::Sender<ApprovalDecision>,
 }
 
@@ -34,14 +36,20 @@ pub struct PlanReview {
 pub struct TuiApprover {
     tx: mpsc::UnboundedSender<ApprovalRequest>,
     plan_tx: mpsc::UnboundedSender<PlanReview>,
+    isolation: IsolationReport,
 }
 
 impl TuiApprover {
     pub fn new(
         tx: mpsc::UnboundedSender<ApprovalRequest>,
         plan_tx: mpsc::UnboundedSender<PlanReview>,
+        isolation: IsolationReport,
     ) -> Self {
-        Self { tx, plan_tx }
+        Self {
+            tx,
+            plan_tx,
+            isolation,
+        }
     }
 }
 
@@ -79,6 +87,7 @@ impl ApprovalHandler for TuiApprover {
             arguments: arguments.clone(),
             reason: reason.to_string(),
             sandbox_active,
+            isolation: self.isolation.clone(),
             reply,
         };
         if self.tx.send(req).is_err() {

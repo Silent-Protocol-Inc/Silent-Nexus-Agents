@@ -3718,7 +3718,7 @@ fn draw_summary(f: &mut Frame, area: Rect, summary: &SummaryPreview, t: &Theme) 
 fn draw_approval(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     let Some(req) = &st.pending else { return };
     let w = area.width.saturating_sub(8).min(80);
-    let h = 20u16.min(area.height.saturating_sub(4));
+    let h = 22u16.min(area.height.saturating_sub(4));
     let rect = overlay_rect(area, w, h);
     f.render_widget(Clear, rect);
 
@@ -3749,19 +3749,21 @@ fn draw_approval(f: &mut Frame, area: Rect, st: &State, t: &Theme) {
     lines.push(kv(t, "reason", &req.reason));
     let iso = if req.sandbox_active {
         Line::from(vec![
-            Span::styled(format!("{:>12}  ", "sandbox"), t.muted()),
-            Span::styled("active", t.success()),
+            Span::styled(format!("{:>12}  ", "isolation"), t.muted()),
+            Span::styled(req.isolation.level.clone(), t.success()),
         ])
     } else {
         Line::from(vec![
-            Span::styled(format!("{:>12}  ", "sandbox"), t.muted()),
+            Span::styled(format!("{:>12}  ", "isolation"), t.muted()),
             Span::styled(
-                "NOT isolating this action",
+                format!("{} · not isolating this action", req.isolation.level),
                 t.failure().add_modifier(Modifier::BOLD),
             ),
         ])
     };
     lines.push(iso);
+    lines.push(kv(t, "filesystem", &req.isolation.filesystem));
+    lines.push(kv(t, "network", &req.isolation.network));
     lines.push(Line::from(""));
     if let Some(edit) = &st.approval_edit {
         lines.push(Line::from(Span::styled(
@@ -5017,8 +5019,29 @@ mod tests {
             arguments: serde_json::json!({"command": "rm -rf build"}),
             reason: "destructive command".into(),
             sandbox_active: false,
+            isolation: nexus_sandbox::IsolationReport {
+                backend: "process".into(),
+                strength: nexus_sandbox::IsolationStrength::None,
+                level: "path-validation-only".into(),
+                filesystem: "workspace-boundary checks only".into(),
+                filesystem_access: nexus_sandbox::FilesystemAccess::WorkspaceWrite,
+                network: "unrestricted".into(),
+                resources: "host limits".into(),
+                caveats: vec!["no filesystem isolation".into()],
+            },
             reply,
         }
+    }
+
+    #[test]
+    fn approval_names_the_real_isolation_filesystem_and_network_boundary() {
+        let mut state = representative_state();
+        state.pending = Some(pending_approval());
+        let frame = render_state_text(&mut state, 100, 30);
+        assert!(frame.contains("path-validation-only"), "{frame}");
+        assert!(frame.contains("workspace-boundary checks only"), "{frame}");
+        assert!(frame.contains("unrestricted"), "{frame}");
+        assert!(frame.contains("not isolating this action"), "{frame}");
     }
 
     fn representative_state() -> State {

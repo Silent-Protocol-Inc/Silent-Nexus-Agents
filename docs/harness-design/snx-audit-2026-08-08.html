@@ -59,9 +59,9 @@
     <div class="wrap">
       <div class="eyebrow">Silent Nexus · professional audit · 08 Aug 2026</div>
       <h1>Less chrome.<br><span style="color:var(--teal)">The control plane can breathe.</span></h1>
-      <p class="lede">SNX 2.16.4 applies the Harness Genome's restraint rule directly: one-row identity, one-row safety status, a full-width conversation by default, and context only when the operator asks to inspect it. The safety architecture remains unchanged; the presentation now gives it a calmer hierarchy.</p>
-      <div class="meta"><span class="chip">release 2.16.4</span><span class="chip">branch main</span><span class="chip">post-redesign audit</span><span class="chip">scope: TUI presentation</span></div>
-      <nav class="nav" aria-label="Report sections"><a href="#verdict">Verdict</a><a href="#design">Design critique</a><a href="#findings">Findings</a><a href="#comparison">Comparison</a><a href="#evidence">Evidence</a><a href="#next">Next actions</a></nav>
+      <p class="lede">SNX 2.16.5 keeps the focused 2.16.4 composition and closes its most important consent defect: approvals now name the real isolation level, filesystem boundary, and network boundary. The change is grounded in live fixed-fixture runs through OpenCode, Hermes, Codex, and Claude—not feature-list comparison.</p>
+      <div class="meta"><span class="chip">2.16.4 released</span><span class="chip">2.16.5 candidate</span><span class="chip">four live harness probes</span><span class="chip">scope: consent legibility</span></div>
+      <nav class="nav" aria-label="Report sections"><a href="#verdict">Verdict</a><a href="#design">Design critique</a><a href="#findings">Findings</a><a href="#benchmark">Live benchmark</a><a href="#comparison">Scores</a><a href="#evidence">Evidence</a><a href="#next">Next actions</a></nav>
     </div>
   </header>
 
@@ -70,7 +70,7 @@
       <h2>Executive verdict</h2>
       <div class="grid">
         <article class="card"><div class="score">A<span style="font-size:1.3rem">−</span></div><h3>Design maturity</h3><p>The system architecture remains strong, and the default TUI now has a disciplined hierarchy. Command parity and approval isolation wording remain the main contract work.</p></article>
-        <article class="card"><div class="score">High</div><h3>Current operational risk</h3><p>This machine is running with <code>path-validation-only</code>: no filesystem isolation and unrestricted network. The binary correctly reports this, but approval UI collapses it to a boolean.</p></article>
+        <article class="card"><div class="score">High</div><h3>Current operational risk</h3><p>This machine still runs with <code>path-validation-only</code>: no filesystem isolation and unrestricted network. Version 2.16.5 does not weaken or disguise that condition; it places those exact facts inside every attended approval.</p></article>
         <article class="card"><div class="score">PASS</div><h3>Workspace result</h3><p>Formatting, locked Clippy, locked workspace tests, rustdoc, dependency audit/policy, and secret scan pass. The TUI result is 245 passed, 0 failed, 2 visual-only tests ignored.</p></article>
         <article class="card wide"><h3>Professional opinion</h3><p>SNX is no longer the most crowded harness in its default presentation. It still carries more operational evidence than Claude Code or Codex, but that evidence is now layered: the conversation leads, safety remains pinned, and context becomes an operator-requested inspection surface.</p></article>
       </div>
@@ -84,7 +84,7 @@
         <p>The header now carries identity and workspace only. The footer is one safety strip. Active Context stays closed even on wide terminals until the operator opens it. Secondary thinking, branch, token, view, and mode metadata no longer grow permanent footer rows; full detail remains available through <code>Ctrl+S</code>, <code>Ctrl+E</code>, and the context inspection flow.</p>
       </div>
       <h3 style="margin-top:30px">Golden-rule scorecard · operator-facing design, 1–5</h3>
-      <p><strong>5</strong> means clear and disciplined in the default flow; <strong>1</strong> means the rule is frequently violated. This score is intentionally separate from SNX’s <strong>4.2 / 5 system-design score</strong>.</p>
+      <p><strong>5</strong> means clear and disciplined in the default flow; <strong>1</strong> means the rule is frequently violated. This score is intentionally separate from SNX’s <strong>4.5 / 5 system-design score</strong>.</p>
       <table>
         <thead><tr><th>Rule</th><th>Score</th><th>Audit judgment</th></tr></thead>
         <tbody>
@@ -94,9 +94,9 @@
           <tr><td><strong>Consistency and standards</strong></td><td class="pass"><strong>4 / 5</strong></td><td>One-row chrome now holds across wide, desktop, compact, narrow, and mobile classes.</td></tr>
           <tr><td><strong>Visibility of system status</strong></td><td class="pass"><strong>4 / 5</strong></td><td>SNX is unusually good at exposing activity and evidence. The problem is prioritisation, not lack of status.</td></tr>
           <tr><td><strong>Recognition over recall</strong></td><td class="pass"><strong>4 / 5</strong></td><td>The safety strip names the containment level and the route to details; inspection shortcuts still require some learned vocabulary.</td></tr>
-          <tr><td><strong>Error prevention and recovery</strong></td><td class="warn"><strong>3 / 5</strong></td><td>The architecture supports recovery, but weak isolation and approval states are not yet prominent enough at the moment of consent.</td></tr>
+          <tr><td><strong>Error prevention and recovery</strong></td><td class="pass"><strong>4 / 5</strong></td><td>Approval now names the actual isolation, filesystem, and network boundary before consent. Provider recovery and doctor exit semantics remain follow-up work.</td></tr>
           <tr><td><strong>Accessibility and calm density</strong></td><td class="pass"><strong>4 / 5</strong></td><td>Responsive, ASCII, no-colour, reduced-motion, and software-keyboard cases are covered by passing render tests.</td></tr>
-          <tr><td><strong>Overall operator-facing design</strong></td><td class="pass"><strong>4.1 / 5</strong></td><td>Evidence-rich without exposing the entire control room by default. Remaining deductions are approval-boundary wording and command-surface duplication.</td></tr>
+          <tr><td><strong>Overall operator-facing design</strong></td><td class="pass"><strong>4.4 / 5</strong></td><td>Evidence-rich, calm by default, and now exact at the moment of consent. Remaining deductions are command-surface duplication and provider-recovery consistency.</td></tr>
         </tbody>
       </table>
       <div class="card full" style="margin-top:16px"><h3>Implemented design argument</h3><p><strong>Focused</strong> is now the default projection, <strong>Activity</strong> remains available through timeline/detail controls, and <strong>Inspect</strong> is entered deliberately through status and context views. The implementation changed presentation only; timeline durability, approvals, policy, sandbox selection, and evidence storage were not weakened.</p></div>
@@ -107,12 +107,11 @@
       <p>Severity reflects operator safety, contract drift, and likelihood of a wrong decision—not code style.</p>
 
       <article class="finding high">
-        <h3><span>H-01 · Approval UI hides isolation strength</span><span class="sev">HIGH</span></h3>
+        <h3><span>H-01 · Approval UI hides isolation strength</span><span class="sev">RESOLVED 2.16.5</span></h3>
         <p><strong>Principles:</strong> H-2 visible boundary; H-5 safety is legible; Constitution 2.3.</p>
-        <p>The agent passes only <code>strong_isolation()</code> as a boolean into the approval handler. Both CLI and TUI render “active” or “NOT isolating this action”. That hides the material difference between strong container isolation, approval-only host execution, and path-validation-only execution. The current observed machine state is the weakest mode, with unrestricted network.</p>
-        <p><strong>Impact:</strong> an operator can understand that approval is required but not the real containment level before consenting.</p>
-        <p><strong>Evidence:</strong> <a href="../../crates/nexus-agent/src/loop_engine.rs#L4714">loop_engine.rs:4714–4716</a>; <a href="../../crates/nexus-cli/src/approval.rs#L53">CLI approval:53–58</a>; <a href="../../crates/nexus-tui/src/render.rs#L3904">TUI approval:3904–3917</a>.</p>
-        <p><strong>Recommendation:</strong> pass a serializable <code>IsolationReport</code> or stable level into approval presentation and show at minimum <code>strong</code>, <code>approval-only-host</code>, or <code>path-validation-only</code>, plus filesystem and network caveats. Disable persistent grants unless the displayed report proves the eligibility.</p>
+        <p><strong>Before:</strong> CLI and TUI reduced action isolation to “active” or “NOT isolating this action”, hiding the material difference between strong containment, approval-only host execution, and path-validation-only execution.</p>
+        <p><strong>After:</strong> each attended approval carries the backend's <code>IsolationReport</code> into presentation and shows its stable level plus filesystem and network descriptions. If that specific action is not isolated, the warning says so alongside the configured level. Existing one-time-only and persistent-grant rules are unchanged.</p>
+        <p><strong>Benchmark influence:</strong> Claude's trust gate was the strongest observed consent surface because it named the exact workspace and concrete read/edit/execute capabilities. SNX adopts that specificity while going further on runtime containment.</p>
       </article>
 
       <article class="finding medium">
@@ -149,13 +148,34 @@
       </article>
     </section>
 
+    <section id="benchmark">
+      <h2>Live tiny-ledger benchmark</h2>
+      <p>Each harness received a fresh Git snapshot containing the same Python standard-library CLI stub, README contract, and 12 acceptance tests. The prompt required implementation, test execution, no test edits, no writes outside the project, and an evidence-qualified final answer. Model outcome and harness UX are scored separately: a better model result does not prove a better control plane.</p>
+      <table>
+        <thead><tr><th>Harness / selected model</th><th>Run result</th><th>What the CLI exposed</th><th>Model result</th></tr></thead>
+        <tbody>
+          <tr><td><strong>OpenCode</strong><br><span class="mono">north-mini-code-free</span></td><td class="fail">BLOCKED · 8 s</td><td>JSON emitted one upstream <code>401</code>, but offered no local authentication recovery. Its 100×30 mini TUI was the calmest launch: prompt, mode, and one command hint.</td><td>No files changed; baseline tests remained failing.</td></tr>
+          <tr><td><strong>Hermes</strong><br><span class="mono">stepfun/step-3.7-flash:free</span></td><td class="fail">BLOCKED · 5 s</td><td>Failure named the missing Nous Portal token directly. The TUI used the whole frame for branding, dividers, summary chrome, and a right rail—the most crowded observed launch.</td><td>No files changed; baseline tests remained failing.</td></tr>
+          <tr><td><strong>Codex</strong><br><span class="mono">gpt-5.6-luna</span></td><td class="pass">PASS · 54 s</td><td>JSONL clearly separated commentary, command start/completion, file change, test evidence, and final summary. Repeated stale model-cache errors polluted otherwise excellent evidence, and the interactive launch was intercepted by an update modal.</td><td>Only <code>ledger.py</code> changed; all 12 tests passed. It also ran syntax and diff checks and recovered from a denied cleanup command.</td></tr>
+          <tr><td><strong>Claude</strong><br><span class="mono">haiku (Fable unavailable)</span></td><td class="warn">PARTIAL · 131 s</td><td>Fable failed with an actionable credit message and <code>/model</code> recovery. Haiku wrote passing code, but loaded customization generated a very large event stream, created three ad-hoc test scripts, and stalled in approval retries. The interactive trust gate clearly named the workspace and read/edit/execute capability.</td><td><code>ledger.py</code> passed all 12 tests when checked externally; the harness did not complete its requested verification/final handoff cleanly.</td></tr>
+        </tbody>
+      </table>
+      <div class="grid" style="margin-top:16px">
+        <article class="card"><h3>Best deletion lesson</h3><p>OpenCode mini proves a launch surface needs little more than a prompt, current mode, and one route to commands. SNX's focused view should stay this calm.</p></article>
+        <article class="card"><h3>Best evidence lesson</h3><p>Codex's typed JSONL lifecycle makes attempted, running, completed, and verified work easy to distinguish. SNX should preserve its durable timeline while suppressing repetitive incidental diagnostics.</p></article>
+        <article class="card"><h3>Best consent lesson</h3><p>Claude's trust gate names the exact workspace and capabilities. SNX 2.16.5 applies the same concreteness to isolation, filesystem, and network at every approval.</p></article>
+        <article class="card"><h3>Strongest warning</h3><p>Hermes and customized Claude show two forms of clutter: permanent chrome and procedural event volume. Neither should be copied into SNX.</p></article>
+      </div>
+      <p class="mono">Run integrity: one execution per harness; fixed 100×30 launch capture; identical fixture hashes; model APIs required network; OpenCode and Hermes could not authenticate their selected free routes. Results are observations, not a general model leaderboard.</p>
+    </section>
+
     <section id="comparison">
-      <h2>Local comparison</h2>
-      <p>Collected from executable paths and local <code>--version</code>/<code>--help</code> output on this machine. Ollama was not installed or on PATH, so it is not treated as an available competitor.</p>
+      <h2>Observed harness design scores</h2>
+      <p>Scores now combine installed help evidence, fixed-size startup captures, and the live fixture run. They measure the harness interface—not model intelligence, popularity, or integration count. Ollama was not installed and remains out of the live harness benchmark.</p>
       <table>
         <thead><tr><th>Tool</th><th>Observed version</th><th>Strongest design advantage</th><th>Relative weakness versus SNX</th></tr></thead>
         <tbody>
-          <tr><td><strong>snx</strong><br><span class="mono">/home/Sans/.local/bin/snx</span></td><td>2.16.4</td><td>Typed policy, workspace guard, approval scope, honest sandbox reporting, durable goals/timeline, and a focused-by-default TUI.</td><td>Smaller ecosystem; approval surface currently hides isolation level; CLI/TUI contract still partly duplicated.</td></tr>
+          <tr><td><strong>snx</strong><br><span class="mono">/home/Sans/.local/bin/snx</span></td><td>2.16.5 candidate</td><td>Typed policy, durable evidence timeline, calm default composition, and approval-time filesystem/network/isolation truth.</td><td>Smaller ecosystem; CLI/TUI command contract still partly duplicated; provider recovery is less standardized than the safety vocabulary.</td></tr>
           <tr><td><strong>Claude Code</strong><br><span class="mono">/usr/bin/claude</span></td><td>2.1.186</td><td>Excellent mature interactive/non-interactive split, structured output modes, resume, screen-reader mode, rich agent/tool configuration.</td><td>Help exposes explicit permission bypass modes; local safety posture depends more heavily on selected permission mode and external sandboxing.</td></tr>
           <tr><td><strong>Codex CLI</strong><br><span class="mono">/usr/bin/codex</span></td><td>0.145.0</td><td>Strong workflow breadth: exec, review, resume/fork/archive, sandbox command, MCP, app server, JSONL events.</td><td>More powerful surface means more policy/configuration complexity; local help exposes dangerous bypass flags that require careful operator discipline.</td></tr>
           <tr><td><strong>OpenCode</strong><br><span class="mono">/usr/bin/opencode</span></td><td>1.17.13</td><td>Broad provider/server/session ecosystem, JSON event format, web/ACP/MCP integration.</td><td><code>--auto</code> is intentionally broad; server, share, CORS, and remote features expand the exposure model.</td></tr>
@@ -168,15 +188,15 @@
       <table>
         <thead><tr><th>Design</th><th>Control<br>boundary</th><th>Evidence<br>status</th><th>Continuity</th><th>CLI / JSON<br>automation</th><th>Extension<br>surface</th><th>Terminal<br>legibility</th><th>Overall</th></tr></thead>
         <tbody>
-          <tr><td><strong>SNX</strong></td><td>5</td><td>5</td><td>5</td><td>3</td><td>3</td><td>5</td><td><strong>4.3 / 5</strong></td></tr>
-          <tr><td><strong>Claude Code</strong></td><td>4</td><td>3</td><td>4</td><td>5</td><td>5</td><td>4</td><td><strong>4.2 / 5</strong></td></tr>
-          <tr><td><strong>Codex CLI</strong></td><td>4</td><td>4</td><td>5</td><td>5</td><td>5</td><td>4</td><td><strong>4.5 / 5</strong></td></tr>
-          <tr><td><strong>OpenCode</strong></td><td>3</td><td>3</td><td>4</td><td>5</td><td>5</td><td>4</td><td><strong>4.0 / 5</strong></td></tr>
-          <tr><td><strong>Hermes Agent</strong></td><td>2</td><td>3</td><td>5</td><td>4</td><td>5</td><td>3</td><td><strong>3.7 / 5</strong></td></tr>
+          <tr><td><strong>SNX 2.16.5</strong></td><td>5</td><td>5</td><td>5</td><td>3</td><td>3</td><td>5</td><td><strong>4.5 / 5</strong></td></tr>
+          <tr><td><strong>Claude Code</strong></td><td>4</td><td>3</td><td>3</td><td>5</td><td>5</td><td>3</td><td><strong>3.8 / 5</strong></td></tr>
+          <tr><td><strong>Codex CLI</strong></td><td>4</td><td>5</td><td>5</td><td>5</td><td>5</td><td>4</td><td><strong>4.7 / 5</strong></td></tr>
+          <tr><td><strong>OpenCode</strong></td><td>3</td><td>2</td><td>3</td><td>5</td><td>5</td><td>5</td><td><strong>3.8 / 5</strong></td></tr>
+          <tr><td><strong>Hermes Agent</strong></td><td>2</td><td>3</td><td>4</td><td>4</td><td>5</td><td>2</td><td><strong>3.3 / 5</strong></td></tr>
           <tr><td><strong>Ollama</strong></td><td>1</td><td>1</td><td>2</td><td>4</td><td>2</td><td>4</td><td><strong>2.3 / 5</strong></td></tr>
         </tbody>
       </table>
-      <div class="card full" style="margin-top:16px"><h3>Interpretation</h3><p>Codex still leads on breadth and machine-facing workflow surfaces. SNX now leads this local set on terminal legibility because it combines a focused default with unusually explicit evidence and safety state. Its score remains held back by partial JSON coverage, command-contract duplication, and the H-01 approval isolation defect.</p></div>
+      <div class="card full" style="margin-top:16px"><h3>Interpretation</h3><p>Codex leads the live run on machine-facing event structure and completed the fixture cleanly. SNX leads on safety-boundary depth and matches OpenCode's restraint without sacrificing durable operational evidence. Claude's code result was good, but the harness run demonstrates why model quality and system design must remain separate scores.</p></div>
       <div class="card full" style="margin-top:16px"><h3>Where SNX should win</h3><p>SNX does not need to beat these tools on integrations. Its differentiator should be the clearest local control plane: exact action boundary, honest isolation level, durable evidence, safe continuation, and CLI/TUI parity. That is a coherent product argument and aligns directly with the Genome.</p></div>
     </section>
 
@@ -184,7 +204,8 @@
       <h2>Verification evidence</h2>
       <div class="grid">
         <article class="card"><h3>Repository checks</h3><p><span class="pass">PASS</span> complete validation floor</p><p>Formatting, locked workspace Clippy with warnings denied, locked workspace tests, rustdoc with warnings denied, <code>cargo audit</code>, <code>cargo deny check</code>, and the tracked-secret scan passed.</p></article>
-        <article class="card"><h3>Installed release</h3><p><span class="pass">PASS</span> 2.16.4 active</p><p>The validated package was atomically installed at <code>~/.local/bin/snx</code>. Build, packaged, and installed binaries share SHA-256 <code>5d8f6553…758e59</code>; runtime metadata identifies commit <code>7e378d4</code>.</p></article>
+        <article class="card"><h3>Released baseline</h3><p><span class="pass">PASS</span> 2.16.4 tagged and active</p><p>Every production gate and clean-checkout reproducibility check passed before tag <code>v2.16.4</code>. Build, package, and installed binaries share SHA-256 <code>ea4114e…90083</code>; runtime metadata identifies commit <code>1360f80</code>.</p></article>
+        <article class="card"><h3>Candidate change</h3><p><span class="pass">WORKSPACE PASS</span> 2.16.5</p><p>Formatting, warning-free locked Clippy, all locked workspace tests, warning-free rustdoc, advisory audit, dependency policy, and secret scan pass. Deterministic package/install evidence is added after the committed release gate.</p></article>
         <article class="card"><h3>Observed runtime</h3><p class="warn">CONDITIONAL</p><p><code>snx doctor --deep</code> passed configuration, database, permissions, migration, WAL, release metadata, and binary-integrity checks. It honestly warns that this host uses path-validation-only execution with an approval-only fallback and unrestricted network.</p></article>
         <article class="card"><h3>Design review limit</h3><p class="warn">MANUAL WORK REMAINS</p><p>No human operator study, screen-reader pass, real approval exercise, or visual regression baseline was performed in this audit. The HTML report therefore distinguishes code evidence from professional assessment.</p></article>
       </div>
@@ -204,18 +225,18 @@ local model servers: ok=false</pre>
     <section id="next">
       <h2>Recommended order of work</h2>
       <ol>
-        <li><strong>Fix H-01 first:</strong> carry the full <code>IsolationReport</code> into CLI/TUI approvals and show the exact network/filesystem caveats.</li>
+        <li><strong>Standardize provider recovery:</strong> every authentication, quota, and unavailable-model error should name the failed route and one concrete recovery action, without leaking raw provider payloads.</li>
         <li><strong>Define doctor’s exit contract:</strong> make readiness usable by CI and operators without requiring ad hoc JSON parsing.</li>
         <li><strong>Close command parity:</strong> generate or validate the Clap surface from the app registry.</li>
-        <li><strong>Run a real operator pass:</strong> the automated width, ASCII, reduced-motion, and resize cases are green; complete a human pass for denied action, provider outage, interrupt, and resume.</li>
-        <li><strong>Benchmark the product argument:</strong> compare time-to-correct-consent and time-to-recovery against the installed tools, not only feature count.</li>
+        <li><strong>Run a consent study:</strong> measure time-to-correct-consent for strong, host-approval, and path-validation-only actions at 80×24 and 100×30.</li>
+        <li><strong>Repeat the fixture:</strong> rerun free OpenCode and Hermes routes after authentication so their model-result score is no longer blocked by environment state.</li>
       </ol>
     </section>
 
     <section>
       <h2>Audit basis</h2>
       <p>This report evaluates the implementation against <a href="HARNESS_CONSTITUTION.md">HARNESS_CONSTITUTION.md</a>, <a href="HARNESS_GENOME.md">HARNESS_GENOME.md</a>, and <a href="HARNESS_ARCHITECTURE.md">HARNESS_ARCHITECTURE.md</a>, with repository rules in <a href="../architecture.md">docs/architecture.md</a>, <a href="../threat-model.md">docs/threat-model.md</a>, and <a href="../sandbox-security.md">docs/sandbox-security.md</a>.</p>
-      <p class="mono">Audit date: 2026-08-08 · target: Silent-Nexus main · release: 2.16.4 installed · commit: 7e378d4 · focused TUI redesign implemented</p>
+      <p class="mono">Audit date: 2026-08-08 · baseline: v2.16.4 installed · candidate: 2.16.5 · live fixture: OpenCode, Hermes, Codex, Claude · focused consent redesign implemented</p>
     </section>
   </main>
   <footer><div class="wrap">Silent Nexus Design Office · exact, candid, unfussy · audit artifact</div></footer>

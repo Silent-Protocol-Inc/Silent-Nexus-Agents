@@ -362,7 +362,14 @@ async fn event_loop(
         }
     });
 
-    let approver: Arc<dyn ApprovalHandler> = Arc::new(TuiApprover::new(appr_tx, plan_tx));
+    let approval_network = match app.config.sandbox.network.as_str() {
+        "off" | "none" => nexus_sandbox::NetworkMode::Off,
+        "full" => nexus_sandbox::NetworkMode::Full,
+        _ => nexus_sandbox::NetworkMode::Restricted,
+    };
+    let approval_isolation = app.sandbox.backend().isolation(approval_network);
+    let approver: Arc<dyn ApprovalHandler> =
+        Arc::new(TuiApprover::new(appr_tx, plan_tx, approval_isolation));
     let mut session: Option<SessionId> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut last_background_poll = std::time::Instant::now();

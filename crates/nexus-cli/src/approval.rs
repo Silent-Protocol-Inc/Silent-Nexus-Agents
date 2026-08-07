@@ -8,16 +8,18 @@
 use crate::ui::Ui;
 use nexus_agent::{ApprovalDecision, ApprovalHandler};
 use nexus_policy::ActionRequest;
+use nexus_sandbox::IsolationReport;
 use std::io::{BufRead, Write};
 
 /// Prompts the user on the terminal for each escalated action.
 pub struct InteractiveApprover {
     ui: Ui,
+    isolation: IsolationReport,
 }
 
 impl InteractiveApprover {
-    pub fn new(ui: Ui) -> Self {
-        Self { ui }
+    pub fn new(ui: Ui, isolation: IsolationReport) -> Self {
+        Self { ui, isolation }
     }
 }
 
@@ -51,11 +53,16 @@ impl ApprovalHandler for InteractiveApprover {
         }
         ui.field("reason", reason);
         let iso = if sandbox_active {
-            ui.green("active")
+            ui.green(&self.isolation.level)
         } else {
-            ui.red("NOT isolating this action")
+            ui.red(&format!(
+                "{} · NOT isolating this action",
+                self.isolation.level
+            ))
         };
-        ui.field("sandbox", &iso);
+        ui.field("isolation", &iso);
+        ui.field("filesystem", &self.isolation.filesystem);
+        ui.field("network", &self.isolation.network);
 
         // Read a decision. EOF / non-tty => deny (safe default).
         let persistent_allowed = sandbox_active && action.session_grant_allowed();

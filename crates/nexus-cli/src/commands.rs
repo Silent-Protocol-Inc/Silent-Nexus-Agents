@@ -116,7 +116,15 @@ pub async fn run(app: &Arc<App>, args: RunArgs, json: bool) -> Result<()> {
     let approver: Arc<dyn ApprovalHandler> = if args.yes {
         Arc::new(AutoApproveApprover)
     } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        Arc::new(InteractiveApprover::new(ui))
+        let network = match app.config.sandbox.network.as_str() {
+            "off" | "none" => nexus_sandbox::NetworkMode::Off,
+            "full" => nexus_sandbox::NetworkMode::Full,
+            _ => nexus_sandbox::NetworkMode::Restricted,
+        };
+        Arc::new(InteractiveApprover::new(
+            ui,
+            app.sandbox.backend().isolation(network),
+        ))
     } else {
         Arc::new(AutoDenyApprover)
     };
