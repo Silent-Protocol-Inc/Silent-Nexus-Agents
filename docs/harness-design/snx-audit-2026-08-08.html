@@ -59,8 +59,8 @@
     <div class="wrap">
       <div class="eyebrow">Silent Nexus · professional audit · 08 Aug 2026</div>
       <h1>Less chrome.<br><span style="color:var(--teal)">The control plane can breathe.</span></h1>
-      <p class="lede">SNX 2.16.5 keeps the focused 2.16.4 composition and closes its most important consent defect: approvals now name the real isolation level, filesystem boundary, and network boundary. The change is grounded in live fixed-fixture runs through OpenCode, Hermes, Codex, and Claude—not feature-list comparison.</p>
-      <div class="meta"><span class="chip">2.16.4 released</span><span class="chip">2.16.5 candidate</span><span class="chip">four live harness probes</span><span class="chip">scope: consent legibility</span></div>
+      <p class="lede">Installed SNX 2.16.5 keeps the focused 2.16.4 composition and closes its most important consent defect: approvals now name the real isolation level, filesystem boundary, and network boundary. The change is grounded in live fixed-fixture runs through OpenCode, Hermes, Codex, and Claude—not feature-list comparison.</p>
+      <div class="meta"><span class="chip">2.16.4 tagged baseline</span><span class="chip">2.16.5 installed</span><span class="chip">four live harness probes</span><span class="chip">scope: consent legibility</span></div>
       <nav class="nav" aria-label="Report sections"><a href="#verdict">Verdict</a><a href="#design">Design critique</a><a href="#findings">Findings</a><a href="#benchmark">Live benchmark</a><a href="#comparison">Scores</a><a href="#evidence">Evidence</a><a href="#next">Next actions</a></nav>
     </div>
   </header>
@@ -175,7 +175,7 @@
       <table>
         <thead><tr><th>Tool</th><th>Observed version</th><th>Strongest design advantage</th><th>Relative weakness versus SNX</th></tr></thead>
         <tbody>
-          <tr><td><strong>snx</strong><br><span class="mono">/home/Sans/.local/bin/snx</span></td><td>2.16.5 candidate</td><td>Typed policy, durable evidence timeline, calm default composition, and approval-time filesystem/network/isolation truth.</td><td>Smaller ecosystem; CLI/TUI command contract still partly duplicated; provider recovery is less standardized than the safety vocabulary.</td></tr>
+          <tr><td><strong>snx</strong><br><span class="mono">/home/Sans/.local/bin/snx</span></td><td>2.16.5</td><td>Typed policy, durable evidence timeline, calm default composition, and approval-time filesystem/network/isolation truth.</td><td>Smaller ecosystem; CLI/TUI command contract still partly duplicated; provider recovery is less standardized than the safety vocabulary.</td></tr>
           <tr><td><strong>Claude Code</strong><br><span class="mono">/usr/bin/claude</span></td><td>2.1.186</td><td>Excellent mature interactive/non-interactive split, structured output modes, resume, screen-reader mode, rich agent/tool configuration.</td><td>Help exposes explicit permission bypass modes; local safety posture depends more heavily on selected permission mode and external sandboxing.</td></tr>
           <tr><td><strong>Codex CLI</strong><br><span class="mono">/usr/bin/codex</span></td><td>0.145.0</td><td>Strong workflow breadth: exec, review, resume/fork/archive, sandbox command, MCP, app server, JSONL events.</td><td>More powerful surface means more policy/configuration complexity; local help exposes dangerous bypass flags that require careful operator discipline.</td></tr>
           <tr><td><strong>OpenCode</strong><br><span class="mono">/usr/bin/opencode</span></td><td>1.17.13</td><td>Broad provider/server/session ecosystem, JSON event format, web/ACP/MCP integration.</td><td><code>--auto</code> is intentionally broad; server, share, CORS, and remote features expand the exposure model.</td></tr>
@@ -205,7 +205,7 @@
       <div class="grid">
         <article class="card"><h3>Repository checks</h3><p><span class="pass">PASS</span> complete validation floor</p><p>Formatting, locked workspace Clippy with warnings denied, locked workspace tests, rustdoc with warnings denied, <code>cargo audit</code>, <code>cargo deny check</code>, and the tracked-secret scan passed.</p></article>
         <article class="card"><h3>Released baseline</h3><p><span class="pass">PASS</span> 2.16.4 tagged and active</p><p>Every production gate and clean-checkout reproducibility check passed before tag <code>v2.16.4</code>. Build, package, and installed binaries share SHA-256 <code>ea4114e…90083</code>; runtime metadata identifies commit <code>1360f80</code>.</p></article>
-        <article class="card"><h3>Candidate change</h3><p><span class="pass">WORKSPACE PASS</span> 2.16.5</p><p>Formatting, warning-free locked Clippy, all locked workspace tests, warning-free rustdoc, advisory audit, dependency policy, and secret scan pass. Deterministic package/install evidence is added after the committed release gate.</p></article>
+        <article class="card"><h3>Installed improvement</h3><p><span class="pass">PRODUCTION GATE PASS</span> 2.16.5</p><p>Every local production gate passed, including the clean-checkout mock flow and deterministic archive comparison. Build, packaged, and installed binaries share SHA-256 <code>b72090f5…11dfe5</code> and embed commit <code>f217533</code>.</p></article>
         <article class="card"><h3>Observed runtime</h3><p class="warn">CONDITIONAL</p><p><code>snx doctor --deep</code> passed configuration, database, permissions, migration, WAL, release metadata, and binary-integrity checks. It honestly warns that this host uses path-validation-only execution with an approval-only fallback and unrestricted network.</p></article>
         <article class="card"><h3>Design review limit</h3><p class="warn">MANUAL WORK REMAINS</p><p>No human operator study, screen-reader pass, real approval exercise, or visual regression baseline was performed in this audit. The HTML report therefore distinguishes code evidence from professional assessment.</p></article>
       </div>
@@ -236,7 +236,7 @@ local model servers: ok=false</pre>
     <section>
       <h2>Audit basis</h2>
       <p>This report evaluates the implementation against <a href="HARNESS_CONSTITUTION.md">HARNESS_CONSTITUTION.md</a>, <a href="HARNESS_GENOME.md">HARNESS_GENOME.md</a>, and <a href="HARNESS_ARCHITECTURE.md">HARNESS_ARCHITECTURE.md</a>, with repository rules in <a href="../architecture.md">docs/architecture.md</a>, <a href="../threat-model.md">docs/threat-model.md</a>, and <a href="../sandbox-security.md">docs/sandbox-security.md</a>.</p>
-      <p class="mono">Audit date: 2026-08-08 · baseline: v2.16.4 installed · candidate: 2.16.5 · live fixture: OpenCode, Hermes, Codex, Claude · focused consent redesign implemented</p>
+      <p class="mono">Audit date: 2026-08-08 · baseline: v2.16.4 tagged · installed: 2.16.5 at f217533 · live fixture: OpenCode, Hermes, Codex, Claude · focused consent redesign verified</p>
     </section>
   </main>
   <footer><div class="wrap">Silent Nexus Design Office · exact, candid, unfussy · audit artifact</div></footer>
