@@ -71,6 +71,7 @@ fn seg_style(color: crate::layout::SegColor, t: &Theme) -> Style {
         SegColor::Primary => t.primary(),
         SegColor::Secondary => t.secondary(),
         SegColor::Warning => t.warning(),
+        SegColor::Failure => t.failure(),
         SegColor::Success => t.success(),
         SegColor::Text => t.text(),
         SegColor::Muted => t.muted(),
@@ -172,7 +173,10 @@ pub fn draw(f: &mut Frame, st: &mut State) {
         draw_welcome(f, rows[1], st, &t);
     }
 
-    if rl.show_sidebar {
+    // ACTIVE CONTEXT is an inspection surface, not permanent wallpaper. Even
+    // on a wide terminal it appears only after the operator opens it, leaving
+    // the conversation as the single dominant surface by default.
+    if rl.show_sidebar && st.context_pane.is_open() {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(40), Constraint::Length(rl.sidebar_width)])
@@ -367,19 +371,8 @@ fn draw_header(
     t: &Theme,
     rl: &crate::layout::ResponsiveLayout,
 ) {
-    use crate::layout::{compact_path, sandbox_short, WidthClass};
+    use crate::layout::{compact_path, WidthClass};
     let san = |s: &str| nexus_core::sanitize::sanitize_terminal(s);
-    let model = san(&st.bar.model_label);
-    let agent = san(&st.bar.agent);
-    let sandbox_full = san(&st.bar.sandbox_level);
-    let sbx = sandbox_short(&sandbox_full).to_string();
-    let net = san(&st.bar.network);
-    let model_style = if st.bar.model_ok {
-        t.primary()
-    } else {
-        t.warning()
-    };
-
     let narrow = matches!(rl.width_class, WidthClass::Narrow | WidthClass::Mobile);
     let ws_wide = compact_path(
         &st.bar.workspace,
@@ -411,99 +404,12 @@ fn draw_header(
         }
         spans
     };
-    let lbl = |s: &'static str, t: &Theme| Span::styled(s, t.muted());
-
-    let budget = rl.header_rows as usize;
-    let mut lines: Vec<Line<'static>> = match rl.width_class {
-        WidthClass::Wide => {
-            let mut r = mark(t);
-            r.push(Span::styled(format!("  {ws}"), t.muted()));
-            r.push(lbl("  MODEL ", t));
-            r.push(Span::styled(model.clone(), model_style));
-            r.push(lbl("  AGENT ", t));
-            r.push(Span::styled(agent.clone(), t.secondary()));
-            r.push(lbl("  SANDBOX ", t));
-            r.push(Span::styled(sandbox_full.clone(), t.sandbox(&sandbox_full)));
-            vec![Line::from(r)]
-        }
-        WidthClass::Desktop => {
-            let mut r = mark(t);
-            r.push(Span::styled(format!("  {ws}"), t.muted()));
-            r.push(lbl("  M ", t));
-            r.push(Span::styled(model.clone(), model_style));
-            r.push(lbl("  A ", t));
-            r.push(Span::styled(agent.clone(), t.secondary()));
-            r.push(lbl("  SBX ", t));
-            r.push(Span::styled(sbx.clone(), t.sandbox(&sandbox_full)));
-            vec![Line::from(r)]
-        }
-        WidthClass::Compact if budget >= 2 => {
-            let mut r0 = mark(t);
-            r0.push(Span::styled(format!("  {ws}"), t.muted()));
-            let r1 = vec![
-                lbl("MODEL ", t),
-                Span::styled(model.clone(), model_style),
-                lbl("  AGENT ", t),
-                Span::styled(agent.clone(), t.secondary()),
-                lbl("  SANDBOX ", t),
-                Span::styled(sbx.clone(), t.sandbox(&sandbox_full)),
-            ];
-            vec![Line::from(r0), Line::from(r1)]
-        }
-        WidthClass::Narrow if budget >= 3 => {
-            let mut r0 = mark(t);
-            r0.push(Span::styled(format!("  {ws}"), t.muted()));
-            let r1 = vec![
-                lbl("MODEL ", t),
-                Span::styled(model.clone(), model_style),
-                lbl("  AGENT ", t),
-                Span::styled(agent.clone(), t.secondary()),
-            ];
-            let r2 = vec![
-                lbl("SANDBOX ", t),
-                Span::styled(sbx.clone(), t.sandbox(&sandbox_full)),
-            ];
-            vec![Line::from(r0), Line::from(r1), Line::from(r2)]
-        }
-        WidthClass::Mobile if budget >= 3 => {
-            let mut r0 = mark(t);
-            r0.push(Span::styled(format!(" {ws}"), t.muted()));
-            let r1 = vec![
-                lbl("M ", t),
-                Span::styled(model.clone(), model_style),
-                lbl("  A ", t),
-                Span::styled(agent.clone(), t.secondary()),
-            ];
-            let r2 = vec![
-                lbl("SBX ", t),
-                Span::styled(sbx.clone(), t.sandbox(&sandbox_full)),
-                lbl("  NET ", t),
-                Span::styled(net.clone(), t.text()),
-            ];
-            vec![Line::from(r0), Line::from(r1), Line::from(r2)]
-        }
-        // Height-reduced fallbacks: keep identity + model (priority 1) visible.
-        _ if budget >= 2 => {
-            let mut r0 = mark(t);
-            r0.push(Span::styled("  ", t.text()));
-            r0.push(lbl("M ", t));
-            r0.push(Span::styled(model.clone(), model_style));
-            let r1 = vec![
-                lbl("A ", t),
-                Span::styled(agent.clone(), t.secondary()),
-                lbl("  SBX ", t),
-                Span::styled(sbx.clone(), t.sandbox(&sandbox_full)),
-            ];
-            vec![Line::from(r0), Line::from(r1)]
-        }
-        _ => {
-            let mut r0 = mark(t);
-            r0.push(Span::styled("  ", t.text()));
-            r0.push(lbl("M ", t));
-            r0.push(Span::styled(model.clone(), model_style));
-            vec![Line::from(r0)]
-        }
-    };
+    let mut row = mark(t);
+    row.push(Span::styled(
+        format!("{}{}", if narrow { " " } else { "  " }, ws),
+        t.muted(),
+    ));
+    let mut lines = vec![Line::from(row)];
 
     // Working spinner lives on the first header row.
     if (st.busy > 0 || st.mode == Mode::Running) && !lines.is_empty() {
@@ -1973,7 +1879,7 @@ fn draw_footer(
     rl: &crate::layout::ResponsiveLayout,
     context_visible: bool,
 ) {
-    use crate::layout::{pack_status, sandbox_short, SegColor, StatusSegment, WidthClass};
+    use crate::layout::{pack_status, sandbox_short, SegColor, StatusSegment};
     if st.pending.is_some() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -2016,23 +1922,41 @@ fn draw_footer(
         allow_hide,
     };
 
-    // Priority 0/1 lead so they always land on the first row(s).
+    // One calm safety strip. Current state and actual isolation are the only
+    // permanent facts; everything else may yield to width and remains in the
+    // full Ctrl+S status view.
+    let sandbox_level = san(&st.bar.sandbox_level);
+    let sandbox_color = if sandbox_level.contains("container") {
+        SegColor::Success
+    } else if sandbox_level.contains("path-validation") || sandbox_level.contains("none") {
+        SegColor::Failure
+    } else {
+        SegColor::Warning
+    };
     let mut segs = vec![
         mk("STATUS", "", "", state_label, state_color, 0, false),
         mk(
-            "MODEL",
-            "M",
-            "M",
-            san(&st.bar.model_label),
-            if st.bar.model_ok {
-                SegColor::Primary
-            } else {
-                SegColor::Warning
-            },
+            "SANDBOX",
+            "SBX",
+            "SBX",
+            sandbox_short(&sandbox_level).to_string(),
+            sandbox_color,
             0,
             false,
         ),
     ];
+    // Plan mode changes what Enter will do, so it shares the permanent strip.
+    if st.bar.plan_mode {
+        segs.push(mk(
+            "PLAN",
+            "PLAN",
+            "PLN",
+            "on".to_string(),
+            SegColor::Warning,
+            0,
+            false,
+        ));
+    }
     if st.new_events > 0 {
         segs.push(mk(
             "NEW",
@@ -2068,55 +1992,36 @@ fn draw_footer(
         ));
     }
     segs.push(mk(
+        "",
+        "",
+        "",
+        "Ctrl+S details".to_string(),
+        SegColor::Muted,
+        1,
+        true,
+    ));
+    segs.push(mk(
         "NET",
         "NET",
         "NET",
         san(&st.bar.network),
         SegColor::Text,
-        2,
+        1,
         true,
     ));
     segs.push(mk(
-        "SANDBOX",
-        "SBX",
-        "SBX",
-        sandbox_short(&san(&st.bar.sandbox_level)).to_string(),
-        SegColor::Secondary,
-        2,
+        "MODEL",
+        "M",
+        "M",
+        san(&st.bar.model_label),
+        if st.bar.model_ok {
+            SegColor::Primary
+        } else {
+            SegColor::Warning
+        },
+        1,
         true,
     ));
-    segs.push(mk(
-        "AGENT",
-        "A",
-        "A",
-        san(&st.bar.agent),
-        SegColor::Secondary,
-        2,
-        true,
-    ));
-    segs.push(mk(
-        "MODE",
-        "MODE",
-        "MODE",
-        san(&st.bar.permission_mode),
-        SegColor::Secondary,
-        2,
-        true,
-    ));
-    // Priority 0 and never hidden: plan mode changes what a message will do,
-    // so an operator must not be able to lose the indicator to a narrow
-    // terminal and then wonder why their instruction was refused.
-    if st.bar.plan_mode {
-        segs.push(mk(
-            "PLAN",
-            "PLAN",
-            "PLN",
-            "on".to_string(),
-            SegColor::Warning,
-            0,
-            false,
-        ));
-    }
     // A custom persona changes who is answering, which is at least as visible
     // a change as the agent role beside it. The built-in identity contributes
     // no segment: the default needs no announcement. The adults-only marker is
@@ -2137,17 +2042,6 @@ fn draw_footer(
             true,
         ));
     }
-    if let Some(branch) = &st.bar.git_branch {
-        segs.push(mk(
-            "BRANCH",
-            "BR",
-            "BR",
-            san(branch),
-            SegColor::Secondary,
-            2,
-            true,
-        ));
-    }
     if !st.search_matches.is_empty() {
         segs.push(mk(
             "MATCH",
@@ -2163,49 +2057,7 @@ fn draw_footer(
             true,
         ));
     }
-    // The cache figure is appended only once there is one: on providers that
-    // report nothing a permanent `0≡` would read as a broken cache rather than
-    // as an absent one, and it would cost width the segment cannot spare.
-    let tokens = if st.bar.tokens_cached > 0 {
-        format!(
-            "{}↑ {}↓ {}≡",
-            st.bar.tokens_in, st.bar.tokens_out, st.bar.tokens_cached
-        )
-    } else {
-        format!("{}↑ {}↓", st.bar.tokens_in, st.bar.tokens_out)
-    };
-    segs.push(mk("TOKENS", "TOK", "TOK", tokens, SegColor::Text, 3, true));
-    segs.push(mk(
-        "VIEW",
-        "VIEW",
-        "V",
-        format!(
-            "{}·{}",
-            st.transcript_filter.as_str(),
-            st.detail_level.as_str()
-        ),
-        SegColor::Muted,
-        3,
-        true,
-    ));
-    // Informational, so it drops before anything the operator must see.
-    segs.push(mk(
-        "THINK",
-        "THK",
-        "T",
-        st.thinking_mode.bar_value().to_string(),
-        SegColor::Muted,
-        3,
-        true,
-    ));
-    let help = match rl.width_class {
-        WidthClass::Wide => "Enter send · PgUp/PgDn scroll · ? help",
-        WidthClass::Desktop | WidthClass::Compact => "Enter send · ? help",
-        WidthClass::Narrow | WidthClass::Mobile => "? help",
-    };
-    segs.push(mk("", "", "", help.to_string(), SegColor::Muted, 1, false));
-
-    let (rows, hidden) = pack_status(
+    let (rows, _hidden) = pack_status(
         &segs,
         area.width as usize,
         rl.status_rows as usize,
@@ -2228,12 +2080,6 @@ fn draw_footer(
             spans.push(Span::styled(cell.value.clone(), seg_style(cell.color, t)));
         }
         lines.push(Line::from(spans));
-    }
-    if hidden > 0 {
-        if let Some(last) = lines.last_mut() {
-            last.spans
-                .push(Span::styled(format!("  +{hidden} ⋯ Ctrl+S"), t.muted()));
-        }
     }
     f.render_widget(Paragraph::new(lines), area);
 }
@@ -4470,11 +4316,9 @@ mod tests {
                     agent: "orchestrator".into(),
                     sandbox_level: "approval-only-host".into(),
                     network: "restricted".into(),
-                    git_branch: Some("main".into()),
                     tokens_in: 12,
                     tokens_out: 8,
                     tokens_cached: 0,
-                    permission_mode: "default".into(),
                     plan_mode: false,
                     persona: String::new(),
                     persona_marked: false,
@@ -4672,22 +4516,26 @@ mod tests {
         state.turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
         let lines = processing_lines(&state, &state.theme.clone(), 36);
         assert_eq!(lines.len(), 1);
-        assert!(line_text(&lines[0]).contains('·'));
+        assert!(line_text(&lines[0]).contains("12s"));
     }
 
     #[test]
-    fn the_status_bar_reports_the_active_thinking_mode() {
+    fn the_focused_status_strip_omits_secondary_thinking_mode() {
         let mut state = activity_state();
-        for (mode, expected) in [
-            (nexus_core::ThinkingMode::Off, "fast"),
-            (nexus_core::ThinkingMode::On, "deep"),
-            (nexus_core::ThinkingMode::Auto, "auto"),
+        for mode in [
+            nexus_core::ThinkingMode::Off,
+            nexus_core::ThinkingMode::On,
+            nexus_core::ThinkingMode::Auto,
         ] {
             state.thinking_mode = mode;
             let text = render_state_text(&mut state, 80, 24);
             assert!(
-                text.contains(expected),
-                "status bar should report `{expected}` for {mode:?}"
+                !text.contains(&format!("THK {}", mode.bar_value())),
+                "secondary thinking mode crowded the focused strip for {mode:?}:\n{text}"
+            );
+            assert!(
+                text.contains("Ctrl+S"),
+                "hidden detail has no escape hatch:\n{text}"
             );
         }
     }
@@ -4718,7 +4566,10 @@ mod tests {
         let lines = processing_lines(&state, &state.theme.clone(), 36);
         assert_eq!(lines.len(), 1);
         let text = line_text(&lines[0]);
-        let skin = nexus_core::brand::Skin::nexus();
+        let skin = nexus_core::brand::Skin::nexus().for_terminal(
+            crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+            false,
+        );
         let action = state.status_action(&skin);
         assert!(text.starts_with(skin.icon(action)), "{text}");
         assert!(text.contains(action.verb()), "{text}");
@@ -4737,7 +4588,10 @@ mod tests {
         // The row no longer announces the product at all — it says what the
         // agent is doing, which is the only thing an operator needs from it.
         assert!(!text.contains("NEXUS"), "{text}");
-        let skin = nexus_core::brand::Skin::nexus();
+        let skin = nexus_core::brand::Skin::nexus().for_terminal(
+            crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+            false,
+        );
         assert!(text.contains(state.status_action(&skin).verb()), "{text}");
 
         state.active_turn_id = None;
@@ -4750,7 +4604,10 @@ mod tests {
         );
         let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
         assert!(!text.contains("NEXUS"), "{text}");
-        let skin = nexus_core::brand::Skin::nexus();
+        let skin = nexus_core::brand::Skin::nexus().for_terminal(
+            crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+            false,
+        );
         assert!(text.contains(state.status_action(&skin).verb()), "{text}");
     }
 
@@ -4762,7 +4619,10 @@ mod tests {
         let text = line_text(&processing_lines(&state, &state.theme.clone(), 80)[0]);
         // Reduced motion stops the movement; it does not swap in a different
         // design, so the state's own icon is still what leads the row.
-        let skin = nexus_core::brand::Skin::nexus();
+        let skin = nexus_core::brand::Skin::nexus().for_terminal(
+            crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+            true,
+        );
         assert!(
             text.starts_with(&format!("  {}", skin.icon(state.status_action(&skin)))),
             "{text}"
@@ -4995,6 +4855,13 @@ mod tests {
         .to_string()
     }
 
+    fn terminal_skin() -> nexus_core::brand::Skin {
+        nexus_core::brand::Skin::nexus().for_terminal(
+            crate::glyphs::tier() != crate::glyphs::GlyphTier::Ascii,
+            false,
+        )
+    }
+
     fn tool(status: TimelineStatus, exit: Option<&str>) -> TimelineKind {
         let _ = status;
         TimelineKind::ToolExecution {
@@ -5022,7 +4889,11 @@ mod tests {
             tool(TimelineStatus::Completed, Some("ok")),
             Some(340),
         );
-        assert_eq!(done, "✓ fs.read_file · read 412 lines  340ms");
+        let done_mark = terminal_skin().lifecycle(nexus_core::brand::LifecycleMark::Done);
+        assert_eq!(
+            done,
+            format!("{done_mark} fs.read_file · read 412 lines  340ms")
+        );
 
         let failed = component_card(
             TimelineStatus::Failed,
@@ -5030,7 +4901,11 @@ mod tests {
             tool(TimelineStatus::Failed, Some("127")),
             Some(90),
         );
-        assert!(failed.starts_with("✕ fs.read_file · exit 127"), "{failed}");
+        let failed_mark = terminal_skin().lifecycle(nexus_core::brand::LifecycleMark::Failed);
+        assert!(
+            failed.starts_with(&format!("{failed_mark} fs.read_file · exit 127")),
+            "{failed}"
+        );
     }
 
     #[test]
@@ -5061,7 +4936,11 @@ mod tests {
             },
             None,
         );
-        assert!(card.starts_with("✓ Updated render.rs  +42 −7"), "{card}");
+        let done_mark = terminal_skin().lifecycle(nexus_core::brand::LifecycleMark::Done);
+        assert!(
+            card.starts_with(&format!("{done_mark} Updated render.rs  +42 −7")),
+            "{card}"
+        );
         assert_eq!(card.matches("+42").count(), 1, "counts appear once: {card}");
     }
 
@@ -5077,7 +4956,11 @@ mod tests {
             },
             None,
         );
-        assert!(error.starts_with("✕ provider_timeout"), "{error}");
+        let failed_mark = terminal_skin().lifecycle(nexus_core::brand::LifecycleMark::Failed);
+        assert!(
+            error.starts_with(&format!("{failed_mark} provider_timeout")),
+            "{error}"
+        );
         assert!(error.contains("retryable"), "{error}");
         assert_eq!(
             error.matches("timed out after 30s").count(),
@@ -5109,7 +4992,8 @@ mod tests {
             },
             None,
         );
-        assert!(card.starts_with("✓ Answer"), "{card}");
+        let done_mark = terminal_skin().lifecycle(nexus_core::brand::LifecycleMark::Done);
+        assert!(card.starts_with(&format!("{done_mark} Answer")), "{card}");
         assert!(
             !card.contains("FINAL ANSWER") && !card.contains("DONE  "),
             "no diagnostic labels on the answer: {card}",
@@ -5149,11 +5033,9 @@ mod tests {
                 agent: "orchestrator".into(),
                 sandbox_level: "approval-only-host".into(),
                 network: "approval".into(),
-                git_branch: Some("feature/timeline".into()),
                 tokens_in: 2048,
                 tokens_out: 512,
                 tokens_cached: 0,
-                permission_mode: "default".into(),
                 plan_mode: false,
                 persona: String::new(),
                 persona_marked: false,
@@ -5351,6 +5233,36 @@ mod tests {
             })
     }
 
+    #[test]
+    fn wide_terminals_keep_context_closed_until_the_operator_opens_it() {
+        let mut focused = representative_state();
+        focused.context_pane = crate::state::ContextPane::Closed;
+        let default_frame = render_state_text(&mut focused, 120, 40);
+        assert!(!default_frame.contains("ACTIVE CONTEXT"), "{default_frame}");
+
+        let mut inspecting = representative_state();
+        inspecting.context_pane = crate::state::ContextPane::Open;
+        let inspect_frame = render_state_text(&mut inspecting, 120, 40);
+        assert!(inspect_frame.contains("ACTIVE CONTEXT"), "{inspect_frame}");
+        assert!(
+            inspect_frame.contains("Transcript cards now stream in place"),
+            "opening context must not replace the conversation:\n{inspect_frame}"
+        );
+    }
+
+    #[test]
+    #[ignore = "visual aid: cargo test -p nexus-tui focused_layout_looks_right -- --ignored --nocapture"]
+    fn focused_layout_looks_right() {
+        for (width, height) in [(80, 24), (120, 40)] {
+            let mut state = representative_state();
+            state.context_pane = crate::state::ContextPane::Closed;
+            println!(
+                "\n--- {width}x{height} focused ---\n{}",
+                render_state_text(&mut state, width, height)
+            );
+        }
+    }
+
     /// The defect this fixes, at the dimensions it was reported at.
     ///
     /// A tablet in landscape sits around 100×30 and gets the rail. Its software
@@ -5515,17 +5427,22 @@ mod tests {
         // the panel, and the three wide-and-tall sizes, which show the rail,
         // are byte-identical. Hashes reproduced across three consecutive runs;
         // the 45×20, 80×24, 100×14, and 120×16 frames were read first.
+        // Rebaselined a fifth time for the focused-by-default composition:
+        // header and status chrome are each one row, ACTIVE CONTEXT opens only
+        // on request even on wide terminals, and secondary status metadata
+        // moved behind Ctrl+S. The 80×24 and 120×40 focused frames were printed
+        // and read before these hashes were accepted.
         let expected = [
-            (36, 20, 10_993_650_595_741_144_642),
-            (45, 20, 17_384_499_503_187_027_622),
-            (60, 18, 11_558_688_284_225_948_033),
-            (60, 20, 1_455_096_483_603_950_913),
-            (80, 24, 17_843_421_910_808_649_627),
-            (100, 14, 4_202_616_081_264_061_873),
-            (120, 16, 6_383_065_140_103_738_961),
-            (100, 30, 11_649_898_669_383_203_317),
-            (120, 40, 10_496_186_880_083_422_686),
-            (160, 50, 10_700_549_245_251_536_142),
+            (36, 20, 2_229_699_235_630_751_252),
+            (45, 20, 13_098_258_820_684_967_868),
+            (60, 18, 18_208_311_031_086_913_681),
+            (60, 20, 3_070_201_655_212_446_934),
+            (80, 24, 2_854_641_199_212_149_951),
+            (100, 14, 3_635_096_033_405_783_319),
+            (120, 16, 5_869_087_279_875_571_362),
+            (100, 30, 246_647_547_079_977_667),
+            (120, 40, 3_162_509_382_011_281_235),
+            (160, 50, 18_017_486_531_773_595_551),
         ];
         assert_eq!(actual, expected);
     }

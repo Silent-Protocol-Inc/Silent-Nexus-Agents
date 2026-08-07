@@ -141,28 +141,11 @@ pub fn classify(area: Rect) -> ResponsiveLayout {
     let width_class = WidthClass::from_width(area.width);
     let height_class = HeightClass::from_height(area.height);
 
-    let mut header_rows = match width_class {
-        WidthClass::Wide | WidthClass::Desktop => 1,
-        WidthClass::Compact => 2,
-        WidthClass::Narrow | WidthClass::Mobile => 3,
-    };
-    let mut status_rows = match width_class {
-        WidthClass::Wide | WidthClass::Desktop => 1,
-        WidthClass::Compact | WidthClass::Narrow => 2,
-        WidthClass::Mobile => 3,
-    };
-    // Height pressure: never spend rows we do not have.
-    match height_class {
-        HeightClass::VeryShort => {
-            header_rows = 1;
-            status_rows = 1;
-        }
-        HeightClass::Short => {
-            header_rows = header_rows.min(2);
-            status_rows = status_rows.min(2);
-        }
-        _ => {}
-    }
+    // Less chrome, more work. Identity gets one row and the live safety strip
+    // gets one row at every size. Secondary metadata belongs in Ctrl+S and the
+    // context panel rather than growing permanent stacks around the transcript.
+    let header_rows = 1;
+    let status_rows = 1;
 
     let input_max_rows: u16 = match (width_class, height_class) {
         (_, HeightClass::VeryShort) => 1,
@@ -229,6 +212,7 @@ pub fn classify(area: Rect) -> ResponsiveLayout {
 pub fn sandbox_short(level: &str) -> &str {
     match level {
         "path-validation-only" => "path-only",
+        "approval-only-host" => "host-approval",
         "restricted-local-process" => "restricted",
         "container-isolated" => "container",
         "namespace-isolated" => "namespace",
@@ -306,6 +290,7 @@ pub enum SegColor {
     Primary,
     Secondary,
     Warning,
+    Failure,
     Success,
     Text,
     Muted,
@@ -523,21 +508,21 @@ mod tests {
 
     #[test]
     fn classify_mobile_stacks_and_hides_sidebar() {
-        // Standard height keeps the full mobile stack (3 rows each).
+        // Mobile keeps the same calm one-line chrome as every other size.
         let rl = classify(rect(40, 24));
         assert_eq!(rl.width_class, WidthClass::Mobile);
         assert_eq!(rl.height_class, HeightClass::Standard);
         assert!(!rl.show_sidebar);
-        assert_eq!(rl.header_rows, 3);
-        assert_eq!(rl.status_rows, 3);
+        assert_eq!(rl.header_rows, 1);
+        assert_eq!(rl.status_rows, 1);
         assert_eq!(rl.input_max_rows, 3);
         assert!(rl.compact_labels);
 
         // Short mobile portrait clamps chrome rows to fit the height.
         let short = classify(rect(40, 20));
         assert_eq!(short.height_class, HeightClass::Short);
-        assert_eq!(short.header_rows, 2);
-        assert_eq!(short.status_rows, 2);
+        assert_eq!(short.header_rows, 1);
+        assert_eq!(short.status_rows, 1);
     }
 
     #[test]

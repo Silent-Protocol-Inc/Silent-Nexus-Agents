@@ -104,13 +104,11 @@ pub struct StatusBar {
     pub agent: String,
     pub sandbox_level: String,
     pub network: String,
-    pub git_branch: Option<String>,
     pub tokens_in: usize,
     pub tokens_out: usize,
     /// Input the provider served from cache — a subset of `tokens_in`, not an
     /// addition to it. Zero on providers that report nothing.
     pub tokens_cached: usize,
-    pub permission_mode: String,
     /// Plan mode is on. Shown next to the permission mode because that is what
     /// it overrides: while it is set, the turn refuses to change anything
     /// regardless of what the permission preset would otherwise allow.
@@ -1014,11 +1012,9 @@ mod tests {
                 agent: "orchestrator".into(),
                 sandbox_level: "process".into(),
                 network: "approval".into(),
-                git_branch: Some("main".into()),
                 tokens_in: 0,
                 tokens_out: 0,
                 tokens_cached: 0,
-                permission_mode: "default".into(),
                 plan_mode: false,
                 persona: String::new(),
                 persona_marked: false,

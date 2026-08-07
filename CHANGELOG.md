@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.16.4] — 2026-08-08
+
+The TUI now follows the Harness Genome's restraint rule: less permanent chrome,
+more room for the operator's work.
+
+### Changed
+
+- **Focused-by-default terminal composition.** The identity header and safety
+  strip each use one row at every terminal size.
+- Active Context is closed by default, including on wide terminals, and opens
+  only when the operator asks to inspect it.
+- The default safety strip prioritizes current state, real sandbox strength,
+  plan mode, network state, and a route to full details. Secondary metadata no
+  longer accumulates across multiple footer rows.
+- Approval-only host execution is labelled `host-approval`, avoiding language
+  that could be mistaken for strong containment.
+- TUI status state no longer duplicates Git branch and permission-mode fields
+  that have no authoritative job in the focused projection.
+
+### Verified
+
+- Added focused-layout, wide-terminal context, responsive snapshot, ASCII, and
+  environment-independent lifecycle-mark coverage.
+- Repaired eight stale render assertions that previously made the TUI suite red
+  under an ASCII terminal despite correct output.
+
+### Compatibility
+
+PATCH. Presentation-only behavior change; no schema, configuration, migration,
+command, policy, approval, sandbox, or timeline-storage change.
+
 ## [2.16.3] — 2026-08-05
 
 Three fixes to persona delivery, all found by running the harness rather than

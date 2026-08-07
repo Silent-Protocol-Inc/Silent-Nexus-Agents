@@ -319,17 +319,6 @@ impl Theme {
             _ => self.failure().add_modifier(Modifier::BOLD),
         }
     }
-    /// Honest sandbox coloring: only strong isolation shows success.
-    pub fn sandbox(&self, level: &str) -> Style {
-        let level = level.to_lowercase();
-        if level.contains("container") {
-            self.success()
-        } else if level.contains("path-validation") || level.contains("none") {
-            self.failure()
-        } else {
-            self.warning()
-        }
-    }
 }
 
 #[cfg(test)]

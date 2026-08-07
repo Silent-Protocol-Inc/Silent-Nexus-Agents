@@ -261,11 +261,9 @@ fn build_bar(app: &App) -> StatusBar {
         agent: app.active_agent(),
         sandbox_level: app.sandbox.backend().isolation(net).level,
         network: app.config.sandbox.network.clone(),
-        git_branch: nexus_app::gitx::branch(&app.workspace),
         tokens_in: 0,
         tokens_out: 0,
         tokens_cached: 0,
-        permission_mode: nexus_app::services::permission_mode(&app.config.policy).to_string(),
         plan_mode: app.read_ui_state(|s| s.plan_mode),
         // A failed lookup must not blank the bar into claiming the built-in
         // identity is active when a custom one might be. Resolution already
@@ -4713,11 +4711,9 @@ mod tests {
                 agent: "general".into(),
                 sandbox_level: "test".into(),
                 network: "off".into(),
-                git_branch: Some("main".into()),
                 tokens_in: 0,
                 tokens_out: 0,
                 tokens_cached: 0,
-                permission_mode: "default".into(),
                 plan_mode: false,
                 persona: String::new(),
                 persona_marked: false,
